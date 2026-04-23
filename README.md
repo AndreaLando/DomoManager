@@ -1,4 +1,4 @@
-# Arduino-Domotics
+# DomoManager
 Complete framework to get Arduino as Home controller for devices using:
 - modbus RTU: to communicate with a wide range of I/O (Digital inputs, relays outputs, Power meters, Temperature and Humidity sensors); There is a built in library of compatible devices and can be added as your needs.
 - modbus TCP Server: to communicate with Weintek touch-panels
