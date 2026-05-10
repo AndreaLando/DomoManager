@@ -1,3 +1,6 @@
+<img width="953" height="229" alt="Logo ritagliato" src="https://github.com/user-attachments/assets/175eceb4-ebb4-493a-879d-60997ca9b314" />
+
+
 # DomoManager
 A modular, non‑blocking, and extensible automation framework that transforms Arduino Opta into a professional home automation controller.
 
