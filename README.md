@@ -212,3 +212,10 @@ Real-time diagnostics include:
 - Wired sensor states
 - Automation engine status
 - Watchdog and spike detection
+
+License
+=========
+DomoManager is distributed under a Dual License:
+- Free for personal, educational, and research use
+- Commercial use requires a paid license or written authorization
+See the LICENSE file for details.
