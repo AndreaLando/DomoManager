@@ -84,7 +84,7 @@ Tutto orchestrato da un buffer centrale, unica fonte di verità.
 
 \*\*https://www.facebook.com/people/DOMO-Manager/61573260488406\*\*
 
-
+\*\*https://www.facebook.com/groups/1310697874371245/\*\*
 
 \## 📄 Documentazione
 
