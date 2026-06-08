@@ -70,25 +70,25 @@ Tutto orchestrato da un buffer centrale, unica fonte di verità.
 
 \## 🌐 Sito Web
 
-\*\*https://www.domo-manager.it\*\*
+\*\*https://www.domo-manager.it
 
 
 
 \## 📧 Email di contatto
 
-\*\*mail@domo-manager.it\*\*
+\*\*mail@domo-manager.it
 
 
 
 \## 📘 Pagina Facebook
 
-\*\*https://www.facebook.com/people/DOMO-Manager/61573260488406\*\*
+\*\*https://www.facebook.com/people/DOMO-Manager/61573260488406
 
-\*\*https://www.facebook.com/groups/1310697874371245/\*\*
+\*\*https://www.facebook.com/groups/1310697874371245/
 
 \## 📄 Documentazione
 
-\*\*https://www.domo-manager.it/biblioteca-documenti/*\*
+\*\*https://www.domo-manager.it/biblioteca-documenti/
 
 
 
