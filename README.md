@@ -1,3 +1,5 @@
+<img width="953" height="229" alt="Logo ritagliato senza sfondo" src="https://github.com/user-attachments/assets/eb342960-48e6-4788-a0da-986a7873fbc5" />
+
 \# ============================================================
 
 \# DOMOMANAGER – PRESENTAZIONE UFFICIALE
