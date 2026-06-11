@@ -820,6 +820,8 @@ private:
     static inline WiredSensorsManager ws;
     static inline FrontendConfig::Security cfgCopy;
     static inline bool initialized = false;
+    static inline AlarmBitmaskManager alarmMask;
+
 
     // ============================================================
     // VALIDATION
@@ -920,11 +922,26 @@ public:
         cfgCopy = *cfg;
 
         ws.Init(cfg->sensors, cfg->count, cfg->startupInhibitMs);
+        alarmMask.BuildMap(ws);
 
         ws.Zones().EnableAll(true);
         ws.Zones().EngageAll(true);
 
         initialized = true;
+
+        alarmMask.SetCallback([](uint64_t newMask,
+                         uint64_t currentMask,
+                         uint64_t memMask,
+                         size_t bitIndex,
+                         size_t sensorIndex,
+                         SensorChannelType type)
+        {
+            LOG_IF("SecurityOrchestrator",
+                "NEW SIGNAL ALARM: bit=%u sensor=%u type=%u",
+                (unsigned)bitIndex,
+                (unsigned)sensorIndex,
+                (unsigned)type);
+        });
 
         LOG_IF("SecurityOrchestrator",
                "Setup: sensors=%u startupInhibit=%u ms",
@@ -939,33 +956,23 @@ public:
         if (!initialized)
             return false;
 
-        ws.Process();
+        // 1) Process sensori
+        ws.Process(now);
 
-        auto* dm = DomoManager::instance;
-        if (dm) {
-            for (size_t i = 0; i < ws.Count(); i++) {
-
-                auto* s = ws.GetSensor(i);
-                const auto& c = ws.GetConfig()[i];
-
-                bool allFalse = true;
-                for (auto& fn : c.readers)
-                    if (fn()) { allFalse = false; break; }
-
-                if (allFalse)
-                    s->Reset();
-            }
-        }
-
+        // 2) Process eventi per tipo
         auto& zones = ws.Zones();
-        zones.NewAlarmByType(SensorChannelType::RT);
-        zones.NewAlarmByType(SensorChannelType::H24);
-        zones.NewAlarmByType(SensorChannelType::MASK);
-        zones.NewAlarmByType(SensorChannelType::LEN);
-
+        zones.ProcessAllTypes();
+        
+        // 3) Stato aggregato
         system.ComputeFrom(ws);
-        bool changed = system.hasChanged();
 
+        // 4) Aggiorna bitmask per-segnale
+        bool engaged = true; // oppure leggi da Modbus / pannello
+        alarmMask.SetEngage(engaged);
+        alarmMask.ComputeCurrent(ws);
+
+        // 5) Diagnostica
+        bool changed = system.hasChanged();
         if (changed) {
             LOG_IF("SecurityOrchestrator", "===== SECURITY ZONES =====");
 

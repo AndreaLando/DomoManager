@@ -78,10 +78,14 @@ public:
         _scale  = scaleFromFormat(fmt);
     }
 
-    inline void Start() {
+    inline void Start(uint32_t now) {
         _running = true;
-        _startMillis = millis();
+        _startMillis = now;
         _Q = false;
+    }
+
+    inline void Start() {
+        Start(millis());
     }
 
     inline void Stop() {
@@ -89,9 +93,13 @@ public:
         _Q = false;
     }
 
-    inline float ET() const {
+    inline float ET(uint32_t now) const {
         if (!_running) return 0.0f;
-        return (millis() - _startMillis) / _scale;
+        return (now - _startMillis) / _scale;
+    }
+
+    inline float ET() const {
+        return ET(millis());
     }
 
     inline bool Q() const {
@@ -130,6 +138,15 @@ public:
         if (in) {
             if (!_running) Start();
             _Q = (ET() >= _preset);
+        } else {
+            Stop();
+        }
+    }
+
+    inline void Run(bool in, uint32_t now) {
+        if (in) {
+            if (!_running) Start(now);
+            _Q = (ET(now) >= _preset);
         } else {
             Stop();
         }
@@ -239,8 +256,10 @@ public:
     FastDebounce(uint16_t t) : time(t), last(0), stable(false) {}
 
     inline bool update(bool input) {
-        uint32_t now = millis();
+        return update(input, millis());
+    }
 
+    inline bool update(bool input, uint32_t now ) {
         if (input != stable) {
             // cambiamento rilevato → aspetta che sia stabile per time ms
             if (now - last >= time) {

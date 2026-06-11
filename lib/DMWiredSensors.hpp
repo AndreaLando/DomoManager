@@ -24,7 +24,7 @@
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
 
-const unsigned long RT_DELAY      = 250;   // 0.25 sec
+const unsigned long RT_DELAY      = 50;   // 0.25 sec
 const unsigned long INITIAL_DELAY = 500;   // 0.5 sec
 
 enum class SensorChannelType {
@@ -136,32 +136,40 @@ public:
     }
 
     // Main processing
-    void Run(std::initializer_list<bool> inputs) {
+    void Run(const bool* inputs, size_t count, unsigned long now) {
         bool tempAlarm = false;
-        auto in = inputs.begin();
 
-        // Aggiorna il timer di inibizione avvio
-        startupInhibit.Run(true);
-        bool inhibit = !startupInhibit.Q();   // TRUE = blocco attivo
+        startupInhibit.Run(true, now);
+        bool inhibit = !startupInhibit.Q();
 
         if (!_disabled) {
-            for (auto& ch : channels) {
 
-                bool raw = (ch.pin == -1 ? *in : digitalRead(ch.pin));
-                ++in;
+            for (size_t i = 0; i < channels.size(); i++) {
+                auto& ch = channels[i];
 
-                bool debounced = ch.debounce.update(raw);
+                bool raw = false;
+                if (i < count)
+                    raw = inputs[i];
 
-                // --- PATCH: blocco totale durante startup ---
+                bool debounced = ch.debounce.update(raw, now);
+
+                // Startup inhibit
                 if (inhibit) {
-                    ch.timer.Run(false);   // timer fermo
-                    ch.mem = false;        // nessuna memoria
-                    continue;              // salta tutta la logica
+                    ch.timer.Stop();
+                    ch.mem = false;
+                    continue;
                 }
-                // ------------------------------------------------
+
+                // Reset per canale
+                if (!debounced) {
+                    ch.timer.Stop();
+                    ch.mem = false;
+                    continue;
+                }
 
                 // Timer normale
-                ch.timer.Run(debounced);
+        
+                ch.timer.Run(true, now);
 
                 // Allarme canale
                 if (ch.timer.Q() && !ch.inhibit) {
@@ -169,11 +177,8 @@ public:
                     if (_engage)
                         ch.mem = true;
                 }
-
-                // Reset timer se segnale torna basso
-                if (!debounced)
-                    ch.timer.Run(false);
             }
+
         } else {
             for (auto& ch : channels)
                 ch.mem = false;
@@ -351,6 +356,42 @@ public:
     // -------------------------------
     // New Alarm Detection + Snooze
     // -------------------------------
+    void ProcessAllTypes() {
+        static const SensorChannelType types[] = {
+            SensorChannelType::RT,
+            SensorChannelType::H24,
+            SensorChannelType::MASK,
+            SensorChannelType::LEN
+        };
+
+        for (SensorChannelType type : types) {
+            bool current = AnyAlarmByType(type);
+            bool previous = lastState[type];
+            bool isSnoozed = snoozed[type];
+
+            if (!current)
+                snoozed[type] = false;
+
+            bool newAlarm = current && !previous && !isSnoozed;
+            lastState[type] = current;
+
+            if (!newAlarm)
+                continue;
+
+            // Dispatch per-zone events
+            for (auto& [zoneName, zoneSensors] : zones) {
+                std::vector<Sensor*> active;
+
+                for (auto* s : zoneSensors)
+                    if (s->ChannelAlarm(type))
+                        active.push_back(s);
+
+                if (!active.empty())
+                    dispatcher.Dispatch(zoneName, type, active);
+            }
+        }
+    }
+
     bool NewAlarmByType(SensorChannelType type) {
         bool current = AnyAlarmByType(type);
         bool previous = lastState[type];
@@ -492,6 +533,7 @@ public:
     struct AggregateState {
         bool intrusion = false;
         bool intrusionH24 = false;
+        bool mask = false;
         bool flood = false;
         bool smoke = false;
         bool windowsOpen = false;
@@ -499,7 +541,7 @@ public:
         bool tamper = false;
     };
 
-    void Process() {
+    void Process(uint32_t now) {
         const ConfigType* cfg = config;
         size_t count = configCount;
 
@@ -519,7 +561,7 @@ public:
             }
 
             if (n > 0) {
-                s->Run({ tmp, tmp + n });
+                s->Run( tmp, n, now );
                 LOG_DF("WiredSensors", "Process: sensor[%u] zone=%s alarmOut=%d",
                     (unsigned)i, c.zone, s->alarmOut ? 1 : 0);
             }
@@ -541,12 +583,22 @@ public:
             if (!s) continue;
 
             switch (c.category) {
-                case SensorCategory::PIR:
-                    if (s->ChannelAlarm(SensorChannelType::RT) && s->alarmOut)
+                case SensorCategory::PIR:                    
+                {
+                    // Movimento → Intrusione
+                    if (s->ChannelAlarm(SensorChannelType::RT))
                         st.intrusion = true;
-                    if (s->ChannelAlarm(SensorChannelType::H24) && s->alarmOut)
+
+                    // Tamper PIR → Intrusione H24
+                    if (s->ChannelAlarm(SensorChannelType::H24))
                         st.intrusionH24 = true;
+
+                    // Anti-mask PIR → Mask
+                    if (s->ChannelAlarm(SensorChannelType::MASK))
+                        st.mask = true;
+
                     break;
+                }
 
                 case SensorCategory::WINDOW:
                     if (s->alarmOut)
@@ -622,5 +674,119 @@ private:
     // mappe generate automaticamente
     std::unordered_map<std::string, std::vector<Sensor*>> zoneMap;
 };
+
+class AlarmBitmaskManager {
+public:
+    using AlarmCallback = void (*)(uint64_t newMask,
+                                   uint64_t currentMask,
+                                   uint64_t memMask,
+                                   size_t bitIndex,
+                                   size_t sensorIndex,
+                                   SensorChannelType type);
+
+    struct SignalInfo {
+        size_t sensorIndex;
+        SensorChannelType type;
+    };
+
+    // --- BITMASKS ---
+    uint64_t currentMask = 0;
+    uint64_t memMask     = 0;
+    uint64_t newMask     = 0;
+
+    bool engage = false;
+
+    // --- CALLBACK ---
+    AlarmCallback onNewAlarm = nullptr;
+
+    // --- MAPPATURA BIT → SEGNALE ---
+    std::vector<SignalInfo> map;
+
+    // ---------------------------------------------------------
+    // INIT: costruisce la mappa bitIndex → (sensore, canale)
+    // ---------------------------------------------------------
+    void BuildMap(WiredSensorsManager& ws) {
+        map.clear();
+
+        for (size_t i = 0; i < ws.Count(); i++) {
+            Sensor* s = ws.GetSensor(i);
+
+            for (auto& ch : s->channels) {
+                map.push_back({ i, ch.type });
+            }
+        }
+    }
+
+    // ---------------------------------------------------------
+    // ENGAGE
+    // ---------------------------------------------------------
+    void SetEngage(bool mode) {
+        engage = mode;
+    }
+
+    // ---------------------------------------------------------
+    // RESET
+    // ---------------------------------------------------------
+    void ResetMemory() {
+        memMask = 0;
+        Update();   // ricalcola newMask
+    }
+
+    // ---------------------------------------------------------
+    // CALCOLO BITMASK ATTUALE
+    // ---------------------------------------------------------
+    void ComputeCurrent(WiredSensorsManager& ws) {
+        currentMask = 0;
+
+        size_t bit = 0;
+
+        for (size_t i = 0; i < ws.Count(); i++) {
+            Sensor* s = ws.GetSensor(i);
+
+            for (auto& ch : s->channels) {
+                bool active = (ch.timer.Q() || ch.mem);
+
+                if (active) {
+                    currentMask |= (uint64_t(1) << bit);
+                }
+
+                bit++;
+            }
+        }
+
+        Update();
+    }
+
+    // ---------------------------------------------------------
+    // CALLBACK + MEMORIZZAZIONE
+    // ---------------------------------------------------------
+    void Update() {
+        if (engage) {
+            memMask |= currentMask;
+        }
+
+        uint64_t oldNewMask = newMask;
+        newMask = currentMask & ~memMask;
+
+        // callback per ogni nuovo bit
+        if (newMask != 0 && newMask != oldNewMask) {
+            if (onNewAlarm) {
+                for (size_t bit = 0; bit < map.size(); bit++) {
+                    if (newMask & (uint64_t(1) << bit)) {
+                        auto& info = map[bit];
+                        onNewAlarm(newMask, currentMask, memMask,
+                                   bit, info.sensorIndex, info.type);
+                    }
+                }
+            }
+        }
+    }
+
+    void SetCallback(AlarmCallback cb) {
+        onNewAlarm = cb;
+    }
+};
+
+
 
 #endif

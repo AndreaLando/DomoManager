@@ -177,37 +177,29 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
         return retVal;
     }
 
+    //Gestione back di lettura
     int startingAddr = this->_channels[channel].startingAddr;
-    retVal.startIndex = 0;
 
-    // Gestione bank (uguale alla tua)
-    if (this->_channels[channel].items < this->MAX_CALLS)
-        retVal.items = this->_channels[channel].items;
-    else {
-        if (this->bank == 0) {
-            retVal.items = this->MAX_CALLS;
-            this->bank += 1;
-        } else {
-          
-            int jump = this->bank * this->MAX_CALLS;
-            retVal.startIndex = jump;
+    // Calcolo numero di bank validi
+    int bankCount = (this->_channels[channel].items + this->MAX_CALLS - 1) / this->MAX_CALLS;
 
-            startingAddr += jump;
-            retVal.items = this->MAX_CALLS;
+    // Normalizza il bank (evita overflow e start fuori range)
+    this->bank = this->bank % bankCount;
 
-            if (jump + retVal.items > this->_channels[channel].items) {
-                int _items = abs(jump - this->_channels[channel].items);
-                if (_items == 0) {
-                    retVal.startIndex = 0;
-                    startingAddr = this->_channels[channel].startingAddr;
-                } else
-                    retVal.items = _items;
+    // Calcola jump in base al bank
+    int jump = this->bank * this->MAX_CALLS;
 
-                this->bank = 0;
-            } else
-                this->bank += 1; 
-        }
-    }
+    // Imposta startIndex e indirizzo reale
+    retVal.startIndex = jump;
+    startingAddr = this->_channels[channel].startingAddr + jump;
+
+    // Calcola quanti registri leggere in questo bank
+    int remaining = this->_channels[channel].items - jump;
+    retVal.items = (remaining < this->MAX_CALLS) ? remaining : this->MAX_CALLS;
+
+    // Avanza il bank per la prossima chiamata
+    this->bank++;
+
 
     int tmpRead = 0;
     switch (this->_channels[channel].hwType)
@@ -215,10 +207,22 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
         case Hold:
           if (!this->Error.IsInError()) {
             int toRead = retVal.items * this->_channels[channel].ItemsPerCall;
-            int tmpRead = cli.requestFrom(this->_deviceAddress,
+            LOG_DF("READ::Read",
+              "dev=%s addr=%d func=%d start=%d toRead=%d bank=%d items=%d itemsPerCall=%d",
+              this->_name,
+              this->_deviceAddress,
+              this->_channels[channel].hwType,
+              startingAddr,
+              retVal.items * this->_channels[channel].ItemsPerCall,
+              this->bank,
+              retVal.items,
+              this->_channels[channel].ItemsPerCall);
+
+            tmpRead = cli.requestFrom(this->_deviceAddress,
                                           HOLDING_REGISTERS,
                                           startingAddr,
                                           toRead);
+            LOG_DF("READ", "start=%d toRead=%d tmpRead=%d", startingAddr, toRead, tmpRead);
 
             if (tmpRead > 0) {
                 for (int i = 0; i < tmpRead; i++) {
