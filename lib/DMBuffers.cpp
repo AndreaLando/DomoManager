@@ -231,8 +231,28 @@ void Buffer::ResetType(BufferFlagType type) {
     }
 }
 
-void Buffer::ResetAll() {
-    _changed.clear();
+void Buffer::ResetAll(unsigned long minTime) {
+    for (auto it = _changed.begin(); it != _changed.end(); ) {
+
+        const int key = it->first;
+        const int area = key / BufferFlagType_Count;
+        const BufferFlagType type = (BufferFlagType)(key % BufferFlagType_Count);
+
+        // sicurezza minima
+        if (!isValidArea(area)) {
+            it = _changed.erase(it);
+            continue;
+        }
+
+        const auto &entry = _buffer[area].Data[type];
+
+        // 🔥 Cancella SOLO se la variazione è più recente del tempo passato
+        if (entry.time > minTime) {
+            it = _changed.erase(it);   // erase ritorna il prossimo iteratore
+        } else {
+            ++it;
+        }
+    }
 }
 
 int Buffer::GetAreaToWrite(int area) {

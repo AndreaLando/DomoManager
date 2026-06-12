@@ -308,7 +308,7 @@ class Buffer
     void ResetElement(int area, BufferFlagType type);
     void ResetArea(int area);
     void ResetType(BufferFlagType type);
-    void ResetAll();
+    void ResetAll(unsigned long minTime=1000);
 
     inline const std::unordered_map<int, ChangedEntry>& getChangedMap() const {
         //Come get changed ma torna la mappa direttamente, più veloce

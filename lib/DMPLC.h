@@ -633,6 +633,11 @@ private:
         add("PROBE01", {
             {GenericPrgDevice::AI, GenericPrgDevice::Hold, 0, 2, 1}
         });
+
+        add("CWT_MB308K", {
+            {GenericPrgDevice::DI, GenericPrgDevice::Discrete, 0, 16, 1},
+            {GenericPrgDevice::DO, GenericPrgDevice::Coil,     0, 12, 1}
+        });
     }
 };
 

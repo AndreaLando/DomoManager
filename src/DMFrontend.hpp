@@ -737,7 +737,7 @@ private:
         // --- 3) SCRITTURA BITMASK NEL BUFFER ---
         auto& buffer = manager.getBuffer();
         buffer.WriteElement(
-            22,
+            AREA_SECURITY_STATUS,
             BufferFlagType::Field,
             sys.getBitmask(),
             now
@@ -1198,7 +1198,7 @@ public:
             );
 
             if (!hasUpdates) {
-                buffer.ResetAll();
+                buffer.ResetAll(5000);
                 return;
             }
 
@@ -1207,7 +1207,7 @@ public:
                 millis()
             );
 
-            buffer.ResetAll();
+            buffer.ResetAll(5000);
         });
 
         // --- WATCHDOG ---
