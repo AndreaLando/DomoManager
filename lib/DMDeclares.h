@@ -17,9 +17,11 @@
 
    ============================================================================ */
    
-#include "DMBaseClass.hpp"
+
 #include "DMAEE.hpp"
 #include "DMMQTTEngine.hpp"
+#include "DMWebAPI.hpp"
+
 #include "DMHVAC.h"
 #include "DMWeather.hpp"
 #include "DMWiredSensors.hpp"
@@ -37,7 +39,6 @@ struct DiagnosticConfig  {
     bool reportRTC                  = true;
     bool reportHotStandby           = true;
     bool reportVirtualAreas         = false;
-    bool reportUnusedBufferAreas    = false;
     bool reportNeverInitialized     = false;
     bool reportMultipleInitialized  = true;
     bool reportAutomationConfig     = true;
@@ -163,69 +164,6 @@ struct DomoManagerConfig {
 
 };
 
-// ************ DEFINIZIONE STRUTTURA WebAPI *******************************
-
-// ============================================================================
-// DEVICE MESSAGE PROFILE
-// ============================================================================
-struct DeviceMessageProfile {
-
-    uint16_t profileId;
-    const char* name;
-
-    struct OutMessage {
-        const char* key;
-        const char* format;
-        const char* method;     // GET / POST
-        const char* endpoint;   // opzionale
-    };
-
-    struct InField {
-        const char* key;
-        const char* pattern;    // es: "ack=([0-9]+)"
-    };
-
-    struct CorrelationRule {
-        const char* outKey;
-        const char* expectedIn;
-        const char* condition;  // "always", "optional", "value == 1"
-    };
-
-    struct InToRegistryMap {
-        const char* inKey;
-        const char* regKey;
-        const char* transform;  // "int", "bool", "string", "raw"
-    };
-
-    struct StateRule {
-        const char* state;
-        const char* onEvent;
-        const char* nextState;
-        const char* action;     // messaggio OUT da inviare
-    };
-
-    const OutMessage* outMessages;
-    size_t outCount;
-
-    const InField* inFields;
-    size_t inCount;
-
-    const CorrelationRule* rules;
-    size_t ruleCount;
-
-    const InToRegistryMap* regMap;
-    size_t regMapCount;
-
-    const StateRule* stateRules;
-    size_t stateRuleCount;
-};
-
-struct DeviceMessageGroup {
-    const char* groupName;
-    const DeviceMessageProfile* profiles;
-    size_t profileCount;
-};
-
 // ************ DEFINIZIONE STRUTTURA FRONTEND*******************************
 struct FrontendConfig {
     struct Pins {
@@ -248,7 +186,6 @@ struct FrontendConfig {
     // -----------------------------
     struct Bridge {
         bool enabled = false;
-        uint32_t intervalMs = 500;
         
         IPAddress ip;
         uint16_t localPort = 0;
@@ -408,29 +345,6 @@ struct FrontendConfig {
         uint32_t intervalMs = 1000;
     } jobs;
 
-};
-
-// ************ DEFINIZIONE INTERFACCIA TRANSPORT*******************************
-class ICommandTransport {
-public:
-    using ResponseCallback = std::function<void(const String& response)>;
-
-    virtual ~ICommandTransport() {}
-
-    // inizializza il trasporto (non bloccante)
-    virtual bool begin() = 0;
-
-    // invio fire-and-forget (non blocca)
-    virtual bool send(const String& payload) = 0;
-
-    // invio request asincrona: la risposta arriverà via callback o tramite getResponse
-    virtual bool request(const String& payload, ResponseCallback cb, unsigned long timeoutMs = 3000) = 0;
-
-    // loop non bloccante per gestire I/O interno (chiamare regolarmente)
-    virtual void loop(unsigned long now) = 0;
-
-    // stato peer / connettività
-    virtual bool isOnline() const = 0;
 };
 
 #endif

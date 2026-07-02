@@ -27,15 +27,285 @@
 #include "MgsModbus.h"
 
 #include <Arduino.h>
-
+#include <array>
+#include <cstdint>
+#include <algorithm>
+#include <functional>
 
 #include "DMPLC.h"
 #include "DMBaseClass.hpp"
-#include "DMOptaRTC.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
 
+class NetworkManager {
+public:
+    struct Protocol {
+        unsigned long lastExec = 0;      // ultimo timestamp di esecuzione
+        unsigned long minInterval = 0;   // pacing minimo
+        unsigned long maxDuration = 0;   // durata massima consentita
+        bool active = false;             // protocollo in esecuzione
+    };
+
+private:
+    struct Entry {
+        int id;
+        Protocol proto;
+    };
+
+    std::vector<Entry> protocols;
+
+    int currentOwner = -1;
+    unsigned long ownerSince = 0;
+    unsigned long lastRelease = 0;
+
+    const unsigned long minGapMs = 4;    // gap minimo tra protocolli
+
+public:
+
+    // ============================================================
+    // REGISTRAZIONE DINAMICA
+    // ============================================================
+    int registerProtocol(unsigned long minInterval, unsigned long maxDuration) {
+        int id = protocols.size();
+        protocols.push_back({ id, Protocol{0, minInterval, maxDuration, false} });
+        return id;
+    }
+
+    // ============================================================
+    // PACING
+    // ============================================================
+    inline bool canRun(int id, unsigned long now) {
+        auto& p = protocols[id].proto;
+        return (now - p.lastExec >= p.minInterval);
+    }
+
+    // ============================================================
+    // ACQUISIZIONE
+    // ============================================================
+    inline bool isExpired(int id, unsigned long now) {
+        auto& p = protocols[id].proto;
+        bool expired = p.active && (now - ownerSince > p.maxDuration);
+
+        if (expired) {
+            LOG_WF("NET", "[EXPIRED] id=%d active for %lu > %lu",
+                id, now - ownerSince, p.maxDuration);
+        }
+
+        return expired;
+    }
+
+
+    inline bool tryAcquire(int id, unsigned long now) {
+        auto& p = protocols[id].proto;
+
+        int owner = currentOwner;
+
+        // rete occupata da altro protocollo
+        if (owner != -1 && owner != id) {
+
+            if (isExpired(owner, now)) {
+                LOG_WF("NET", "[TIMEOUT] owner=%d expired → forced release at %lu", owner, now);
+                release(owner, now);
+            } else {
+                LOG_WF("NET", "[BLOCK] id=%d cannot acquire, owner=%d active", id, owner);
+                return false;
+            }
+        }
+
+        // gap minimo
+        if (now - lastRelease < minGapMs) {
+            LOG_DF("NET", "[GAP] id=%d blocked, gap=%lu < %lu",
+                id, now - lastRelease, minGapMs);
+            return false;
+        }
+
+        // pacing
+        if (now - p.lastExec < p.minInterval) {
+            LOG_DF("NET", "[PACER] id=%d blocked, interval=%lu < %lu",
+                id, now - p.lastExec, p.minInterval);
+            return false;
+        }
+
+        // acquisizione
+        LOG_DF("NET", "[ACQUIRE] id=%d at %lu", id, now);
+
+        currentOwner = id;
+        ownerSince = now;
+        p.active = true;
+        return true;
+    }
+
+    // ============================================================
+    // RILASCIO
+    // ============================================================
+    void release(int id, unsigned long now) {
+        auto& p = protocols[id].proto;
+
+        if (currentOwner != id) {
+            // opzionale: log di diagnostica
+            LOG_WF("NET::release", "IGNORED release for id=%d (owner=%d)", id, currentOwner);
+            p.active = false;
+            return;
+        }
+
+        currentOwner = -1;
+        lastRelease = now;
+        p.lastExec = now;
+        p.active = false;
+    }
+
+    // ============================================================
+    // MODIFICHE DINAMICHE DEL PACING
+    // ============================================================
+    void setMinInterval(int id, unsigned long ms) {
+        protocols[id].proto.minInterval = ms;
+    }
+
+    void setMaxDuration(int id, unsigned long ms) {
+        protocols[id].proto.maxDuration = ms;
+    }
+
+    // ============================================================
+    // STATO
+    // ============================================================
+    bool isFree() const {
+        return currentOwner == -1;
+    }
+};
+
+
+template<int MAX_EVENTS, int MAX_CONSUMERS>
+class EventManager {
+public:
+    struct Event {
+        uint64_t id;
+        int area;
+        long value;
+        unsigned long time;
+        int eventType; // 0=normal, 1=alarm, 2=warning, 3=threshold, ecc.
+    };
+
+    struct Consumer {
+        bool active = false;
+        bool global = false;
+        uint64_t cursor = 0;
+        std::function<bool(const Event&)> filter;
+    };
+
+private:
+    std::array<Event, MAX_EVENTS> _ring;
+    uint64_t _nextId = 1;
+    int _writeIndex = 0;
+
+    std::array<Consumer, MAX_CONSUMERS> _consumers;
+
+    // CALLBACK INTERNE
+    std::function<bool(int area, long value)> _alarmCallback;
+    std::function<bool(int area, long value)> _warningCallback;
+    std::function<bool(int area, long value)> _thresholdCallback;
+
+public:
+    EventManager() {}
+
+    // REGISTRA CONSUMER
+    inline void registerConsumer(int id, bool global, std::function<bool(const Event&)> filter) {
+        _consumers[id].active = true;
+        _consumers[id].global = global;
+        _consumers[id].cursor = 0;
+        _consumers[id].filter = filter;
+    }
+
+    inline void unregisterConsumer(int id) {
+        _consumers[id].active = false;
+    }
+
+    // REGISTRA CALLBACK INTERNE
+    inline void onAlarm(std::function<bool(int,long)> cb) { _alarmCallback = cb; }
+    inline void onWarning(std::function<bool(int,long)> cb) { _warningCallback = cb; }
+    inline void onThreshold(std::function<bool(int,long)> cb) { _thresholdCallback = cb; }
+
+    // PUSH EVENTO NORMALE
+    inline void push(int area, long value, unsigned long time) {
+        pushInternal(area, value, time, 0);
+    }
+
+    // PUSH EVENTO INTERNO
+    inline void pushInternal(int area, long value, unsigned long time, int type) {
+        Event &e = _ring[_writeIndex];
+        e.id = _nextId++;
+        e.area = area;
+        e.value = value;
+        e.time = time;
+        e.eventType = type;
+
+        _writeIndex = (_writeIndex + 1) % MAX_EVENTS;
+    }
+
+    // PUSH EVENTO CON CALLBACK
+    inline void pushWithCallbacks(int area, long value, unsigned long time) {
+        int type = 0;
+
+        if (_alarmCallback && _alarmCallback(area, value))
+            type = 1;
+
+        else if (_warningCallback && _warningCallback(area, value))
+            type = 2;
+
+        else if (_thresholdCallback && _thresholdCallback(area, value))
+            type = 3;
+
+        pushInternal(area, value, time, type);
+    }
+
+    // GET NEXT EVENT
+    inline bool getNext(int consumerId, Event &out) {
+        Consumer &c = _consumers[consumerId];
+        if (!c.active) return false;
+
+        uint64_t last = c.cursor;
+
+        for (int i = 0; i < MAX_EVENTS; i++) {
+            const Event &e = _ring[i];
+            if (e.id > last && c.filter(e)) {
+                out = e;
+                c.cursor = e.id;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // OVERFLOW DETECTION
+    inline bool isOutOfSync(int consumerId) const {
+        const Consumer &c = _consumers[consumerId];
+        if (!c.active) return false;
+
+        uint64_t last = c.cursor;
+        uint64_t newest = _nextId - 1;
+        uint64_t oldest = newest > MAX_EVENTS ? newest - MAX_EVENTS + 1 : 1;
+
+        return last < oldest;
+    }
+
+    // CLEANUP BASATO SOLO SUI GLOBALI
+    inline void cleanup() {
+        uint64_t newest = _nextId - 1;
+        uint64_t oldest = newest > MAX_EVENTS ? newest - MAX_EVENTS + 1 : 1;
+
+        uint64_t minCursor = UINT64_MAX;
+
+        for (auto &c : _consumers)
+            if (c.active && c.global)
+                minCursor = std::min(minCursor, c.cursor);
+
+        if (minCursor == UINT64_MAX)
+            return;
+
+        // il ring sovrascrive automaticamente
+    }
+};
 
 
 class OwnerManager {
@@ -61,6 +331,7 @@ private:
     Mode currentMode = OWNER;
     unsigned long guestExpireAt = 0;
     bool logsPaused = false;
+    bool initialized = false;   // 🔥 evita reset involontario al primo ciclo
 
     ModeChangedCallback onModeChanged = nullptr;
 
@@ -103,8 +374,6 @@ private:
             onModeChanged(oldMode, newMode, reason);
     }
 
-
-
 public:
     OwnerManager() {}
 
@@ -137,7 +406,7 @@ public:
         currentMode = GUEST;
         guestExpireAt = expireTimestamp;
 
-        LOG_IF("OwnerManager",
+        LOG_DF("OwnerManager",
                "Set mode → GUEST (expire in %lu ms)",
                (expireTimestamp > millis()) ? (expireTimestamp - millis()) : 0);
 
@@ -150,6 +419,9 @@ public:
         Mode old = currentMode;
         currentMode = DEVELOPER;
 
+        // 🔥 Developer = log sempre attivi
+        LogManager::enable();
+
         triggerCallback(old, DEVELOPER, reason);
     }
 
@@ -161,20 +433,27 @@ public:
     }
 
     void update(unsigned long now) {
-        if (isGuestExpired(now)) {
-            LOG_IF("OwnerManager", "Guest scaduto → ritorno a OWNER");
+        // 🔥 Primo ciclo → non fare nulla
+        if (!initialized) {
+            initialized = true;
+            return;
+        }
+
+        if (currentMode == GUEST && now > guestExpireAt) {
+            LOG_DF("OwnerManager", "Guest scaduto → ritorno a OWNER");
             setOwner(TIME_EXPIRED);
         }
 
         if (iotGuestRequest) {
-            LOG_IF("OwnerManager",
-                   "Richiesta IOT → attivo Guest per %lu ms",
-                   iotGuestDuration);
+            LOG_DF("OwnerManager",
+                "Richiesta IOT → attivo Guest per %lu ms",
+                iotGuestDuration);
 
             iotGuestRequest = false;
             setGuest(now + iotGuestDuration, IOT_REQUEST);
         }
     }
+
 
     bool hasPendingIOTRequest() const {
         return iotGuestRequest;
@@ -232,12 +511,11 @@ public:
 
     void resumeLogs() {
         logsPaused = false;
+
         if (currentMode == DEVELOPER)
             LogManager::enable();
     }
-
 };
-
 
 class IpManager {
 public:
@@ -360,7 +638,7 @@ private:
     Config config;
     std::unordered_map<uint32_t, std::vector<int>> devicesByIP;
 
-// 🔥 Array privati dinamici
+    // 🔥 Array privati dinamici
     std::vector<IpState> lastState;
     std::vector<unsigned long> lastCooldownLog;
     std::vector<bool> wasInCooldown;
@@ -639,125 +917,8 @@ public:
     }
 };
 
-class AreaDeviceMap {
-public:
-    struct Entry {
-        int devIndex;
-        int channel;
-        int itemIndex;
-    };
-
-    // Costruisce la mappa solo la prima volta
-    inline void buildOnce(std::vector<GenericPrgDevice> &devices) {
-        if (!initialized) {
-            buildInternal(devices);
-            initialized = true;
-        }
-    }
-
-    // Lookup O(1)
-    inline bool find(int area, Entry &out) const {
-        auto it = map.find(area);
-        if (it == map.end())
-            return false;
-        out = it->second;
-        return true;
-    }
-
-    inline bool isInitialized() const { return initialized; }
-private:
-    std::unordered_map<int, Entry> map;
-    bool initialized = false;
-
-    void buildInternal(std::vector<GenericPrgDevice> &devices) {
-        map.clear();
-        map.reserve(devices.size() * 8); // ottimizzazione minima
-
-        for (int d = 0; d < devices.size(); d++) {
-            auto &dev = devices[d];
-            int channels = dev.GetChannelsSize();
-
-            for (int ch = 0; ch < channels; ch++) {
-                auto chInfo = dev.GetChannelInfo(ch);
-                int items = chInfo.items;
-
-                for (int i = 0; i < items; i++) {
-                    int area = dev.GetArea(ch, i);
-
-                    map[area] = Entry{
-                        d,      // device index
-                        ch,     // channel
-                        i       // item index
-                    };
-                }
-            }
-        }
-    }
-};
-
-class TimeManager {
-public:
-    TimeManager()
-        : rtcValid(false),
-          lastEpoch(0),
-          lastMillis(0)
-    {
-        // Prova a leggere l’RTC hardware
-        struct tm t;
-        if (rtc.getDateTime(t)) {
-            rtcValid = true;
-            lastEpoch = mktime(&t);
-            lastMillis = millis();
-        }
-    }
-
-    // Aggiornamento da TIME IOT
-    void updateFromEpoch(uint32_t epoch) {
-        lastEpoch = epoch;
-        lastMillis = millis();
-
-        // Aggiorna anche l’RTC hardware
-        rtc.setEpoch(epoch);
-        rtcValid = true;
-    }
-
-    // Epoch affidabile
-    uint32_t getEpoch() {
-        struct tm t;
-
-        // Se RTC valido → usa RTC
-        if (rtcValid && rtc.getDateTime(t)) {
-            return mktime(&t);
-        }
-
-        // Fallback → usa millis()
-        return lastEpoch + (millis() - lastMillis) / 1000;
-    }
-
-    // Restituisce struct tm
-    bool getDateTime(struct tm &t) {
-        uint32_t epoch = getEpoch();
-        time_t e = epoch;
-        gmtime_r(&e, &t);   // 🔥 FIX DEFINITIVO
-        return rtcValid;
-    }
 
 
-    unsigned long nowMs() {
-        return millis();
-    }
-
-    bool isRTCValid() const {
-        return rtcValid;
-    }
-
-private:
-    OptaRTC rtc;        // RTC integrato internamente
-    bool rtcValid;
-
-    uint32_t lastEpoch;
-    uint32_t lastMillis;
-};
 
 /* ============================================================================
    FASTCHANGEDTRACKER — SISTEMA O(1) PER LA GESTIONE DEI "CHANGED"
@@ -786,22 +947,29 @@ private:
 
 
 class ModbusManager {     
-    private:
+private:
     const int NOT_VALID_AREA=0;
     
     class PersistentModbusConnection {
     private:
-        const int RECONNECTION_DELAY = 2;
-
         ModbusTCPClient& cli;
         IPAddress lastIp;
         bool hasConnection = false;
+
+        // 🔥 Timestamp dell’ultima attività reale (READ o WRITE)
+        unsigned long lastActivity = 0;
 
     public:
         PersistentModbusConnection(ModbusTCPClient& client)
             : cli(client)
         {
             lastIp = IPAddress(0,0,0,0);
+            lastActivity = 0;
+        }
+
+        // 🔥 Chiamare SEMPRE quando fai una READ o WRITE
+        inline void touch(unsigned long now) {
+            lastActivity = now;
         }
 
         bool ensure(int ipIndex, IpManager& ipManager, int port, unsigned long now)
@@ -809,35 +977,42 @@ class ModbusManager {
             auto& ipStruct = ipManager.GetIps()[ipIndex];
             IPAddress ip = ipStruct.IP;
 
-            bool needReconnect = false;            
-            if (!cli.connected())   // 1) Non connesso → riconnetti
+            bool needReconnect = false;
+
+            // 1) Socket non connessa → riconnetti
+            if (!cli.connected())
                 needReconnect = true;
-            else if (lastIp != ip)  // 2) Connesso ma verso IP diverso → riconnetti
+
+            // 2) IP cambiato → riconnetti
+            else if (lastIp != ip)
+                needReconnect = true;
+
+            // 3) Inattività troppo lunga → modulo DO ha chiuso la connessione
+            else if (now - lastActivity > 300)   // 🔥 valore perfetto per Waveshare/USR
                 needReconnect = true;
 
             if (!needReconnect) {
-                // Se la connessione è valida ma l'IP era in errore → ripristina
+                // Connessione OK
                 if (ipStruct.state != IpManager::IpState::OK)
                     ipManager.ReportSuccess(ipIndex);
-
                 return true;
             }
 
-            // 3) Riconnessione
+            // 🔥 Riconnessione
             cli.stop();
-            delay(RECONNECTION_DELAY);
+            delay(5);
 
             if (!cli.begin(ip, port)) {
-                ipManager.ReportError(ipIndex, now);
                 hasConnection = false;
+                ipManager.ReportError(ipIndex, now);
                 return false;
             }
 
-            // 4) Connessione OK
+            // 🔥 Connessione OK
             lastIp = ip;
+            lastActivity = now;
             hasConnection = true;
 
-            // Ripristina stato IP se necessario
             if (ipStruct.state != IpManager::IpState::OK)
                 ipManager.ReportSuccess(ipIndex);
 
@@ -849,130 +1024,198 @@ class ModbusManager {
         }
     };
 
+    class AreaDeviceMap {
     public:
-        AreaDeviceMap areaMap;
-        RouteManager routeManager;
+        struct Entry {
+            int devIndex;
+            int channel;
+            int itemIndex;
+        };
 
-        // --- CALLBACKS ---
-        using SomethingChangedFn = void (*)();
-        
-        // --- RIFERIMENTI A OGGETTI ESTERNI ---
-        Buffer *buffer = nullptr;
-        std::vector<GenericPrgDevice> *prgDevices = nullptr;
-        ToggleManager *toggles = nullptr;
-        SplitOutManager *splitsOut = nullptr;
-        AnalogThresholdManager* thresholds = nullptr;
-        IpManager *ipManager = nullptr;
-
-        //Routing Callback
-        using RouteTimingFn = void (*)(unsigned long exec);
-        RouteTimingFn routeTiming = nullptr;
-
-        // --- LED ---
-        LedController* m_ledController = nullptr; // pointer to external controller (not owned)
-
-        // --- INIT ---
-        void Begin(LedController& ledsController,
-                Buffer &buffer,
-                std::vector<GenericPrgDevice> &prgDevices,
-                ToggleManager &toggles,
-                SplitOutManager &splitsOut,
-                IpManager &ipManager,
-                AnalogThresholdManager &tresholds,
-                SomethingChangedFn sc,
-                RouteTimingFn rt)   {
-            this->m_ledController = &ledsController;
-            this->buffer = &buffer;
-            this->prgDevices = &prgDevices;
-            this->toggles = &toggles;
-            this->splitsOut = &splitsOut;
-            this->thresholds = &tresholds;
-            this->ipManager = &ipManager;
-            this->somethingChanged = sc;
-            this->routeTiming = rt;
-
-            areaMap.buildOnce(prgDevices);
+        // Costruisce la mappa solo la prima volta
+        inline void buildOnce(std::vector<GenericPrgDevice> &devices) {
+            if (!initialized) {
+                buildInternal(devices);
+                initialized = true;
+            }
         }
 
+        // Lookup O(1)
+        inline bool find(int area, Entry &out) const {
+            auto it = map.find(area);
+            if (it == map.end())
+                return false;
+            out = it->second;
+            return true;
+        }
 
-        bool RunClient(ModbusTCPClient &cli,
+        inline bool isInitialized() const { return initialized; }
+    private:
+        std::unordered_map<int, Entry> map;
+        bool initialized = false;
+
+        void buildInternal(std::vector<GenericPrgDevice> &devices) {
+            map.clear();
+            map.reserve(devices.size() * 8); // ottimizzazione minima
+
+            for (int d = 0; d < devices.size(); d++) {
+                auto &dev = devices[d];
+                int channels = dev.GetChannelsSize();
+
+                for (int ch = 0; ch < channels; ch++) {
+                    auto chInfo = dev.GetChannelInfo(ch);
+                    int items = chInfo.items;
+
+                    for (int i = 0; i < items; i++) {
+                        int area = dev.GetArea(ch, i);
+
+                        map[area] = Entry{
+                            d,      // device index
+                            ch,     // channel
+                            i       // item index
+                        };
+                    }
+                }
+            }
+        }
+    };
+public:
+    AreaDeviceMap areaMap;
+    RouteManager routeManager;
+
+    // --- CALLBACKS ---
+    using SomethingChangedFn = void (*)();
+    
+    // --- RIFERIMENTI A OGGETTI ESTERNI ---
+    Buffer *buffer = nullptr;
+    std::vector<GenericPrgDevice> *prgDevices = nullptr;
+    ToggleManager *toggles = nullptr;
+    SplitOutManager *splitsOut = nullptr;
+    AnalogThresholdManager* thresholds = nullptr;
+    IpManager *ipManager = nullptr;
+
+    //Routing Callback
+    using RouteTimingFn = void (*)(unsigned long exec);
+    RouteTimingFn routeTiming = nullptr;
+
+    // --- LED ---
+    LedController* m_ledController = nullptr; // pointer to external controller (not owned)
+
+    // --- INIT ---
+    void Begin(LedController& ledsController,
+            Buffer &buffer,
+            std::vector<GenericPrgDevice> &prgDevices,
+            ToggleManager &toggles,
+            SplitOutManager &splitsOut,
+            IpManager &ipManager,
+            AnalogThresholdManager &tresholds,
+            SomethingChangedFn sc,
+            RouteTimingFn rt)   {
+        this->m_ledController = &ledsController;
+        this->buffer = &buffer;
+        this->prgDevices = &prgDevices;
+        this->toggles = &toggles;
+        this->splitsOut = &splitsOut;
+        this->thresholds = &tresholds;
+        this->ipManager = &ipManager;
+        this->somethingChanged = sc;
+        this->routeTiming = rt;
+
+        areaMap.buildOnce(prgDevices);
+    }
+
+    enum class ClientState {
+        READ_DONE,     // lettura fatta, manca scrittura
+        WRITE_DONE,    // scrittura fatta, manca lettura
+        CYCLE_OK,      // read+write completate → avanza IP
+        DEVICE_ERROR,
+        ERROR          // errore → avanza IP
+    };
+
+    ClientState RunClient(ModbusTCPClient &cli,
                     short ipIndex, int port,
                     std::vector<uint16_t> &mbRead,
-                    unsigned long now)  {
-            auto &buf = *buffer;
-            auto &devs = *prgDevices;
-            bool ioOk = true;
-            static PersistentModbusConnection conn(cli);
+                    unsigned long now)
+    {
+        enum class Step { READ, WRITE };
+        static Step step = Step::READ;
+        static unsigned long lastReadTime = 0;
 
-            auto& ip = ipManager->GetIps()[ipIndex];
+        auto &buf = *buffer;
+        auto &devs = *prgDevices;
+        static PersistentModbusConnection conn(cli);
 
-            // --- CONNESSIONE ---
-            if (!conn.ensure(ipIndex, *ipManager, port, now)) {
-                LOG_WF("ModbusManager",
-                    "Modbus TCP non connesso → salto lettura (IP=%d.%d.%d.%d)",
-                    ip.IP[0], ip.IP[1], ip.IP[2], ip.IP[3]);
+        auto& ip = ipManager->GetIps()[ipIndex];
 
-                return false;
+        LOG_DF("MDB", "RunClient(ip=%d, step=%d) at %lu", 
+            ipIndex, (int)step, now);
+
+        // --- CONNESSIONE ---
+        if (!conn.ensure(ipIndex, *ipManager, port, now)) {
+            LOG_WF("ModbusManager",
+                "Modbus TCP non connesso → salto lettura (IP=%d.%d.%d.%d)",
+                ip.IP[0], ip.IP[1], ip.IP[2], ip.IP[3]);
+
+            step = Step::READ;
+            return ClientState::ERROR;
+        }
+
+        // ============================================================
+        // 1) FASE READ
+        // ============================================================
+        if (step == Step::READ) {
+            LOG_DF("MDB", "READ phase start (ip=%d)", ipIndex);
+            bool readOk = DeviceRead(cli, ipIndex, mbRead, now);
+            if (!readOk) {
+                step = Step::READ;
+                return ClientState::DEVICE_ERROR;
             }
+            conn.touch(now);
+            lastReadTime = now;   // 🔥 timestamp della READ
 
-            // --- LETTURA ---
-           
-            if (!DeviceRead(cli, ipIndex, mbRead, now))
-                ioOk = false;
-
-            // 🔥 Iterazione diretta sulla unordered_map
+            // --- PROCESS BUFFER (TUO CODICE ORIGINALE) ---
             const auto &changedMap = buffer->getChangedMapByType(Field);
             for (const auto &kv : changedMap) {
                 int key = kv.first;
                 int area = key / BufferFlagType_Count;
-                int type = key % BufferFlagType_Count;     
-
-                // 🔥 Recupero diretto dal buffer (senza accedere ai privati)
+                
                 const BufferSourceInfo &entry = buffer->getFieldEntry(area);
-                BufferSourceInfo src = entry;
+                const uint16_t value = entry.value;
 
-                // 🔥 Scrittura automatica area → areaToWrite
-                int areaToWrite = buffer->GetAreaToWrite(area);
-                bool hasRoute = routeManager.hasRoute(area);
+                const int areaToWrite = buffer->GetAreaToWrite(area);
+                const bool hasRoute = routeManager.hasRoute(area);
 
-                LOG_DF("ModbusManager", " → Changed area=%d, To write=%d, Has route=%d", area, areaToWrite, hasRoute);
+                LOG_DF("ModbusManager", " → Changed area=%d, To write=%d, Has route=%d",
+                    area, areaToWrite, hasRoute);
 
-                // 🔥 Condizione unificata:
-                // - scrivo se areaToWrite != 0
-                // - scrivo se è un forward
-                // - eseguo comunque la route se esiste
                 if (areaToWrite != 0 || toggles->isForwardArea(area) || hasRoute) {
-                    // 🔥 Scrivo SOLO se areaToWrite > 0
-                    if (areaToWrite > 0) {
-                        buffer->WriteElement(areaToWrite, Field, src.value, now);
-                    }
 
-                    bool changedOriginal = buffer->HasChanged (area, Field);
+                    if (areaToWrite > 0)
+                        buffer->WriteElement(areaToWrite, Field, value, now);
 
-                    // 🔥 RouteManager: callback per area specifica
+                    bool changedOriginal = buffer->HasChanged(area, Field);
+
                     if (hasRoute && changedOriginal) {
                         unsigned long t0 = millis();
-                        routeManager.execute(area, src.value, *buffer, now);
-                        
+                        routeManager.execute(area, value, *buffer, now);
+
                         if (routeTiming)
                             routeTiming(millis() - t0);
-                    } 
-                } 
+                    }
+                }
 
                 if (!this->splitsOut->isSplitTarget(area)) {
-                    //Testo gli split e resetto SOLO le MAIN area, non quelle derivanti dallo split
-                    // 🔥 Gestione SPLIT
+
                     if (this->splitsOut->exist(area)) {
-                        if (src.value)
+                        if (value)
                             this->splitsOut->start(area);
-                        else {
-                            // 🔥 Reset SOLO se lo split è running
-                            if (this->splitsOut->IsRunning(area))
-                                this->splitsOut->reset(area);
-                        }
+                        else if (this->splitsOut->IsRunning(area))
+                            this->splitsOut->reset(area);
+
                         LOG_DF("ModbusManager", " → Reset area=%d", area);
                         buffer->ResetElement(area, Field);
-                    } else if (areaToWrite != 0 || toggles->isForwardArea(area) || hasRoute) {
+                    }
+                    else if (areaToWrite != 0 || toggles->isForwardArea(area) || hasRoute) {
                         buffer->ResetElement(area, Field);
                         LOG_DF("ModbusManager", " → Reset area=%d", area);
                     }
@@ -982,405 +1225,473 @@ class ModbusManager {
             if (!changedMap.empty() && somethingChanged)
                 somethingChanged();
 
-            // --- SCRITTURA ---
-            if (!DeviceWrite(cli, ip.IP, now))
-                ioOk = false;
+            //LOG_DF("MDB", "READ phase start (ip=%d)", ipIndex);
 
-            return ioOk;
+            // PASSA ALLA SCRITTURA
+            step = Step::WRITE;
+            return ClientState::READ_DONE;
         }
 
+        // ============================================================
+        // 2) FASE WRITE
+        // ============================================================
+        if (step == Step::WRITE) {
+            // Delay fisso minimo tra READ e WRITE
+            const unsigned long fixedDelay = 5;  // 5 ms è perfetto per Waveshare/USR
 
-        void RunServer(LedController& ledsController,
-                    EthernetClient &client,
-                    char *itemName,
-                    bool mode,
+            // Se non è ancora passato il delay → aspetta
+            if (now - lastReadTime < fixedDelay) {
+                LOG_WF("MDB", "WRITE DELAYED (ip=%d)", ipIndex);
+                return ClientState::WRITE_DONE;
+            }
+
+            // Se è già passato (timeout di altri device) → scrivi subito            
+            //LOG_DF("MDB", "WRITE DONE (ip=%d)", ipIndex);
+
+            bool writeOk = DeviceWrite(cli, ip.IP, now);
+            if (!writeOk) {
+                step = Step::READ;
+                return ClientState::DEVICE_ERROR;
+            }
+
+            conn.touch(now);
+
+            // CICLO COMPLETO
+            LOG_DF("MDB", "CYCLE_OK (ip=%d) → advance IP", ipIndex);
+
+            step = Step::READ;
+            return ClientState::CYCLE_OK;
+        }
+
+        return ClientState::ERROR;
+    }
+
+
+    void RunServer(LedController& ledsController,
+                EthernetClient &client,
+                char *itemName,
+                bool mode,
+                unsigned long now)  {
+    
+
+        static MgsModbus modbus( 502, 250 );
+
+        if (ledsController.hasChannel(LedController::THREE)) {
+            static bool ledState = false;
+            ledState = !ledState;
+            ledsController.set(LedController::THREE, ledState);
+        }
+
+        if (mode) {
+            //WRITE
+            auto changedToPanel = buffer->getChangedMapByType(ToPanel);
+            if (!changedToPanel.empty()) {
+                LOG_DF("ModbusManager", "Write to panel: %d elementi modificati", changedToPanel.size());
+
+                for (const auto &kv : changedToPanel) {
+                    int key = kv.first;
+                    int area = key / BufferFlagType_Count;
+                    int type = key % BufferFlagType_Count;
+                    BufferFlagType flag = static_cast<BufferFlagType>(type);
+
+                    BufferSourceInfo tmp;
+                    buffer->GetData(area, flag, tmp);
+
+                    modbus.MbData[area] = tmp.value;
+                    buffer->ResetElement(area, ToPanel);
+                    buffer->WriteElement(area, FromPanel, tmp.value, true, now);
+                }
+                modbus.MbsRun(client);
+            }
+        }
+        else {
+            //READ
+            modbus.MbsRun(client); //Leggo prima da modbus -> Aggiorno il campo
+
+            BufferArrayInfo arr = buffer->GetToReadFromPanel();
+            int maxArea = buffer->size();
+            int count = arr.size > maxArea ? maxArea : arr.size;
+
+            for (int i = 0; i < count; i++) {
+                int area = arr.itemsPtr[i];
+
+                // area invalida → salta
+                if (area < 0 || area >= maxArea) {
+                    LOG_WF("ModbusManager",
+                        "HMI READ skip: invalid area=%d (maxArea=%d)",
+                        area, maxArea);
+                    continue;
+                }
+
+                word val = modbus.MbData[area];
+
+                if (buffer->Compare(area, FromPanel, val) != 2) {
+                    buffer->WriteElement(area, FromPanel, val, now);
+
+                    if (buffer->WriteElement(area, Field, val, now))
+                        buffer->ResetElement(area, FromPanel);
+
+                    if (buffer->CanWriteToPanel(area))
+                        buffer->WriteElement(area, ToPanel, val, true, now);
+                }
+            }
+        }
+    }
+
+private:
+    SomethingChangedFn somethingChanged = nullptr;
+
+    // --- LETTURA ---
+    bool DeviceRead(ModbusTCPClient &cli,
+                    short ipIndex,
+                    std::vector<uint16_t> &mbRead,
+                    unsigned long now) {
+        return DeviceManagement_Read(
+            m_ledController,
+            cli,
+            *ipManager,
+            ipIndex,
+            *buffer,
+            *prgDevices,
+            *toggles,
+            *thresholds,
+            now,
+            mbRead
+        );
+    }
+
+    // --- SCRITTURA ---
+    bool DeviceWrite(ModbusTCPClient &cli,
+                    arduino::IPAddress ip,
                     unsigned long now)  {
+        return DeviceManagement_Write(
+            m_ledController,
+            cli,
+            ip,
+            *buffer,
+            *prgDevices,
+            now
+        );
+    }
+
+    bool DeviceManagement_Write(LedController* ledsController,
+                        ModbusTCPClient &modbusTCPCli,
+                        arduino::IPAddress ip,
+                        Buffer &buffer,
+                        std::vector<GenericPrgDevice> &prgDevices,
+                        unsigned long now) {
+
+        bool inError = false;
+
+        // 🔥 Ottieni i device associati all’IP corrente
+        auto devicesForIP = ipManager->GetDevicesByIP(ip);
+        if (!devicesForIP || devicesForIP->empty()) {
+            if (ledsController && ledsController->hasChannel(LedController::TWO)) {
+                ledsController->set(LedController::TWO, false);
+            }
+            return true; // nessun device → nessuna scrittura
+        }
+
+        // 🔥 Iterazione diretta sulla unordered_map
+        const auto &changedMap = buffer.getChangedMapByType(Field, true); //Skip virtual
+        if (changedMap.empty()) {
+            if (ledsController && ledsController->hasChannel(LedController::TWO)) {
+                ledsController->set(LedController::TWO, false);
+            }
+            return true;   // oppure continua, se vuoi solo loggare
+        } 
+
+        // 🔥 Prepara lookup O(1)
+        static std::unordered_set<int> devSet;
+        devSet.clear();
+        for (int idx : *devicesForIP)
+            devSet.insert(idx);
+
+        bool done=false;
+        for (const auto &kv : changedMap) {
+            int key = kv.first;
+            int area = key / BufferFlagType_Count;
+            if(area==NOT_VALID_AREA)
+                continue;
+                    
+            // 🔥 Lookup O(1) area → device/channel
+            AreaDeviceMap::Entry entry;
+            if (!this->areaMap.find(area, entry)) {
+                LOG_WF("ModbusManager", "areaMap not found → key=%d area=%d", key, area);
+                continue;
+            }
+
+            // 🔥 Filtra per IP (O(1))
+            if (!devSet.count(entry.devIndex)){
+                continue;
+            }
+
+            GenericPrgDevice &dev = prgDevices[entry.devIndex];
+            // 🔥 Device in errore → NON fare WRITE reale
+            if (dev.GetError().IsInError()) {
+
+                // 🔥 Mantieni vivo il retry window
+                dev.GetError().Loop(true, now);
+
+                /*LOG_WF("WRITE",
+                    "Skip WRITE (device in error): %s area=%d IP=%d.%d.%d.%d",
+                    dev.GetName(),
+                    area,
+                    dev.GetIp()[0], dev.GetIp()[1], dev.GetIp()[2], dev.GetIp()[3]);*/
+
+                // 🔥 NON resettare il flag → la WRITE verrà riprovata quando rientra
+                continue;
+            }
+
+            
+            // Scrivo solo DO/AO
+            auto chType = dev.GetChannelInfo(entry.channel).type;
+            if (chType != GenericPrgDevice::DO &&
+                chType != GenericPrgDevice::AO)
+                continue;
+
+            // Recupero valore
+            BufferSourceInfo info;
+            buffer.GetData(area, Field, info);
+
+            //LOG_DF("ModbusManager", "Device TEST → area=%d channel=%d itemIndex=%d value=%d", area, entry.channel, entry.itemIndex, info.value);
+
+            // 🔥 Scrittura Modbus
+            if (dev.Write(modbusTCPCli, entry.channel, entry.itemIndex, info.value, now) == 0) {
+                inError = true;
+            
+                //LOG_EF("ModbusManager", "FAIL to WRITE → area=%d channel=%d itemIndex=%d value=%d", area, entry.channel, entry.itemIndex, info.value);
+            }
+
+            // 🔥 Reset flag
+            buffer.ResetElement(area, Field);
+            done=true;
+        }
         
+        if (ledsController && ledsController->hasChannel(LedController::TWO)) {
+            static bool ledState = false;
+            if (done) {
+                ledState = !ledState;
+            } else ledState=false;
+            ledsController->set(LedController::TWO, ledState);
+        }
 
-            static MgsModbus modbus( 502, 250 );
+        return !inError;
+    }
 
-            if (ledsController.hasChannel(LedController::PANEL)) {
+    void DeviceManagement_Read_SetOut(Buffer& buffer, int area, long value, unsigned long now) {
+        // scrivo sempre l’area sorgente
+        buffer.WriteElement(area, Field, value, now);
+
+        int outArea = buffer.GetAreaToWrite(area);
+        if (outArea >= 0) {
+            buffer.WriteElement(outArea, Field, value, now);
+        } else {
+            LOG_WF("ModbusManager",
+                "Skip forward: area=%d areaToWrite=%d",
+                area, outArea);
+        }
+    }
+
+    bool DeviceManagement_Read(LedController* ledsController, ModbusTCPClient &modbusTCPCli, IpManager &ipManager, short ipIndex, Buffer &buffer, 
+        std::vector<GenericPrgDevice> &prgDevices, ToggleManager &toggles, AnalogThresholdManager &tresholds, unsigned long now, std::vector<uint16_t> &mbRead) {
+
+        bool _error=false;
+        static GenericPrgDeviceManager manager;
+        static bool cacheBuilt = false;
+
+        if (!cacheBuilt) {
+            manager.BuildPriorityCache(prgDevices);
+            cacheBuilt = true;
+        }
+        
+        PriorityMgmt &_actualPriority = ipManager.GetCurrentPriority(ipIndex);
+
+        std::vector<int> _devices;
+        int _items=manager.GetDevicesByPriority(_actualPriority.Priority, ipManager.GetIp(ipIndex).IP, _devices);  //Get all devices under same IP address (device under Waveshare)
+        if(_items>0) {    
+            int _start=0;
+            int _end=_items;
+            
+            if (ledsController && ledsController->hasChannel(LedController::ONE)) {
                 static bool ledState = false;
                 ledState = !ledState;
-                ledsController.set(LedController::PANEL, ledState);
+                ledsController->set(LedController::ONE, ledState);
             }
 
-            if (mode) {
-                //WRITE
-                auto changedToPanel = buffer->getChangedMapByType(ToPanel);
-                if (!changedToPanel.empty()) {
-                    LOG_DF("ModbusManager", "Write to panel: %d elementi modificati", changedToPanel.size());
-
-                    for (const auto &kv : changedToPanel) {
-                        int key = kv.first;
-                        int area = key / BufferFlagType_Count;
-                        int type = key % BufferFlagType_Count;
-                        BufferFlagType flag = static_cast<BufferFlagType>(type);
-
-                        BufferSourceInfo tmp;
-                        buffer->GetData(area, flag, tmp);
-
-                        modbus.MbData[area] = tmp.value;
-                        buffer->ResetElement(area, ToPanel);
-                        buffer->WriteElement(area, FromPanel, tmp.value, true, now);
-                    }
-                    modbus.MbsRun(client);
-                }
-            }
-            else {
-                //READ
-                modbus.MbsRun(client); //Leggo prima da modbus -> Aggiorno il campo
-
-                BufferArrayInfo arr = buffer->GetToReadFromPanel();
-                int maxArea = buffer->size();
-                int count = arr.size > maxArea ? maxArea : arr.size;
-
-                for (int i = 0; i < count; i++) {
-                    int area = arr.itemsPtr[i];
-
-                    // area invalida → salta
-                    if (area < 0 || area >= maxArea) {
-                        LOG_WF("ModbusManager",
-                            "HMI READ skip: invalid area=%d (maxArea=%d)",
-                            area, maxArea);
-                        continue;
-                    }
-
-                    word val = modbus.MbData[area];
-
-                    if (buffer->Compare(area, FromPanel, val) != 2) {
-                        buffer->WriteElement(area, FromPanel, val, now);
-
-                        if (buffer->WriteElement(area, Field, val, now))
-                            buffer->ResetElement(area, FromPanel);
-
-                        if (buffer->CanWriteToPanel(area))
-                            buffer->WriteElement(area, ToPanel, val, true, now);
-                    }
-                }
-            }
-        }
-
-    private:
-        SomethingChangedFn somethingChanged = nullptr;
-
-        // --- LETTURA ---
-        bool DeviceRead(ModbusTCPClient &cli,
-                        short ipIndex,
-                        std::vector<uint16_t> &mbRead,
-                        unsigned long now) {
-            return DeviceManagement_Read(
-                m_ledController,
-                cli,
-                *ipManager,
-                ipIndex,
-                *buffer,
-                *prgDevices,
-                *toggles,
-                *thresholds,
-                now,
-                mbRead
-            );
-        }
-
-        // --- SCRITTURA ---
-        bool DeviceWrite(ModbusTCPClient &cli,
-                        arduino::IPAddress ip,
-                        unsigned long now)  {
-            return DeviceManagement_Write(
-                m_ledController,
-                cli,
-                ip,
-                *buffer,
-                *prgDevices,
-                now
-            );
-        }
-
-        bool DeviceManagement_Write(LedController* ledsController,
-                            ModbusTCPClient &modbusTCPCli,
-                            arduino::IPAddress ip,
-                            Buffer &buffer,
-                            std::vector<GenericPrgDevice> &prgDevices,
-                            unsigned long now) {
-    
-            bool inError = false;
-
-            // 🔥 Ottieni i device associati all’IP corrente
-            auto devicesForIP = ipManager->GetDevicesByIP(ip);
-            if (!devicesForIP || devicesForIP->empty()) {
-                if (ledsController && ledsController->hasChannel(LedController::WRITE)) {
-                    ledsController->set(LedController::WRITE, false);
-                }
-                return true; // nessun device → nessuna scrittura
-            }
-
-            // 🔥 Iterazione diretta sulla unordered_map
-            const auto &changedMap = buffer.getChangedMapByType(Field, true); //Skip virtual
-            if (changedMap.empty()) {
-                if (ledsController && ledsController->hasChannel(LedController::WRITE)) {
-                    ledsController->set(LedController::WRITE, false);
-                }
-                return true;   // oppure continua, se vuoi solo loggare
-            } 
-
-            // 🔥 Prepara lookup O(1)
-            static std::unordered_set<int> devSet;
-            devSet.clear();
-            for (int idx : *devicesForIP)
-                devSet.insert(idx);
-
-            bool done=false;
-            for (const auto &kv : changedMap) {
-                int key = kv.first;
-                int area = key / BufferFlagType_Count;
-                if(area==NOT_VALID_AREA)
-                    continue;
-                        
-                // 🔥 Lookup O(1) area → device/channel
-                AreaDeviceMap::Entry entry;
-                if (!this->areaMap.find(area, entry)) {
-                    LOG_WF("ModbusManager", "areaMap not found → key=%d area=%d", key, area);
-                    continue;
-                }
-
-                // 🔥 Filtra per IP (O(1))
-                if (!devSet.count(entry.devIndex)){
-                    continue;
-                }
-
-                GenericPrgDevice &dev = prgDevices[entry.devIndex];
-                if (dev.IsInError())
-                    continue;
+            if(_actualPriority.DeviceIndex!=-1) {
+                //Passa la prima inizializzazione nella quale faccio polling di tutte le periferiche
                 
-                // Scrivo solo DO/AO
-                auto chType = dev.GetChannelInfo(entry.channel).type;
-                if (chType != GenericPrgDevice::DO &&
-                    chType != GenericPrgDevice::AO)
-                    continue;
+                int _jump=GetJump(_actualPriority.Priority);
+                switch (_actualPriority.Priority)   {
+                    case Low:
+                    _start=_actualPriority.DeviceIndex;
+                    _end=_actualPriority.DeviceIndex+_jump>=_items?_items:_actualPriority.DeviceIndex+_jump;
+                    break;
 
-                // Recupero valore
-                BufferSourceInfo info;
-                buffer.GetData(area, Field, info);
-
-                LOG_DF("ModbusManager", "Device TEST → area=%d channel=%d itemIndex=%d value=%d", area, entry.channel, entry.itemIndex, info.value);
-
-                // 🔥 Scrittura Modbus
-                if (dev.Write(modbusTCPCli, entry.channel, entry.itemIndex, info.value, now) == 0) {
-                    inError = true;
-                
-                    LOG_DF("ModbusManager", "FAIL to WRITE → area=%d channel=%d itemIndex=%d value=%d", area, entry.channel, entry.itemIndex, info.value);
-                }
-
-                // 🔥 Reset flag
-                buffer.ResetElement(area, Field);
-                done=true;
-            }
-            
-            if (ledsController && ledsController->hasChannel(LedController::WRITE)) {
-                static bool ledState = false;
-                if (done) {
-                    ledState = !ledState;
-                } else ledState=false;
-                ledsController->set(LedController::WRITE, ledState);
-            }
-
-            return !inError;
-        }
-
-        void DeviceManagement_Read_SetOut(Buffer& buffer, int area, long value, unsigned long now) {
-            // scrivo sempre l’area sorgente
-            buffer.WriteElement(area, Field, value, now);
-
-            int outArea = buffer.GetAreaToWrite(area);
-            if (outArea >= 0) {
-                buffer.WriteElement(outArea, Field, value, now);
-            } else {
-                LOG_WF("ModbusManager",
-                    "Skip forward: area=%d areaToWrite=%d",
-                    area, outArea);
-            }
-        }
-
-
-        bool DeviceManagement_Read(LedController* ledsController, ModbusTCPClient &modbusTCPCli, IpManager &ipManager, short ipIndex, Buffer &buffer, 
-            std::vector<GenericPrgDevice> &prgDevices, ToggleManager &toggles, AnalogThresholdManager &tresholds, unsigned long now, std::vector<uint16_t> &mbRead) {
-
-            bool _error=false;
-            static GenericPrgDeviceManager manager;
-            manager.BuildPriorityCache(prgDevices);
-            
-            PriorityMgmt &_actualPriority = ipManager.GetCurrentPriority(ipIndex);
-
-            std::vector<int> _devices;
-            int _items=manager.GetDevicesByPriority(_actualPriority.Priority, ipManager.GetIp(ipIndex).IP, _devices);  //Get all devices under same IP address (device under Waveshare)
-            if(_items>0) {    
-                int _start=0;
-                int _end=_items;
-                
-                if (ledsController && ledsController->hasChannel(LedController::READ)) {
-                    static bool ledState = false;
-                    ledState = !ledState;
-                    ledsController->set(LedController::READ, ledState);
-                }
-
-                if(_actualPriority.DeviceIndex!=-1) {
-                    //Passa la prima inizializzazione nella quale faccio polling di tutte le periferiche
+                    case Medium:
+                    _start=_actualPriority.DeviceIndex;
+                    _end=_actualPriority.DeviceIndex+_jump>=_items?_items:_actualPriority.DeviceIndex+_jump;
+                    break;
                     
-                    int _jump=GetJump(_actualPriority.Priority);
-                    switch (_actualPriority.Priority)   {
-                        case Low:
-                        _start=_actualPriority.DeviceIndex;
-                        _end=_actualPriority.DeviceIndex+_jump>=_items?_items:_actualPriority.DeviceIndex+_jump;
-                        break;
-
-                        case Medium:
-                        _start=_actualPriority.DeviceIndex;
-                        _end=_actualPriority.DeviceIndex+_jump>=_items?_items:_actualPriority.DeviceIndex+_jump;
-                        break;
-                        
-                        case Normal:
-                        _start=_actualPriority.DeviceIndex;
-                        _end=_actualPriority.DeviceIndex+_jump>=_items?_items:_actualPriority.DeviceIndex+_jump;
-                        break;
-                    }
+                    case Normal:
+                    _start=_actualPriority.DeviceIndex;
+                    _end=_actualPriority.DeviceIndex+_jump>=_items?_items:_actualPriority.DeviceIndex+_jump;
+                    break;
                 }
+            }
 
-                for (int _deviceIndex = _start; _deviceIndex < _end; _deviceIndex++) {
-                    // 🔥 Recupero il device UNA SOLA VOLTA
-                    auto &dev = prgDevices[_devices[_deviceIndex]];
+            for (int _deviceIndex = _start; _deviceIndex < _end; _deviceIndex++) {
+                // 🔥 Recupero il device UNA SOLA VOLTA
+                auto &dev = prgDevices[_devices[_deviceIndex]];
 
-                    LOG_DF("MDB::READ", 
-                        "Device %d: %s IP=%d.%d.%d.%d PRIOR=%d",
-                        _deviceIndex,
+                if (dev.GetError().IsInError()) {
+                    // 🔥 Manteniamo vivo il retry window
+                    dev.GetError().Loop(true, now);
+
+                    /*LOG_DF("MDB::READ", 
+                        "Skip real read (device in error): %s IP=%d.%d.%d.%d Addr=%d",
                         dev.GetName(),
                         dev.GetIp()[0], dev.GetIp()[1], dev.GetIp()[2], dev.GetIp()[3],
-                        (int)dev.GetPriority());
-                    #ifdef DEBUG_VIEW
-                    delay(500);
-                    #endif
-                    // Per ogni canale del device
-                    for (int channel = 0; channel < dev.GetChannelsSize(); channel++) { 
-                        // 🔥 Recupero info del canale (veloce, evita chiamate ripetute)
-                        auto chInfo = dev.GetChannelInfo(channel);
-                        LOG_DF("MDB::READ::Channel",
-                                "Dev=%d Ch=%d type=%d hw=%d items=%d start=%d",
-                                _deviceIndex,
-                                channel,
-                                (int)chInfo.type,
-                                (int)chInfo.hwType,
-                                chInfo.items,
-                                chInfo.startingAddr );
+                        dev.GetDeviceAddress());*/
 
-                        // Considero solo DI e AI
-                        if (chInfo.type == GenericPrgDevice::DI ||
-                            chInfo.type == GenericPrgDevice::AI) {
-                            // 🔥 NUOVA READ: usa il buffer dinamico
-                            auto _read= dev.Read(modbusTCPCli, channel, mbRead.data(), now);
-                            if (_read.ok) {
-                                // 🔥 Elaboro solo gli elementi realmente letti
-                                for (int j = 0; j < _read.items; j++) {
-                                    int _index = _read.startIndex + j;
-                                    
+                    // 🔥 NON bloccare il ciclo, passa al prossimo device
+                    continue;
+                }
+
+                #ifdef DEBUG_VIEW
+                LOG_IF("MDB::READ", 
+                    "Device %d: %s IP=%d.%d.%d.%d PRIOR=%d",
+                    _deviceIndex,
+                    dev.GetName(),
+                    dev.GetIp()[0], dev.GetIp()[1], dev.GetIp()[2], dev.GetIp()[3],
+                    (int)dev.GetPriority());
+                
+                delay(500);
+                #endif
+                // Per ogni canale del device
+                for (int channel = 0; channel < dev.GetChannelsSize(); channel++) { 
+                    // 🔥 Recupero info del canale (veloce, evita chiamate ripetute)
+                    auto chInfo = dev.GetChannelInfo(channel);
+                    /*LOG_DF("MDB::READ::Channel",
+                            "Dev=%d Ch=%d type=%d hw=%d items=%d start=%d",
+                            _deviceIndex,
+                            channel,
+                            (int)chInfo.type,
+                            (int)chInfo.hwType,
+                            chInfo.items,
+                            chInfo.startingAddr );*/
+
+                    // Considero solo DI e AI
+                    if (chInfo.type == GenericPrgDevice::DI ||
+                        chInfo.type == GenericPrgDevice::AI) {
+                        // 🔥 NUOVA READ: usa il buffer dinamico
+                        auto _read= dev.Read(modbusTCPCli, channel, mbRead.data(), now);
+                        if (_read.ok) 
+                        {
+                            // 🔥 Elaboro solo gli elementi realmente letti
+                            for (int j = 0; j < _read.items; j++) {
+                                int _index = _read.startIndex + j;
+                                
+                                LOG_DF("ModbusManager",
+                                    "DMR: dev=%s | channel=%d | index=%d",
+                                    dev.GetName(),
+                                    channel,
+                                    _index);
+                                
+                                // Area logica associata a questo item
+                                int _area = dev.GetArea(channel, _index);
+                                
+                                bool _process = false;
+                                BufferSourceInfo _buffer;
+                                bool okData = buffer.GetData(_area, Field, _buffer);
+                                if (!okData) {
+                                    continue;
+                                }
+
+                                long _value = 0;
+                                if(_read.itemsPerCall==1)
+                                    _value = mbRead[j];
+                                else {
+                                    uint32_t raw = (uint32_t(mbRead[j]) << 16) | mbRead[j+1]; 
+                                    float f; 
+                                    memcpy(&f, &raw, sizeof(float)); 
+                                    _value = f < 0 ? 0 : (unsigned long)(f * 100);
+                                }
+
+                                ToggleManager::ToggleSignalItem* _toggle = nullptr;
+
+                                // --- ANALOGICO ---
+                                if (chInfo.type == GenericPrgDevice::AI) {
+                                    LOG_DF("ModbusManager","Pre treshold");
+
+                                    int thr = thresholds->getThreshold(_area, _value);
+                                    _process = abs(_value - _buffer.value) > thr;
+                                    _process = _process || (_buffer.value==0 && _value!=0);
+
                                     LOG_DF("ModbusManager",
-                                        "DMR: dev=%s | channel=%d | index=%d",
+                                        "DMR Analog: dev=%s | channel=%d | index=%d | go=%d |thresh=%d",
                                         dev.GetName(),
                                         channel,
-                                        _index);
-                                    
-                                    // Area logica associata a questo item
-                                    int _area = dev.GetArea(channel, _index);
-                                    
-                                    bool _process = false;
-                                    BufferSourceInfo _buffer;
-                                    bool okData = buffer.GetData(_area, Field, _buffer);
-                                    if (!okData) {
-                                        continue;
-                                    }
+                                        _index, _process, thr);                                        
+                                } 
+                                else {
+                                    LOG_DF("ModbusManager","Pre toggle");
+                                    _toggle = toggles.get(_area);
 
-                                    long _value = 0;
-                                    if(_read.itemsPerCall==1)
-                                        _value = mbRead[j];
-                                    else {
-                                        uint32_t raw = (uint32_t(mbRead[j]) << 16) | mbRead[j+1]; 
-                                        float f; 
-                                        memcpy(&f, &raw, sizeof(float)); 
-                                        _value = f < 0 ? 0 : (unsigned long)(f * 100);
-                                    }
+                                    if (buffer.IsReverse(_area))
+                                        _value = !_value;
 
-                                    ToggleManager::ToggleSignalItem* _toggle = nullptr;
-
-                                    // --- ANALOGICO ---
-                                    if (chInfo.type == GenericPrgDevice::AI) {
-                                        LOG_DF("ModbusManager","Pre treshold");
-
-                                        int thr = thresholds->getThreshold(_area, _value);
-                                        _process = abs(_value - _buffer.value) > thr;
-                                        _process = _process || (_buffer.value==0 && _value!=0);
-
-                                        LOG_DF("ModbusManager",
-                                            "DMR Analog: dev=%s | channel=%d | index=%d | go=%d |thresh=%d",
-                                            dev.GetName(),
-                                            channel,
-                                            _index, _process, thr);                                        
+                                    if (_toggle == nullptr) {
+                                        _process = _value != _buffer.value;
                                     } 
                                     else {
-                                        LOG_DF("ModbusManager","Pre toggle");
-                                        _toggle = toggles.get(_area);
+                                        long _tmp = toggles.getForwardValue(_area, buffer);
 
-                                        if (buffer.IsReverse(_area))
-                                            _value = !_value;
+                                        if (_tmp == 0)
+                                            _tmp = _value;
 
-                                        if (_toggle == nullptr) {
-                                            _process = _value != _buffer.value;
-                                        } 
-                                        else {
-                                            long _tmp = toggles.getForwardValue(_area, buffer);
+                                        _process = (_tmp != _buffer.value ||
+                                                    _tmp != _toggle->Toggle.getOldValue());
+                                    }
+                                } 
 
-                                            if (_tmp == 0)
-                                                _tmp = _value;
+                                // 🔥 Se c’è variazione, aggiorno buffer e toggle
+                                if (_process) {
+                                    if(_value>0 && _area>=14){ //Prende sia digitali a 1 che analogiche
+                                        int devIdx = _devices[_deviceIndex];
 
-                                            _process = (_tmp != _buffer.value ||
-                                                        _tmp != _toggle->Toggle.getOldValue());
+                                        LOG_IF("ModbusManager",
+                                        "-> %s | channel=%d | index=%d | value=%d | buf.val=%d | buf.prev=%d | area=%d | areaName=%s",
+                                        prgDevices[devIdx].GetName(),
+                                        channel,
+                                        _index,
+                                        _value,
+                                        _buffer.value,
+                                        _buffer.prevValue,
+                                        _area,
+                                        buffer.GetName(_area));
+                                    }
+                                    
+                                    buffer.ResetElement(_area, Field);
+
+                                    if (_toggle != nullptr) {
+                                        long _toggleOut = _buffer.value;
+                                        long _signalIn = toggles.getForwardValue(_area, buffer);
+                                        if (_signalIn == 0)
+                                        _signalIn = _value;
+
+                                        if (_toggle->Toggle.change(_signalIn, _toggleOut)) {
+                                            DeviceManagement_Read_SetOut(buffer, _area, _toggleOut, now);
                                         }
-                                    } 
-
-                                    // 🔥 Se c’è variazione, aggiorno buffer e toggle
-                                    if (_process) {
-                                        if(_value>0 && _area>=14){ //Prende sia digitali a 1 che analogiche
-                                            int devIdx = _devices[_deviceIndex];
-
-                                            LOG_IF("ModbusManager",
-                                            "New Value: %s | channel=%d | index=%d | value=%d | buf.val=%d | buf.prev=%d | area=%d | areaName=%s",
-                                            prgDevices[devIdx].GetName(),
-                                            channel,
-                                            _index,
-                                            _value,
-                                            _buffer.value,
-                                            _buffer.prevValue,
-                                            _area,
-                                            buffer.GetName(_area));
-                                        }
-                                        
-                                        buffer.ResetElement(_area, Field);
-
-                                        if (_toggle != nullptr) {
-                                            long _toggleOut = _buffer.value;
-                                            long _signalIn = toggles.getForwardValue(_area, buffer);
-                                            if (_signalIn == 0)
-                                            _signalIn = _value;
-
-                                            if (_toggle->Toggle.change(_signalIn, _toggleOut)) {
-                                                DeviceManagement_Read_SetOut(buffer, _area, _toggleOut, now);
-                                            }
-                                        }
-                                        else {
-                                            DeviceManagement_Read_SetOut(buffer, _area, _value, now);
-                                        }
-                                    } 
-                                }
+                                    }
+                                    else {
+                                        DeviceManagement_Read_SetOut(buffer, _area, _value, now);
+                                    }
+                                } 
                             }
-                            else {
+                        }
+                        else {
                             LOG_DF("ModbusManager",
                                 "Read error: %s | channel=%d | ip=%d.%d.%d.%d",
                                 prgDevices[_devices[_deviceIndex]].GetName(),
@@ -1389,27 +1700,28 @@ class ModbusManager {
                                 ipManager.GetIp(ipIndex).IP[1],
                                 ipManager.GetIp(ipIndex).IP[2],
                                 ipManager.GetIp(ipIndex).IP[3]); 
-                        
+                    
                             _error = true;
-                            break;                        }
+                            break;                        
                         }
                     }
                 }
-
-                ipManager.AdvancePriority(ipIndex, _items);
-            } 
-            else {
-                LOG_EF("ModbusManager",
-                    "Nothing to read | priority=%d | ip=%d.%d.%d.%d",
-                    _actualPriority.Priority,
-                    ipManager.GetIp(ipIndex).IP[0],
-                    ipManager.GetIp(ipIndex).IP[1],
-                    ipManager.GetIp(ipIndex).IP[2],
-                    ipManager.GetIp(ipIndex).IP[3]);
             }
 
-            return !_error;
+            ipManager.AdvancePriority(ipIndex, _items);
+        } 
+        else {
+            LOG_EF("ModbusManager",
+                "Nothing to read | priority=%d | ip=%d.%d.%d.%d",
+                _actualPriority.Priority,
+                ipManager.GetIp(ipIndex).IP[0],
+                ipManager.GetIp(ipIndex).IP[1],
+                ipManager.GetIp(ipIndex).IP[2],
+                ipManager.GetIp(ipIndex).IP[3]);
         }
+
+        return !_error;
+    }
 };
 
 #endif

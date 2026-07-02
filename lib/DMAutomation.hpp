@@ -29,6 +29,57 @@ private:
     bool startupMode = true;   // ⭐ parte attivo
     bool firstUpdate = true;
 public:
+    class BuiltinScenes {
+    public:
+        enum class Type {
+            NoAction,
+            COUNT   
+        };
+
+        // -------------------------
+        // ENUM → STRING
+        // -------------------------
+        static const char* toString(Type t) {
+            switch (t) {
+                case Type::NoAction: return "NoAction";
+                default:             return "";
+            }
+        }
+
+        // -------------------------
+        // STRING → ENUM
+        // -------------------------
+        static Type fromString(const char* s) {
+            if (!s || !*s)
+                return Type::NoAction;   // default richiesto
+
+            // Ciclo dinamico: da 1 a COUNT-1
+            for (uint8_t i = 0; i < static_cast<uint8_t>(Type::COUNT); i++) {
+                Type t = static_cast<Type>(i);
+                if (strcmp(s, toString(t)) == 0)
+                    return t;
+            }
+
+            return Type::NoAction;       // default richiesto
+        }
+
+        // -------------------------
+        // È una scena built‑in?
+        // -------------------------
+        static bool isBuiltin(const char* s) {
+            if (!s || !*s) return false;
+
+            // Ciclo dinamico: da 1 a COUNT-1
+            for (uint8_t i = 0; i < static_cast<uint8_t>(Type::COUNT); i++) {
+                Type t = static_cast<Type>(i);
+                if (strcmp(s, toString(t)) == 0)
+                    return true;
+            }
+            return false;
+        }
+    };
+
+
     friend class Diagnostic;
 
     struct SchedulerContext {
@@ -840,7 +891,7 @@ AutomationEngine::Scene* AutomationEngine::findScene(const char *name)
 
 void AutomationEngine::triggerScene(const char *name, unsigned long now) {
     // ⭐ GESTIONE SPECIALE: NoAction → nessuna scena, nessun log, nessun errore
-    if (!name || name[0] == '\0' || strcmp(name, "NoAction") == 0) {
+    if (!name || name[0] == '\0' || strcmp(name, BuiltinScenes::toString( BuiltinScenes::Type::NoAction ) ) == 0) {
         return;
     }
     

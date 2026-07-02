@@ -29,18 +29,7 @@
 
 class GenericSensor {
 public:
-    struct Config {
-        enum class Type {
-            ANALOG,
-            DIGITAL,
-            BUFFER,
-            CONSTANT
-        };
-
-        Type type;
-        int value;   // pin OR bufferArea OR constant
-        float scale = 1.0f;   
-    };
+    using Config = GenericSensorConfig;
 
     static int readRaw(const Config& cfg, Buffer& buf) {
         switch (cfg.type) {
@@ -113,7 +102,7 @@ public:
     }
 
     // SAFE: ritorna nullptr se l’indice non è valido
-    ToggleSignalItem* get(int areaRead) {
+    inline ToggleSignalItem* get(int areaRead) {
         auto it = cacheByArea.find(areaRead);
         if (it == cacheByArea.end())
             return nullptr;
@@ -122,11 +111,12 @@ public:
         return idx < toggles.size() ? &toggles[idx] : nullptr;
     }
 
-    int getForwardValue(int area, Buffer &buffer) {
+    inline int getForwardValue(int area, Buffer &buffer) {
         int max = buffer.size();
 
         // 1) lookup diretto tramite cache (ora sempre sicuro)
         ToggleSignalItem* t = get(area);
+        if (!t) return 0;
 
         if (t) {
             for (int fwdArea : t->forwardsFromAreas) {
@@ -140,6 +130,7 @@ public:
         }
 
         // 2) fallback lineare
+        /* Eliminato 18.6.2026 per maggiore velocita
         for (const auto& item : toggles) {
             if (item.areaRead != area)
                 continue;
@@ -153,7 +144,7 @@ public:
             }
 
             return 0;
-        }
+        } */
 
         return 0;
     }
@@ -232,8 +223,6 @@ public:
 };
 
 
-
-
 enum GenericPrgDevicePriority {
   Low=0, 
   Normal=1,
@@ -280,9 +269,7 @@ class GenericPrgDevice {
 
     GenericPrgDevice(const char* name, arduino::IPAddress ip, unsigned int deviceAddress, std::vector<GenericPrgDeviceChannel> channels, std::vector<int> ioAreas, short ErrorCnt, GenericPrgDevicePriority priority);     
     bool Run();
-    
-    //structRead Read(ModbusClient &mb, int channel, uint16_t* outBuffer, unsigned long now);
-structRead Read(ModbusTCPClient &mb, int channel, uint16_t* outBuffer, unsigned long now);
+    structRead Read(ModbusTCPClient &mb, int channel, uint16_t* outBuffer, unsigned long now);
     bool Write(ModbusClient &mb, int channel, int address, int value, unsigned long now);
     int GetArea(int channel, int address);
     bool FindChannelByArea(int area, int &channel, int &item);
@@ -292,8 +279,13 @@ structRead Read(ModbusTCPClient &mb, int channel, uint16_t* outBuffer, unsigned 
     size_t GetChannelsSize();
     const char* GetName();
     unsigned int GetDeviceAddress();
-    bool IsInError();
-    
+    Errors& GetError() { return Error; }
+    void SetErrorCallback(std::function<void(GenericPrgDevice*)> fn) {
+        _onErrorChanged = fn;
+        Error.SetStateChangedCallback([this]() {
+            if (_onErrorChanged) _onErrorChanged(this);
+        });
+    }
 
   private:  
     short bank;
@@ -305,7 +297,7 @@ structRead Read(ModbusTCPClient &mb, int channel, uint16_t* outBuffer, unsigned 
     std::vector<GenericPrgDeviceChannel> _channels;
     Errors Error;
     const short MAX_CALLS=8;
-    
+    std::function<void(GenericPrgDevice*)> _onErrorChanged = nullptr;
 };
 
 class GenericPrgDeviceManager {
@@ -329,8 +321,9 @@ private:
 public:
     // ************ IO BUFFER *******************************
     //RESERVED
-    static const int AREA_SYSTEM_ERRORS=0;
-    static const int AREA_SYSTEM_RUNNING_T=1;
+    static const int AREA_TRASH=0;
+    static const int AREA_SYSTEM_ERRORS=1;
+    static const int AREA_SYSTEM_RUNNING_T=2;
     
     const int AREA_LAST_RESERVED=9; //Bit flags
     // END RESERVED
@@ -393,7 +386,6 @@ public:
             priority
         );
 
-
         // 2. Aggiorna nextArea in base alle aree manuali
         if (!areas.empty()) {
             int maxArea = *std::max_element(areas.begin(), areas.end());
@@ -440,7 +432,7 @@ public:
 
         int index = 0;
         for (auto& dev : PrgDevices) {
-            if (dev.IsInError()) {
+            if (dev.GetError().IsInError()) {
                 errors++;
 
                 if (!bitRead(Mask, index)) {

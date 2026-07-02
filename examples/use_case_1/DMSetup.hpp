@@ -28,6 +28,7 @@
 #include "DMBridge.hpp"
 #include "DMWebApiDefs.hpp"
 #include "DMPower.hpp"
+#include "DMFrontendEngines.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -100,14 +101,15 @@ DEFINE_AREA(SENSORE_BAGNO_LUX, 217)
 // VIRTUAL, end physical IO
 DEFINE_AREA(AREA_CUCINA_PIR_CMD, 222)
 DEFINE_AREA(AREA_CUCINA_DOOR_CMD, 223)
-DEFINE_AREA(AREA_INGRESSO_DOOR_CMD, 225)
-DEFINE_AREA(AREA_CAMERA_SMOKE_CMD, 226)
-DEFINE_AREA(AREA_CAMERA_PIR_CMD, 227)
-DEFINE_AREA(AREA_CAMERA_WIN1_CMD, 228)
-DEFINE_AREA(AREA_CAMERA_WIN2_CMD, 229)
-DEFINE_AREA(AREA_CAMERA_WIN3_CMD, 230)
-DEFINE_AREA(AREA_CUCINA_SMOKE_CMD, 231)
-DEFINE_AREA(AREA_CUCINA_FLOOD_CMD, 232)
+DEFINE_AREA(AREA_CUCINA_SMOKE_CMD, 224)
+DEFINE_AREA(AREA_CUCINA_FLOOD_CMD, 225)
+DEFINE_AREA(AREA_INGRESSO_PIR_CMD, 226)
+DEFINE_AREA(AREA_INGRESSO_DOOR_CMD, 227)
+DEFINE_AREA(AREA_CAMERA_SMOKE_CMD, 228)
+DEFINE_AREA(AREA_CAMERA_PIR_CMD, 229)
+DEFINE_AREA(AREA_CAMERA_WIN1_CMD, 230)
+DEFINE_AREA(AREA_CAMERA_WIN2_CMD, 231)
+DEFINE_AREA(AREA_CAMERA_WIN3_CMD, 232)
 DEFINE_AREA(AREA_BAGNO_FLOOD_CMD, 233)
 DEFINE_AREA(AREA_BAGNO_PIR_CMD, 234)
 
@@ -125,6 +127,7 @@ arduino::IPAddress WaveShareCantina_Addr=IPAddress(192, 168, 12, 205);
 static const DomoManagerConfig::Devices mainDevicesConfig = {
     {
         // --- P1 ---
+        
         { "Lettore consumi - Quadro P1", WaveShareP1_Addr, 1, "LE_01MQ",
           { 10, 11, 12, 13, 14 }, 3, Low
         },
@@ -135,8 +138,8 @@ static const DomoManagerConfig::Devices mainDevicesConfig = {
 
         { "Scheda 32DI - Parete P1", WaveShareP1_Addr, 4, "N4DIH32",
           {
-              21, 22, 23, 24, 25, 26, 27, 28,
-              29, 30, 31, 32, 33, 34, 35, 36,
+              21, 22, AREA_CAMERA_PIR_ALM, AREA_CAMERA_PIR_TAMPER, 25, 26, 27, 28,
+              AREA_CAMERA_SMOKE_ALM, 30, 31, 32, 33, 34, 35, 36,
               37, 38, 39, 40, 41, 42, 43, 44,
               45, 46, 47, 48, 49, 50, 51, 52
           },
@@ -160,9 +163,8 @@ static const DomoManagerConfig::Devices mainDevicesConfig = {
           {
               78, 79, 80, 81, 82, 83, 84, 85,
               86, 87, 88, 89, 90, 91, 92, 93,
-              94, 95, 96, 97,
-              AREA_CUCINA_PIR_ALM, AREA_CUCINA_PIR_TAMPER,
-              100, 101, 102, 103, 104, 105, 106, 107, 108, 109
+              94, 95, 96, 97, AREA_CUCINA_PIR_ALM, AREA_CUCINA_PIR_TAMPER, AREA_CUCINA_DOOR_ALM, 101, 
+              102, 103, 104, 105, 106, 107, 108, 109
           },
           3, High
         },
@@ -176,6 +178,7 @@ static const DomoManagerConfig::Devices mainDevicesConfig = {
         },
 
         // --- PT ---
+    
         { "Sensore Corrente - Quadro cucina PT", WaveSharePT_Addr, 1, "CTR4A01",
           { SENSORE_CUCINA_CORRENTE }, 3, Low
         },
@@ -213,7 +216,7 @@ static const DomoManagerConfig::Devices mainDevicesConfig = {
               181, 182, 183, 184, 185, 186
           },
           3, High
-        },
+        }, 
 
         { "Sensore Light/Temp/Hum - cucina PT", WaveSharePT_Addr, 10, "CWT_THCO_2K",
           { SENSORE_CUCINA_HUM, SENSORE_CUCINA_TEMP, SENSORE_CUCINA_LUX }, 3, Low
@@ -240,7 +243,7 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     { AREA_PMETER_POWER,   0, "Lettura consumo W.", {true,false,false}, {400,700} },
 
     { 13, 0, "Lettura consumo 4", {true,false,false}, {-1,-1} },
-    { 14, 0, "Lettura frequenza Hz.", {true,false,false}, {5,10} },
+    { 14, 0, "Lettura frequenza Hz.", {true,false,false}, {10,20} },
 
     // **** 4 DI EbYTE ID=8 
     { 15, 0, "", {false,false,false}, {-1,-1} },
@@ -268,7 +271,7 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     // Pulsanti scala
     { 54, 57, "Pulsante scala 3", {true,true,false}, {-1,-1} },   // forwardArea = 57
     { 55, 0,  "Pulsante scala 1", {true,true,false}, {-1,-1} },   // -------A
-    { 56, 59, "Pulsante scala 2 (Luce PT)", {true,true,false}, {-1,-1} }, // forwardArea = 59
+    { 56, AREA_PLAFONIERA_EXT, "Pulsante scala 2 (Luce PT)", {true,true,false}, {-1,-1} }, // forwardArea = 59
 
     // 4 DO EbYTE
     { 57, 0, "Luce scale P1", {false,false,false}, {-1,-1} },
@@ -672,7 +675,7 @@ static const char* AUTOMATION_JSON = R"json(
 DomoManagerConfig makeDomoConfig() {
     DomoManagerConfig cfg;   // usa tutti i default della struct
 
-    cfg.hmi.enabled = false;   // opzionale, è già default
+    cfg.hmi.enabled = true;   // opzionale, è già default
     cfg.hmi.port = 502;        // default
     cfg.hmi.pollingMs = 500;   // default
 
@@ -719,8 +722,10 @@ static DomoManagerConfig domoConfig = makeDomoConfig();
 static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
 
     // ============================
-    // PIR CUCINA
+    // CUCINA
     // ============================
+
+    // PIR CUCINA
     { "Cucina",
         {
             SensorChannel(-1, RT_DELAY, SensorChannelType::RT),
@@ -761,7 +766,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     },
 
     // ============================
-    // PIR CAMERA
+    // CAMERA
     // ============================
     { "Camera",
         {
@@ -810,7 +815,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     },
 
     // ============================
-    // Flood Bagno
+    // BAGNO
     // ============================
     { "Bagno",
         { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
@@ -820,7 +825,21 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
         SensorCategory::FLOOD
     },
 
-    // Porta Ingresso
+    { "Bagno",
+        {
+            SensorChannel(-1, RT_DELAY, SensorChannelType::RT),
+            SensorChannel(-1, INITIAL_DELAY,      SensorChannelType::H24)
+        },
+        {
+            [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_BAGNO_PIR_ALM) != 0; },
+            [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_BAGNO_PIR_TAMPER) != 0; }
+        },
+        SensorCategory::PIR
+    },
+
+    // ============================
+    // INGRESSO
+    // ============================
     { "Ingresso",
         { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
         {
@@ -1073,6 +1092,13 @@ static const AEEVarDef AEE_VARS[] = {
         nullptr, nullptr, nullptr,
         AEEVarType::BOOL },
 
+    { "systemStatus", AEEDirection::FrontendToModule,
+        AEEVarSourceType::BufferArea,
+        DeviceManager::AREA_SYSTEM_ERRORS, -1,
+        {},
+        nullptr, nullptr, nullptr,
+        AEEVarType::BOOL },
+
     // ============================================================
     // PRESENZA (modulo → frontend)
     // ============================================================
@@ -1093,7 +1119,7 @@ static const AEEVarDef AEE_VARS[] = {
     // ============================================================
     // HVAC (funzioni)
     // ============================================================
-    { "temperaturaMedia", AEEDirection::FrontendToModule,
+    { "temperaturaMediaInterna", AEEDirection::FrontendToModule,
         AEEVarSourceType::Function,
         -1, -1,
         {},
@@ -1104,15 +1130,15 @@ static const AEEVarDef AEE_VARS[] = {
         0.3f   // 🔥 minDelta = 0.3°C
     },
 
-    { "temperaturaInterna", AEEDirection::FrontendToModule,
+    { "umiditaMedia", AEEDirection::FrontendToModule,
         AEEVarSourceType::Function,
         -1, -1,
         {},
-        [](){ return DomoManager::instance->getAverages().groupAverage("Temperature"); },
+        [](){ return DomoManager::instance->getAverages().groupAverage("Umidita"); },
         nullptr,
         nullptr,
         AEEVarType::FLOAT, 
-        0.3f   // 🔥 minDelta = 0.3°C
+        0.5f   // 🔥 minDelta = 0.3°C
     },
 
     // ============================================================
@@ -1136,18 +1162,7 @@ static const AEEVarDef AEE_VARS[] = {
         -1, -1,
         {},
         nullptr, nullptr, nullptr,
-        AEEVarType::INT },
-
-    // ============================================================
-    // DIAGNOSTICA (funzione)
-    // ============================================================
-    { "peerOnline", AEEDirection::FrontendToModule,
-        AEEVarSourceType::Function,
-        -1, -1,
-        {},
-        nullptr, nullptr,
-        [](){ return BridgeEngine::isPeerOnline(); },
-        AEEVarType::BOOL },
+        AEEVarType::INT, 0.0f },
         
 };
 

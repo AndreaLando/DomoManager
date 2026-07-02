@@ -132,11 +132,6 @@ GenericPrgDevice::GenericPrgDeviceChannel GenericPrgDevice::GetChannelInfo(int c
   }
 }
 
-bool GenericPrgDevice::IsInError()
-{ 
-  return this->Error.IsInError(); //this->_inError;
-}
-
 size_t GenericPrgDevice::GetChannelsSize()
 { 
   return this->_channels.size();
@@ -200,30 +195,24 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
     // Avanza il bank per la prossima chiamata
     this->bank++;
 
-
     int tmpRead = 0;
     switch (this->_channels[channel].hwType)
     {
         case Hold:
           if (!this->Error.IsInError()) {
-            int toRead = retVal.items * this->_channels[channel].ItemsPerCall;
-            LOG_DF("READ::Read",
-              "dev=%s addr=%d func=%d start=%d toRead=%d bank=%d items=%d itemsPerCall=%d",
+            /*LOG_DF("READ HOLD", "Device %s addr=%d channel=%d bank=%d",
               this->_name,
               this->_deviceAddress,
-              this->_channels[channel].hwType,
-              startingAddr,
-              retVal.items * this->_channels[channel].ItemsPerCall,
-              this->bank,
-              retVal.items,
-              this->_channels[channel].ItemsPerCall);
+              channel,
+              this->bank);*/
 
+            int toRead = retVal.items * this->_channels[channel].ItemsPerCall;
+        
             tmpRead = cli.requestFrom(this->_deviceAddress,
                                           HOLDING_REGISTERS,
                                           startingAddr,
                                           toRead);
-            LOG_DF("READ", "start=%d toRead=%d tmpRead=%d", startingAddr, toRead, tmpRead);
-
+            
             if (tmpRead > 0) {
                 for (int i = 0; i < tmpRead; i++) {
                     long v = cli.read();
@@ -239,8 +228,10 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
                 retVal.ok = true;
             } 
             else  {
-                this->Error.Loop(true, now);
-                retVal.ok = false;
+              //LOG_EF(__FUNCTION__, "ERROR (Hold): %s", cli.lastError());
+
+              this->Error.Loop(true, now);
+              retVal.ok = false;
             }
           } 
           else {
@@ -252,11 +243,17 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
 
         case Input:
             if (!this->Error.IsInError()) {
+              /*LOG_DF("READ INPUT", "Device %s addr=%d channel=%d bank=%d",
+                this->_name,
+                this->_deviceAddress,
+                channel,
+                this->bank);*/
+
               tmpRead = cli.requestFrom(this->_deviceAddress,
                                         INPUT_REGISTERS,
                                         startingAddr,
                                         retVal.items * this->_channels[channel].ItemsPerCall);
-
+              
               if (tmpRead != 0) {
                   for (int i = 0; i < tmpRead; i++)
                       outBuffer[i] = cli.read();
@@ -264,18 +261,26 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
                   this->Error.Loop(false, now);
                   retVal.ok = true;
               } else if(!this->Error.Loop(true, now)) {
-                LOG_DF(__FUNCTION__, "ERROR (Input): name=%s IP=%d.%d.%d.%d Addr=%d", this->_name, this->_ip[0], this->_ip[1], this->_ip[2], this->_ip[3], this->_deviceAddress);
+                
+                //LOG_EF(__FUNCTION__, "ERROR (Input): name=%s IP=%d.%d.%d.%d Addr=%d", this->_name, this->_ip[0], this->_ip[1], this->_ip[2], this->_ip[3], this->_deviceAddress);
+                //LOG_EF(__FUNCTION__, "ERROR (Input): %s", cli.lastError());
               }
             } else this->Error.Loop(true, now);
             break;
 
         case Discrete:
             if (!this->Error.IsInError()) {
+              /*LOG_DF("READ DISCRETE", "Device %s addr=%d channel=%d bank=%d",
+                this->_name,
+                this->_deviceAddress,
+                channel,
+                this->bank);*/
+
                 tmpRead = cli.requestFrom(this->_deviceAddress,
                                          DISCRETE_INPUTS,
                                          startingAddr,
                                          retVal.items);
-
+              
                 if (tmpRead != 0) {
                     for (int i = 0; i < tmpRead; i++)
                         outBuffer[i] = cli.read();
@@ -283,7 +288,8 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
                     this->Error.Loop(false, now);
                     retVal.ok = true;
                 } else if(!this->Error.Loop(true, now)) {
-                  LOG_DF(__FUNCTION__, "ERROR (Discrete): name=%s IP=%d.%d.%d.%d Addr=%d", this->_name, this->_ip[0], this->_ip[1], this->_ip[2], this->_ip[3], this->_deviceAddress);
+                  //LOG_EF(__FUNCTION__, "ERROR (Discrete): name=%s IP=%d.%d.%d.%d Addr=%d", this->_name, this->_ip[0], this->_ip[1], this->_ip[2], this->_ip[3], this->_deviceAddress);
+                  //LOG_EF(__FUNCTION__, "ERROR (Discrete): %s", cli.lastError());
                 }
             } else this->Error.Loop(true, now);
             break;
@@ -316,15 +322,18 @@ bool GenericPrgDevice::Write(ModbusClient &mb, int channel, int address, int val
   if(this->_channels[channel].type==DO || this->_channels[channel].type==AO) {
     int tmpResult=0;
 
+    /*LOG_DF("TIMING", "[WRITE_OK] dev=%s addr=%d area=%d time=%lu",
+       this->_name, this->_deviceAddress, address, now);*/
+
     switch(this->_channels[channel].hwType) {
       case Hold: //Hold
         tmpResult=mb.holdingRegisterWrite(this->_deviceAddress, address, value);
         
         if(!this->Error.Loop(tmpResult==0, now)) {
-          LOG_DF("GenericPrgDevice", "ERROR (Write Holding): %s", this->_name); 
+          //LOG_EF("GenericPrgDevice", "ERROR (Write Holding): %s", this->_name); 
           return false;
         }
-        
+
         return tmpResult!=0;
       break;
 
@@ -332,10 +341,10 @@ bool GenericPrgDevice::Write(ModbusClient &mb, int channel, int address, int val
         tmpResult=mb.coilWrite(this->_deviceAddress, address, value);
                 
         if(!this->Error.Loop(tmpResult==0, now)) {
-          LOG_DF(__FUNCTION__, "ERROR (Write coil): name=%s DevAddr=%d Addr=%d Value=%d", this->_name, this->_deviceAddress, address, value); 
+          //LOG_EF(__FUNCTION__, "ERROR (Write coil): name=%s DevAddr=%d Addr=%d Value=%d", this->_name, this->_deviceAddress, address, value); 
           return false;
         }
-   
+
         return tmpResult!=0;
       break;
 

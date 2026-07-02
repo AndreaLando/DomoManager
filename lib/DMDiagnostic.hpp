@@ -220,8 +220,6 @@ public:
 
 class Diagnostic {
 public:
-    
-
     // ============================================================
     // CALLBACK FRONTEND DIAGNOSTIC
     // ============================================================
@@ -600,9 +598,6 @@ public:
                 if (s.maxTime > 0 && now - infoOut.time > s.maxTime)
                     Serial.println(" - WARNING: Out area timeout exceeded.");
 
-                if (!buffer.WasEverWritten(out))
-                    Serial.println(" - WARNING: Out area never written.");
-
                 if (buffer.IsVirtual(out))
                     Serial.println(" - NOTE: Out area is virtual.");
             }
@@ -657,9 +652,6 @@ public:
 
         if (cfg.reportMissingBufferDefs)
             ReportMissingBufferDefinitions(manager);
-
-        if (cfg.reportUnusedBufferAreas)
-            Buffer::Diagnostics::ReportUnusedBufferAreas(buf);
 
         if (cfg.reportNeverInitialized)
             Buffer::Diagnostics::ReportNeverInitialized(buf);
@@ -742,9 +734,34 @@ void Diagnostic::ReportDeviceErrors(DomoManager& dm)
     unsigned long mask = 0;
     int index = 0;
     int totalErrors = 0;
+    int totalParked = 0;
 
     for (auto& dev : devs) {
-        if (dev.IsInError()) {
+
+        auto& err = dev.GetError();
+
+        // 🔥 1. Device in PARKING → NON mostrarlo negli errori
+        if (err.IsVisibleParked()) {
+            totalParked++;
+
+            Serial.print("Device ");
+            Serial.print(index);
+            Serial.print(" → PARKED | ");
+            Serial.print(dev.GetName());
+            Serial.print(" | IP=");
+            Serial.print(dev.GetIp()[0]); Serial.print(".");
+            Serial.print(dev.GetIp()[1]); Serial.print(".");
+            Serial.print(dev.GetIp()[2]); Serial.print(".");
+            Serial.print(dev.GetIp()[3]);
+            Serial.print(" | Addr=");
+            Serial.println(dev.GetDeviceAddress());
+
+            index++;
+            continue;   // 🔥 NON entra nella sezione ERROR
+        }
+
+        // 🔥 2. Device in errore normale
+        if (err.IsVisibleError()) {
             bitSet(mask, index);
             totalErrors++;
 
@@ -760,18 +777,24 @@ void Diagnostic::ReportDeviceErrors(DomoManager& dm)
             Serial.print(" | Addr=");
             Serial.println(dev.GetDeviceAddress());
         }
+
         index++;
     }
 
-    if (totalErrors == 0) {
+    // 🔥 riepilogo
+    if (totalErrors == 0 && totalParked == 0) {
         Serial.println("Nessun device in errore.");
     }
 
     Serial.print("Error bitmask = 0x");
     Serial.println(mask, HEX);
 
+    Serial.print("Parked devices: ");
+    Serial.println(totalParked);
+
     Serial.println("===== END DEVICE ERROR REPORT =====\n");
 }
+
 
 void Diagnostic::ReportWatchdogs(DomoManager& manager)
 {

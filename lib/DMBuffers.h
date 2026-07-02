@@ -66,7 +66,7 @@ enum BufferFlagType
 };
 
 typedef struct {
-    BufferFlagType bufferType;
+    //BufferFlagType bufferType;
     unsigned long time; //in millis, that take 50 days to go back to zero. -1 means never write or no change
     long value;
     long prevValue;
@@ -82,8 +82,6 @@ typedef struct {
     int areaToWrite;
     String name;
     bool isVirtual = false;
-    bool wasRead = false;
-    bool wasWritten = false;
 }BufferInfo;
 
 typedef struct {
@@ -259,10 +257,7 @@ class Buffer
         long tmp = _buffer[area].Data[Field].value;
         
         // 🔥 Il valore è gia salvato NEGATO se reverse
-        //if (_buffer[area].Reverse) 
-        //    tmp = !tmp;
-
-        _buffer[area].wasRead = true;
+              
 
         // Se divideFactor = 0 → ritorna booleano o valore intero
         if (divideFactor == 0) {
@@ -296,19 +291,11 @@ class Buffer
 }
 
 
-    bool WasEverRead(int area) const {
-        return (area >= 0 && area < _items) ? _buffer[area].wasRead : false;
-    }
-
-    bool WasEverWritten(int area) const {
-        return (area >= 0 && area < _items) ? _buffer[area].wasWritten : false;
-    }
-
     BufferReadElementInfo ReadElement(int area, bool preserve, BufferFlagType type);
     void ResetElement(int area, BufferFlagType type);
     void ResetArea(int area);
     void ResetType(BufferFlagType type);
-    void ResetAll(unsigned long minTime=1000);
+    void ResetAll(unsigned long now, unsigned long minAgeMs=1000);
 
     inline const std::unordered_map<int, ChangedEntry>& getChangedMap() const {
         //Come get changed ma torna la mappa direttamente, più veloce

@@ -235,34 +235,62 @@ public:
 
 class Logger {
 private:
+    static constexpr int MAX_LOG_LINE = 80;
+
     static inline LogBuffer LogHistory;
 
     static void logInternal(LogLevel level,
-                            const char *className,
-                            const char *functionName,
-                            const char *msg)
+                        const char *className,
+                        const char *functionName,
+                        const char *msg)
     {
         unsigned long now = millis();
 
-        Serial.print("[");
-        Serial.print(now);
-        Serial.print(" ms][");
+        // Header comune
+        char header[96];
+        snprintf(header, sizeof(header),
+                "[%lu ms][%s][%s::%s] ",
+                now,
+                (level == LogLevel::ERROR ? "❌ ERROR" :
+                level == LogLevel::WARN  ? "⚠️ WARN"  :
+                level == LogLevel::INFO  ? "ℹ️ INFO"  :
+                                            "🐞 DEBUG"),
+                className,
+                functionName);
 
-        switch (level) {
-            case LogLevel::ERROR: Serial.print("❌ ERROR"); break;
-            case LogLevel::WARN:  Serial.print("⚠️ WARN");  break;
-            case LogLevel::INFO:  Serial.print("ℹ️ INFO");  break;
-            case LogLevel::DEBUG: Serial.print("🐞 DEBUG"); break;
+        const size_t headerLen = strlen(header);
+
+        // Buffer per la riga completa (header + chunk)
+        char line[headerLen + MAX_LOG_LINE + 2];
+
+        // Scorri il messaggio e spezza ogni MAX_LOG_LINE caratteri
+        const char* p = msg;
+
+        while (*p) {
+            size_t chunkLen = 0;
+
+            // Calcola quanti caratteri stampare in questa riga
+            while (chunkLen < MAX_LOG_LINE && p[chunkLen] != '\0') {
+                chunkLen++;
+            }
+
+            // Copia header
+            memcpy(line, header, headerLen);
+
+            // Copia chunk
+            memcpy(line + headerLen, p, chunkLen);
+
+            // Terminatore
+            line[headerLen + chunkLen] = '\0';
+
+            // Stampa la riga
+            Serial.println(line);
+
+            // Avanza
+            p += chunkLen;
         }
-
-        Serial.print("][");
-        Serial.print(className);
-        Serial.print("::");
-        Serial.print(functionName);
-        Serial.print("] ");
-
-        Serial.println(msg);
     }
+
 
 public:
     static void ReportLogBuffer(Stream& out) {

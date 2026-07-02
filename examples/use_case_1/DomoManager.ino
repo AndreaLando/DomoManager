@@ -36,7 +36,6 @@ static const DiagnosticConfig diagnosticParams = {
         .reportRTC                  = true,
         .reportHotStandby           = true,
         .reportVirtualAreas         = false,
-        .reportUnusedBufferAreas    = false,
         .reportNeverInitialized     = false,
         .reportMultipleInitialized  = true,
         .reportAutomationConfig     = false,
@@ -71,8 +70,7 @@ static FrontendConfig mainConfig = [](){
     c.net.subnet  = IPAddress(255, 255, 255, 0);
 
     // --- IOT ---
-    c.bridge.enabled    = false;
-    c.bridge.intervalMs = 500;
+    c.bridge.enabled    = true;
     c.bridge.ip         = IPAddress(192,168,12,201);
     c.bridge.localPort  = 8888;
     c.bridge.remotePort = 8888;
@@ -121,12 +119,12 @@ static FrontendConfig mainConfig = [](){
 
     // --- WEATHER ---
     c.weather.enabled    = false;
-    c.weather.intervalMs=2000;
+    c.weather.intervalMs=5000;
     c.weather = WEATHER_PARAMS;
 
     // --- POWER SUPERVISOR ---
     c.ps.enabled    = false;
-    c.ps.intervalMs = 1500;
+    c.ps.intervalMs = 5000;
     c.ps.mainPower = { GenericSensor::Config::Type::BUFFER, AREA_PMETER_VOLTAGE, 0.01f };
     c.ps.i24vOk    = { GenericSensor::Config::Type::DIGITAL, I1 };
     c.ps.fault     = { GenericSensor::Config::Type::DIGITAL, I2 };
@@ -147,7 +145,7 @@ static FrontendConfig mainConfig = [](){
 
     // --- Averages ---
     c.averages.enabled = true;
-    c.averages.intervalMs = 10000;   // intervallo task
+    c.averages.intervalMs = 15000;   // intervallo task
     c.averages.gruppi = MEAN_GROUPS;
     c.averages.gruppiCount = sizeof(MEAN_GROUPS) / sizeof(MEAN_GROUPS[0]);
 

@@ -502,7 +502,7 @@ public:
             zoneMap[cfg[i].zone].push_back(s);
         }
 
-        LOG_IF("WiredSensors", "Init: configurati %u sensori", (unsigned)count);
+        LOG_DF("WiredSensors", "Init: configurati %u sensori", (unsigned)count);
     }
 
     void Init(const ConfigType* cfg, size_t count, uint32_t startupInhibitMs) {
@@ -524,7 +524,7 @@ public:
             zoneMap[cfg[i].zone].push_back(s);
         }
 
-        LOG_IF("WiredSensors",
+        LOG_DF("WiredSensors",
             "Init: configurati %u sensori (startup inhibit=%u ms)",
             (unsigned)count, startupInhibitMs);
     }

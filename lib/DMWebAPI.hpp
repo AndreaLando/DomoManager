@@ -21,9 +21,8 @@
 
 #include <Arduino.h>
 
+#include "DMAEECore.hpp"        
 
-#include "DMAEE.hpp"        
-#include "DMDeclares.h" 
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -199,6 +198,68 @@ public:
     }
 };
 
+// ************ DEFINIZIONE STRUTTURA WebAPI *******************************
+
+// ============================================================================
+// DEVICE MESSAGE PROFILE
+// ============================================================================
+struct DeviceMessageProfile {
+
+    uint16_t profileId;
+    const char* name;
+
+    struct OutMessage {
+        const char* key;
+        const char* format;
+        const char* method;     // GET / POST
+        const char* endpoint;   // opzionale
+    };
+
+    struct InField {
+        const char* key;
+        const char* pattern;    // es: "ack=([0-9]+)"
+    };
+
+    struct CorrelationRule {
+        const char* outKey;
+        const char* expectedIn;
+        const char* condition;  // "always", "optional", "value == 1"
+    };
+
+    struct InToRegistryMap {
+        const char* inKey;
+        const char* regKey;
+        const char* transform;  // "int", "bool", "string", "raw"
+    };
+
+    struct StateRule {
+        const char* state;
+        const char* onEvent;
+        const char* nextState;
+        const char* action;     // messaggio OUT da inviare
+    };
+
+    const OutMessage* outMessages;
+    size_t outCount;
+
+    const InField* inFields;
+    size_t inCount;
+
+    const CorrelationRule* rules;
+    size_t ruleCount;
+
+    const InToRegistryMap* regMap;
+    size_t regMapCount;
+
+    const StateRule* stateRules;
+    size_t stateRuleCount;
+};
+
+struct DeviceMessageGroup {
+    const char* groupName;
+    const DeviceMessageProfile* profiles;
+    size_t profileCount;
+};
 
 struct ParsedField {
     String key;

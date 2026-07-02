@@ -252,7 +252,7 @@ private:
                     rule
                 );
 
-                LOG_IF("AutomationBuilder",
+                LOG_DF("AutomationBuilder",
                     "CompositeRule dinamica caricata: '%s' con %d input",
                     r.name.c_str(),
                     r.composite.inputs.size()
@@ -963,8 +963,8 @@ bool AutomationBuilder::parseJson(const char* json, AutomationConfig& out)
             // ------------------------------------------------------------
             // VALIDAZIONE SCENE TRUE/FALSE (con supporto NoAction)
             // ------------------------------------------------------------
-            bool sceneTrueExists = (rc.sceneTrue == "NoAction");
-            bool sceneFalseExists = (rc.sceneFalse == "NoAction");
+            bool sceneTrueExists = (rc.sceneTrue == AutomationEngine::BuiltinScenes::toString( AutomationEngine::BuiltinScenes::Type::NoAction ) );
+            bool sceneFalseExists = (rc.sceneFalse == AutomationEngine::BuiltinScenes::toString( AutomationEngine::BuiltinScenes::Type::NoAction ) );
 
             // Controlla sceneTrue se non è NoAction
             if (!sceneTrueExists) {
@@ -1026,8 +1026,7 @@ bool AutomationBuilder::parseJson(const char* json, AutomationConfig& out)
         }
     }
 
-
-    LOG_I("Automation", "JSON automazioni caricato correttamente");
+    LOG_D("Automation", "JSON automazioni caricato correttamente");
     return true;
 }
 

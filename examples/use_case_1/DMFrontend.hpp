@@ -18,11 +18,30 @@
 
    ============================================================================ */
 
-#include "DMFrontendEngines.hpp"
+#include "DMFrontendOrchestrators.hpp"
 #include "DMAdapters.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
+
+//Callbacks
+static void OnAEEVarChanged(AEEVariableBase* v, unsigned long now) {
+    if (strcmp(v->def.name, "epoch") == 0) {
+        int e = as<int>(v)->get();
+        LOG_IF("AEE", "Epoch ricevuto dallo SLAVE: %d → applico al RTC", e);
+
+        DomoManager::instance
+            ->getTimeManager()
+            .getRTC()
+            .applyEpoch(e);
+        
+        v->clearChanged();
+
+        return;
+    }
+
+    // Qui puoi gestire altre variabili M2F o BIDIR
+}
 
 class TaskEngine;
 
@@ -358,7 +377,7 @@ private:
                 SecurityOrchestrator::RegisterCallbackZoneType(zoneName, t, onZoneTypeAlarm);
         }
 
-        LOG_IF("SecurityFrontend", "Dynamic security callbacks registered");
+        LOG_DF("SecurityFrontend", "Dynamic security callbacks registered");
     }
 
 public:
@@ -367,12 +386,11 @@ public:
     // SETUP
     // ------------------------------------------------------------
     static void Setup(const FrontendConfig::Security& cfg) {
-
         SecurityOrchestrator::Setup(&cfg);
 
         registerSecurityCallbacks();
 
-        LOG_IF("SecurityFrontend", "Security frontend setup completed");
+        LOG_DF("SecurityFrontend", "Security frontend setup completed");
     }
 
     // ------------------------------------------------------------
@@ -542,9 +560,8 @@ public:
 
 class TaskEngine {
 private:
-    // AEE appartiene al frontend, NON al backend
-    static inline AEERegistry* aee = nullptr;
-    static inline AEEManagement* aeeMgr = nullptr;
+    static AEERegistry* aee() { return &AEEEngine::getAEE(); }
+    static AEEManagement* aeeMgr() { return &AEEEngine::getMgr(); }
 
 private:
     
@@ -554,32 +571,7 @@ private:
     static void Task_Jobs(DomoManager& manager, unsigned long now) {
         JobsEngine::Loop(now);
     }
-
-    // ------------------------------------------------------------------------
-    //  TASK: Bridge STATUS
-    // ------------------------------------------------------------------------
     
-    static void Task_Bridge_Status(DomoManager& manager,
-                            unsigned long now) {
-        // ============================================================
-        // 1) Serializza SOLO le variabili AEE cambiate
-        // ============================================================
-        if (!TaskEngine::aee)
-            return;
-
-        String json = AEEProtocol::serializeChangedJSON(*TaskEngine::aee);
-
-        // Nessun cambiamento → niente invio
-        if (json.length() == 0)
-            return;
-
-        // 🔥 2) Invia JSON in un unico pacchetto
-        BridgeEngine::SendRaw(json);
-
-        LOG_IF("AEE", "[SEND] %s", json.c_str());
-    }
-
-
     // ------------------------------------------------------------------------
     //  TASK: HVAC
     // ------------------------------------------------------------------------
@@ -664,8 +656,6 @@ private:
 
             LOG_DF("AVERAGES", "%s = %.2f", gruppo.nome, average);
         }
-
-        // eventuale invio bridge...
     }
 
     // ------------------------------------------------------------------------
@@ -748,45 +738,13 @@ private:
         PowerSupervisorEngine::Loop(now);
     }
 
-    static void Task_AEE_Monitor(DomoManager& manager, unsigned long now) {
-        if (!TaskEngine::aee)
-            return;
-
-        TaskEngine::aee->forEachChanged([](AEEVariableBase* v){
-            switch (v->def.varType) {
-                case AEEVarType::BOOL:
-                    LOG_IF("AEE-MON", "%s = %d", 
-                        v->def.name, 
-                        as<bool>(v)->get());
-                    break;
-
-                case AEEVarType::INT:
-                    LOG_IF("AEE-MON", "%s = %d", 
-                        v->def.name, 
-                        as<int>(v)->get());
-                    break;
-
-                case AEEVarType::FLOAT:
-                    LOG_IF("AEE-MON", "%s = %.2f", 
-                        v->def.name, 
-                        as<float>(v)->get());
-                    break;
-
-                default:
-                    break;
-            }
-        });
-
-        TaskEngine::aee->clearAllChanged();
-    }
-
     static void Task_AEE_Dump(DomoManager& manager, unsigned long now) {
         if (!TaskEngine::aee)
             return;
 
         StaticJsonDocument<1024> doc;
 
-        TaskEngine::aee->forEach([&](AEEVariableBase* v){
+        TaskEngine::aee()->forEach([&](AEEVariableBase* v){
             v->toJson(doc);
         });
 
@@ -821,7 +779,8 @@ private:
 
             case 1:
                 if (cfg.bridge.enabled)
-                    BridgeEngine::Loop(now);
+                    BridgeEngine::get().loop(now);
+
                 break;
 
             case 2:
@@ -834,17 +793,7 @@ private:
         if (rr > 2) rr = 0;
     }
 
-
 public:
-
-    // ------------------------------------------------------------
-    //  AEE ATTACH (solo frontend)
-    // ------------------------------------------------------------
-    static void AttachAEE(AEERegistry* reg, AEEManagement* mgr) {
-        aee = reg;
-        aeeMgr = mgr;
-    }
-
     // ------------------------------------------------------------
     //  SETUP: registra i task standard
     // ------------------------------------------------------------
@@ -859,7 +808,6 @@ public:
         TaskEngineOrchestrator::AddTask(Task_Power,           cfg.power.intervalMs, cfg.power.enabled);
         TaskEngineOrchestrator::AddTask(Task_PowerSupervisor, cfg.ps.intervalMs, cfg.ps.enabled);
         TaskEngineOrchestrator::AddTask(Task_Averages,        cfg.averages.intervalMs, cfg.averages.enabled);
-        TaskEngineOrchestrator::AddTask(Task_Bridge_Status,   cfg.bridge.intervalMs, cfg.bridge.enabled);
         TaskEngineOrchestrator::AddTask(Task_Communication,   100, true); // round robin interno
         TaskEngineOrchestrator::AddTask(Task_Jobs,            cfg.jobs.intervalMs, cfg.jobs.enabled);
     }
@@ -1074,9 +1022,8 @@ private:
     //  INIT (solo Engine)
     // ------------------------------------------------------------
     static void InitEngines(DomoManager& manager) {
-        if(config.security.enabled) {
+        if(config.security.enabled)
             SecuritySensorEngine::Setup(config.security);
-        }
 
         if(config.hvac.enabled)
             HVACEngine::Setup(config.hvac);
@@ -1092,10 +1039,8 @@ private:
 
         JobsEngine::Setup();
         
-        if (config.domoManager.automation.json) {
+        if (config.domoManager.automation.json)
             manager.loadAutomationJson(config.domoManager.automation.json);
-            LOG_I("Automation", "Automation JSON loaded from FrontendConfig");
-        }
 
         WebAPIEngine::Setup(config.webApi);
 
@@ -1126,6 +1071,7 @@ public:
         LOG_I("DomoManagerFrontendEngine", "DomoManager is starting...");
 
         AEEEngine::instance().Setup(cfg.bridge.aee);
+        TaskEngine::Setup(cfg);
 
         Manager = new DomoManager(
             cfg.pins.leds
@@ -1158,6 +1104,9 @@ public:
         // --- INIZIALIZZA TUTTI GLI ENGINE ---
         InitEngines(*Manager);   
 
+        //Collego callback agli eventi di modifica Aee dallo slave vs. master
+        BridgeEngine::get().onFrontendAEEChange = OnAEEVarChanged;
+        
         LOG_IF("AEE", "AEE initialized with %d variables", cfg.bridge.aee.count);
 
         // --- HOTSTANDBY / MQTT / Bridge ---
@@ -1174,8 +1123,8 @@ public:
                     cfg.bridge.remotePort
                 );
 
-
-                BridgeEngine::Init(&transport, AEEEngine::getAEE());
+                //Partenza come MASTER
+                BridgeEngine::get().init(&transport, AEEEngine::getAEE(), true);
             }
 
         #endif
@@ -1212,9 +1161,8 @@ public:
 
         // --- WATCHDOG ---
         Manager->enableWatchdog();
-        LOG_IF("DOMO MANAGER", "Sistema inizializzato");
-
-        dm.getOwner().setDeveloper(OwnerManager::SYSTEM_REBOOT);
+        LOG_IF("DOMO MANAGER", "DOMO-MANAGER IS STARTING...");
+        LOG_IF("DOMO MANAGER", "********************* 06.2027 build 01");
     }
 
     // ------------------------------------------------------------
@@ -1229,9 +1177,24 @@ public:
             Manager->getWatchDiag().onButtonPressed(*Manager, 0, config.diagnostic );
         } else  if (st.pressedNow) {
             LOG_IF("BUTTON", "Pulsante premuto durante il loop");
-            Manager->getWatchDiag().onButtonPressed(*Manager, 1, config.diagnostic);
+            
+            auto& wd = Manager->getWatchDiag();
+            if (wd.isPaused()) {
+                // 🔥 Siamo in modalità WATCH → riattiva log e chiudi diagnostica Watch
+                wd.onButtonPressed(*Manager, 1, config.diagnostic);
+            } else {
+                // 🔥 Modalità normale → diagnostica estesa OwnerManager
+                Manager->getWatchDiag().onButtonPressed(*Manager, 1, config.diagnostic);
+            }
         }
         
+        // 🔥 Attiva DEVELOPER dopo il primo ciclo
+        static bool devModeApplied = false;
+        if (!devModeApplied) {
+            Manager->getOwner().setDeveloper(OwnerManager::SYSTEM_REBOOT);
+            devModeApplied = true;
+        }
+
         #if HOTSTANDBY_ENABLED
             static bool lastMaster = false;
             bool isMaster = Manager->isClusterMaster();

@@ -12,7 +12,7 @@ Buffer::Buffer(unsigned int items)
         // azzera i dati
         for (int t = 0; t < BufferFlagType_Count; t++) {
             info.exists[t] = false;
-            info.Data[t] = { (BufferFlagType)t, 0, 0, 0 };
+            info.Data[t] = { 0, 0, 0 };
         }
 
         info.Reverse       = false;
@@ -21,8 +21,6 @@ Buffer::Buffer(unsigned int items)
         info.areaToWrite   = -1;
         info.name          = String();
         info.isVirtual     = false;
-        info.wasRead       = false;
-        info.wasWritten    = false;
     }
 }
 
@@ -50,7 +48,6 @@ void Buffer::AddType(int area, long initialValue, BufferFlagType type) {
     auto &info = _buffer[area];
 
     info.Data[type] = {
-        .bufferType = type,
         .time = millis(),
         .value = initialValue,
         .prevValue = 0
@@ -107,9 +104,9 @@ inline void Buffer::markChanged(int area, BufferFlagType type) {
   // Inserisce o sovrascrive
   _changed[key] = { area, type };
 
-   LOG_DF("Buffer",
+   /*LOG_DF("Buffer",
                "Area %d markChanged (type=%d)",
-               area, type);
+               area, type);*/
 }
 
 
@@ -124,33 +121,19 @@ bool Buffer::WriteElement(int area,
         return false;
     }
 
-    auto &info = _buffer[area];
-    // 🔥 Se l’area NON è inizializzata → creiamo una "safe area"
-    if (info.name == nullptr) {
-        info.name = (char*)"AutoCreated";
-        info.ReadFromPanel = false;
-        info.WriteToPanel = false;
-        info.Reverse = false;
-        info.areaToWrite = -1;
-        info.isVirtual = false;
-        info.wasRead = false;
-        info.wasWritten = false;
+    /*LOG_DF("TIMING", "[AREA_CHANGED] area=%d value=%ld time=%lu",
+       area, value, now);*/
 
-        LOG_DF("Buffer",
-               "Area %d auto‑creata (nome=AutoCreated, type=%d)",
-               area, type);
-    }
-    
+    auto &info = _buffer[area];    
     if (!info.exists[type]) {
         // crea nuovo
-        info.Data[type] = { type, now, value, 0 };
+        info.Data[type] = { now, value, 0 };
         info.exists[type] = true;
         if (!silent) markChanged(area, type);
-        _buffer[area].wasWritten = true;
 
-        LOG_DF("Buffer",
+        /*LOG_DF("Buffer",
                "Area %d nuova (nome=AutoCreated, type=%d)",
-               area, type);
+               area, type);*/
         return true;
     }
 
@@ -160,11 +143,10 @@ bool Buffer::WriteElement(int area,
         entry.value = value;
         entry.time = now;
         if (!silent) markChanged(area, type);
-        _buffer[area].wasWritten = true;
-
-        LOG_DF("Buffer",
+        
+        /*LOG_DF("Buffer",
                "Area %d valore aggiornato (nome=AutoCreated, type=%d)",
-               area, type);
+               area, type);*/
     }
 
     return true;
@@ -189,18 +171,17 @@ bool Buffer::GetData(int area, BufferFlagType type, BufferSourceInfo &out) {
     // 🔒 Airbag: area fuori range
     if (!isValidArea(area)) {
         LOG_WF("Buffer", "GetData ignorato: area %d fuori range", area);
-        out = { type, 0, 0, 0 };
+        out = { 0, 0, 0 };
         return false;
     }
 
     auto &info = _buffer[area];
     if (!info.exists[type]) {
-        out = { type, 0, 0, 0 };
+        out = { 0, 0, 0 };
         return true;
     }
 
     out = info.Data[type];
-    _buffer[area].wasRead = true;
     return true;
 }
 
@@ -231,9 +212,8 @@ void Buffer::ResetType(BufferFlagType type) {
     }
 }
 
-void Buffer::ResetAll(unsigned long minTime) {
+void Buffer::ResetAll(unsigned long now, unsigned long minAgeMs) {
     for (auto it = _changed.begin(); it != _changed.end(); ) {
-
         const int key = it->first;
         const int area = key / BufferFlagType_Count;
         const BufferFlagType type = (BufferFlagType)(key % BufferFlagType_Count);
@@ -247,7 +227,7 @@ void Buffer::ResetAll(unsigned long minTime) {
         const auto &entry = _buffer[area].Data[type];
 
         // 🔥 Cancella SOLO se la variazione è più recente del tempo passato
-        if (entry.time > minTime) {
+        if (now - entry.time > minAgeMs) {
             it = _changed.erase(it);   // erase ritorna il prossimo iteratore
         } else {
             ++it;
@@ -300,24 +280,6 @@ void Buffer::Diagnostics::ReportVirtualAreas(Buffer& buf) {
             Serial.print(" → VIRTUAL (");
             Serial.print(buf.GetName(area));
             Serial.println(")");
-        }
-    }
-}
-
-void Buffer::Diagnostics::ReportUnusedBufferAreas(Buffer& buf) {
-    Serial.println("\n===== AREE DEFINITE MA MAI USATE =====");
-
-    for (int area = 0; area < buf.size(); area++) {
-        if (buf.Exists(area) &&
-            !buf.IsVirtual(area) &&
-            !buf.WasEverRead(area) &&
-            !buf.WasEverWritten(area))
-        {
-            Serial.print("Area ");
-            Serial.print(area);
-            Serial.print(" (");
-            Serial.print(buf.GetName(area));
-            Serial.println(") → MAI letta/scritta");
         }
     }
 }

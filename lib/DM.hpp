@@ -11,7 +11,7 @@
    Contatto:        mail@domo-manager.it
   
    Versione modulo: 1.0.0
-   Ultima modifica: 2026‑03‑24
+   Ultima modifica: 2026‑06‑24
    Note:
                     • Nessuna
 
@@ -21,7 +21,7 @@
 
 #include "DMFncs.hpp"
 #include "DMAutomationBuilder.hpp"
-#include "DMRS485Node.hpp"
+#include "DMHStandby.hpp"
 #include "DMDeclares.h"
 
 #define LOG_LEVEL LogLevel::INFO
@@ -29,7 +29,7 @@
 
 class DomoManager;  // forward declarations
 struct DiagnosticConfig;
-class DomoManager;  // forward
+
 
 // ============================================================
 // CLASSI DERIVATE CHE AGGIUNGONO LE APPLY()
@@ -50,7 +50,6 @@ public:
     static void apply(DomoManager& manager, const SplitsConfig& cfg);
 };
 
-
 //Solo dichiarazione, implementazione in fondo
 class DiagnosticWatchAreas {
 public:
@@ -69,11 +68,15 @@ public:
     }
 
     bool isWatched(int area) const {
+        if (autoPaused) 
+            return false;   // 🔥 evita blocco permanente
         for (auto& w : watched)
             if (w.area == area && w.enabled)
                 return true;
         return false;
     }
+
+    bool isPaused() const { return autoPaused; }
 
     void enableArea(int area, bool en);
     void onValueChanged(DomoManager& manager, int area, long newValue);
@@ -230,6 +233,8 @@ private:
     TimeManager timeManager;
     DeviceManager deviceManager;
 public:
+    NetworkManager net;   // 🔥 orchestratore di rete
+
     inline DeviceManager& devices() { return deviceManager; }
 
     using ActivityLoopFn = void (*)(DomoManager&, unsigned long);
@@ -265,6 +270,16 @@ public:
 #endif
 
 private:
+    enum class ProtocolType {
+        MODBUS_RTU,
+        MODBUS_HMI,
+        COUNT
+    };
+    int protocolIds[(int)ProtocolType::COUNT];
+
+    EthernetClient* hmiClient = nullptr;
+    EthernetClient& getHMIClient() { return *hmiClient; }
+
     DomoManagerConfig config; 
 
     OwnerManager owner;
@@ -447,9 +462,10 @@ private:
     static const uint8_t loopTaskCount;
     uint8_t loopTaskIndex = 0;
     bool ipCycleCompleted = false;
+    bool activityPrepareReady = false;
     bool powerOnCycleCompleted = false;  // one-shot globale, MAI reset
     bool backendCycleDone = false;
-
+    bool hmiCycleReady=false;
 
     //****************** TASK *****************
     static void Task_Scheduler(DomoManager* dm) {
@@ -462,6 +478,9 @@ private:
     }
 
     static void Task_Automation(DomoManager* dm) {
+        if (!dm->ipCycleCompleted)
+            return;
+
         dm->automation.update(dm->timeManager.nowMs());
     }
 
@@ -486,39 +505,6 @@ private:
         }
     }
 
-    static void Task_DeviceErrors(DomoManager* dm) {
-        const int CHECK_INTERVAL=10000;
-        static unsigned long lastErrCheck = 0;
-        static int lastErrors = -1;
-        static int errors = 0;
-        unsigned long now = dm->timeManager.nowMs();
-
-        // Esegui ogni 10 secondi
-        if (now - lastErrCheck >= CHECK_INTERVAL) {
-            lastErrCheck = now;
-
-            // Conta i device in errore
-            errors = dm->devices().DeviceHasErrors();
-            // Aggiorna solo se è cambiato
-            if (errors != lastErrors) {
-                LOG_DF("DomoManager",
-                           "Devices in error %d",
-                           errors);
-                // LED errore
-                if (dm) dm->m_leds.set(LedController::ERR, errors > 0);
-
-                // Scrivi nel buffer
-                dm->getBuffer().WriteElement(
-                    dm->areaErrors,
-                    ToPanel,
-                    errors,
-                    now
-                );
-
-                lastErrors = errors;
-            }
-        }
-    }
     
     static void Task_RestartIP(DomoManager* dm) {
         const int CHECK_INTERVAL=5000;
@@ -554,20 +540,19 @@ private:
         static unsigned long lastRun = 0;
         unsigned long now = dm->timeManager.nowMs();
         
-        dm->watchdog.setActivityLoopRateLimit(dm->getConfig().watchdog.rate_limit_min_interval);
-
-        // 1. Deve essere passato il tempo minimo
-        if (now - lastRun < dm->getConfig().watchdog.rate_limit_min_interval)
+        // 1. Deve essere stato completato almeno un ciclo IP
+        if (!dm->activityPrepareReady)
             return;
 
-        // 2. Deve essere stato completato almeno un ciclo IP
-        if (!dm->ipCycleCompleted)
+        dm->watchdog.setActivityLoopRateLimit(dm->getConfig().watchdog.rate_limit_min_interval);
+
+        // 2. Deve essere passato il tempo minimo
+        if (now - lastRun < dm->getConfig().watchdog.rate_limit_min_interval)
             return;
 
         // OK → esegui il task
         lastRun = now;
-        dm->ipCycleCompleted = false;   // reset del flag
-
+        
         unsigned long exec = dm->Measure([&]() {
             dm->activityLoop(*dm, now);
         });
@@ -577,6 +562,58 @@ private:
             exec,
             dm->getConfig().watchdog.spikeThresholdFactor_fp
         );
+
+        dm->activityPrepareReady = false;   // reset del flag
+    }
+
+    static void Task_HMI(DomoManager* dm)
+    {
+        // HMI disabilitata → consideriamo completato il ciclo di power-on
+        if (!dm->config.hmi.enabled) {
+            dm->powerOnCycleCompleted = true;
+            return;
+        }
+
+        // L’HMI può girare solo dopo un ciclo Modbus completo
+        if (!dm->hmiCycleReady)
+            return;
+
+        auto& net = dm->net;
+        int hmiId = dm->protocolIds[(int)ProtocolType::MODBUS_HMI];
+        unsigned long now = dm->timeManager.nowMs();
+
+        // Pacing HMI (non bloccante)
+        if (!net.canRun(hmiId, now))
+            return;
+
+        // La rete deve essere libera (Modbus ha priorità via scheduler)
+        if (!net.tryAcquire(hmiId, now))
+            return;
+
+        
+        static bool rw = false;
+
+        LOG_DF("DomoManager", "HMI: %d", rw);
+
+        dm->logic.getModbus().RunServer(
+            dm->m_leds,
+            dm->getHMIClient(),
+            "Server1",
+            rw,
+            now
+        );
+
+        // WRITE → ciclo RW completato → fine power-on
+        if (rw && !dm->powerOnCycleCompleted)
+            dm->powerOnCycleCompleted = true;
+
+        // alternanza READ/WRITE
+        rw = !rw;
+
+        // l’HMI ha consumato il ciclo
+        dm->hmiCycleReady = false;
+
+        net.release(hmiId, now);
     }
 
     void initBuffer() {
@@ -634,11 +671,8 @@ private:
                 list += String(a) + " ";
             }
             LOG_IF("InitBuffer", "Auto-detected virtual areas: %s", list.c_str());
-        } else {
-            LOG_DF("InitBuffer", "No virtual areas found");
-        }
+        } 
     }
-
 
     void mapDevices(DomoManager &dm, const DomoManagerConfig::Devices& cfg) {
         auto& profiles = dm.getProfiles();
@@ -649,7 +683,8 @@ private:
                 LOG_EF("Profilo non trovato: %s", d.profile.c_str());
                 continue;
             }
-        
+
+            // 1) Crea il device
             dm.devices().addDeviceManual(
                 d.name.c_str(),
                 d.address,
@@ -659,8 +694,43 @@ private:
                 d.retry,
                 d.priority
             );
+
+            // 2) Recupera il device appena creato
+            auto& dev = dm.devices().getDevices().back();
+            //dev.GetError().SetName(d.name.c_str());   // Solo per debug
+            // 3) Aggancia il callback degli errori
+            dev.GetError().SetStateChangedCallback([&dm, &dev]() {
+                dm.OnDeviceErrorStateChanged(&dev);
+            });
+        }
+    }
+
+    void OnDeviceErrorStateChanged(GenericPrgDevice* dev)
+    {
+        auto& devs = deviceManager.getDevices();
+
+        int totalErrors = 0;
+        for (auto& dev : devs) {
+            if (dev.GetError().IsVisibleError() || dev.GetError().IsVisibleParked())
+                totalErrors++;
         }
 
+        unsigned long now = timeManager.nowMs();
+
+        // LED ERR
+        m_leds.set(LedController::FOUR, totalErrors > 0);
+
+        // Buffer diagnostico
+        buffer.WriteElement(
+            areaErrors,
+            ToPanel,
+            totalErrors,
+            now
+        );
+
+        LOG_IF("DomoManager",
+            "Device error state changed → totalErrors=%d",
+            totalErrors);
     }
 
 public:
@@ -685,10 +755,11 @@ public:
       automation(),
       scheduler(),
       averages(),
-      loopTaskIndex(0),
-      ipCycleCompleted(false)
+      loopTaskIndex(0)
     {
         powerOnCycleCompleted=false;
+        activityPrepareReady=false;
+        ipCycleCompleted=false;
 
         // nomi per il watchdog
         timings.somethingChanged.name = "somethingChanged";
@@ -717,8 +788,8 @@ public:
         if (this->config.devices.list.empty() ||
             this->config.areas.list.empty())
         {
-            m_leds.set(LedController::PANEL, true);
-            m_leds.set(LedController::WRITE, true);
+            m_leds.set(LedController::THREE, true);
+            m_leds.set(LedController::TWO, true);
             LOG_EF("DomoManager",
                 "CONFIGURAZIONE VUOTA → impossibile avviare il sistema, caricare in DmSetup.hpp una configurazione valida");
             return false;
@@ -763,6 +834,14 @@ public:
             return false;
         }
         m_leds.setAll(true);
+
+        // 🔥 Inizializzazione pacing protocolli
+        protocolIds[(int)ProtocolType::MODBUS_RTU] =
+            net.registerProtocol(25, 35); 
+
+        protocolIds[(int)ProtocolType::MODBUS_HMI] =
+            net.registerProtocol(config.hmi.pollingMs, 25);
+
         ipManager.BuildIps(deviceManager.getDevices());
 
         LOG_IF("DomoManager", "Hw items to query: %d", deviceManager.getDevices().size());
@@ -782,6 +861,7 @@ public:
         automation.attachScheduler(&scheduler, &buffer, &averages, &timeManager);
         delay(1000);
         m_leds.setAll(false);
+
         return true;
     }
 
@@ -793,6 +873,210 @@ public:
             return;
         }
 
+        // ============================================================
+        // AUTOMATION JSON CHECK
+        // ============================================================
+        {
+            auto& buf = this->buffer;
+
+            bool ok = true;
+            const auto& autoCfg = automationConfig;
+
+            // 🔥 Se non ci sono automazioni → skip totale
+            if (autoCfg.scenes.empty() &&
+                autoCfg.rules.empty() &&
+                autoCfg.sequences.empty())
+            {
+                LOG_IF("Automation", "Nessuna automazione configurata → skip validazione");
+            }
+            else
+            {
+                // ---- Raccolta nomi scene (compatibile con Arduino) ----
+                std::vector<String> sceneNames;
+                sceneNames.reserve(autoCfg.scenes.size());
+                for (const auto& s : autoCfg.scenes)
+                    sceneNames.push_back(s.name);
+
+                // Funzione di lookup semplice (niente lambda)
+                auto sceneExists = [&](const String& name) -> bool {
+                    for (size_t i = 0; i < sceneNames.size(); i++)
+                        if (sceneNames[i] == name)
+                            return true;
+                    return false;
+                };
+
+                // ============================================================
+                // 6.1 VALIDAZIONE SCENE
+                // ============================================================
+                for (const auto& s : autoCfg.scenes) {
+
+                    if (s.actions.empty()) {
+                        LOG_WF("Automation",
+                            "Scene '%s' non contiene azioni",
+                            s.name.c_str());
+                    }
+
+                    for (const auto& a : s.actions) {
+
+                        if (a.area < 0 || a.area >= buf.size()) {
+                            LOG_EF("Automation",
+                                "Scene '%s' usa area %d fuori range",
+                                s.name.c_str(), a.area);
+                            ok = false;
+                        }
+
+                        if (buf.IsVirtual(a.area)) {
+                            LOG_WF("Automation",
+                                "Scene '%s' scrive su area virtuale %d",
+                                s.name.c_str(), a.area);
+                        }
+                    }
+                }
+
+                // ============================================================
+                // 6.2 VALIDAZIONE RULES
+                // ============================================================
+                for (const auto& r : autoCfg.rules) {
+                    // ---- SceneTrue ----
+                    if (!r.sceneTrue.isEmpty()) {
+
+                        // ⭐ Se NON è built‑in e NON esiste → errore
+                        if (!AutomationEngine::BuiltinScenes::isBuiltin(r.sceneTrue.c_str()) &&
+                            !sceneExists(r.sceneTrue))
+                        {
+                            LOG_EF("Automation",
+                                "Rule '%s' sceneTrue '%s' non esiste",
+                                r.name.c_str(), r.sceneTrue.c_str());
+                            ok = false;
+                        }
+                    }
+
+                    // ---- SceneFalse ----
+                    if (!r.sceneFalse.isEmpty()) {
+
+                        // ⭐ Se NON è built‑in e NON esiste → errore
+                        if (!AutomationEngine::BuiltinScenes::isBuiltin(r.sceneFalse.c_str()) &&
+                            !sceneExists(r.sceneFalse))
+                        {
+                            LOG_EF("Automation",
+                                "Rule '%s' sceneFalse '%s' non esiste",
+                                r.name.c_str(), r.sceneFalse.c_str());
+                            ok = false;
+                        }
+                    }
+
+                    // ---- Trend ----
+                    if (r.type == "trend") {
+                        if (r.trend.area < 0 || r.trend.area >= buf.size()) {
+                            LOG_EF("Automation",
+                                "Rule '%s' trend area %d fuori range",
+                                r.name.c_str(), r.trend.area);
+                            ok = false;
+                        }
+                    }
+
+                    // ---- Threshold ----
+                    if (r.type == "threshold") {
+                        if (r.threshold.area < 0 || r.threshold.area >= buf.size()) {
+                            LOG_EF("Automation",
+                                "Rule '%s' threshold area %d fuori range",
+                                r.name.c_str(), r.threshold.area);
+                            ok = false;
+                        }
+                    }
+
+                    // ---- Bitmask ----
+                    if (r.type == "bitmask") {
+                        if (r.bitmask.area < 0 || r.bitmask.area >= buf.size()) {
+                            LOG_EF("Automation",
+                                "Rule '%s' bitmask area %d fuori range",
+                                r.name.c_str(), r.bitmask.area);
+                            ok = false;
+                        }
+                        if (r.bitmask.bitIndex < 0 || r.bitmask.bitIndex > 31) {
+                            LOG_EF("Automation",
+                                "Rule '%s' bitmask bitIndex %d fuori range",
+                                r.name.c_str(), r.bitmask.bitIndex);
+                            ok = false;
+                        }
+                    }
+
+                    // ---- Multi ----
+                    if (r.type == "multi") {
+                        for (const auto& c : r.multi.conditions) {
+                            if (c.area < 0 || c.area >= buf.size()) {
+                                LOG_EF("Automation",
+                                    "Rule '%s' multi condition area %d fuori range",
+                                    r.name.c_str(), c.area);
+                                ok = false;
+                            }
+                        }
+                    }
+
+                    // ---- Composite ----
+                    if (r.type == "composite") {
+
+                        // INPUTS
+                        for (const auto& in : r.composite.inputs) {
+
+                            if (in.area < 0 || in.area >= buf.size()) {
+                                LOG_EF("Automation",
+                                    "Rule '%s' composite input area %d fuori range",
+                                    r.name.c_str(), in.area);
+                                ok = false;
+                            }
+
+                            if (in.type == "bitmask" &&
+                                (in.bitIndex < 0 || in.bitIndex > 31)) {
+                                LOG_EF("Automation",
+                                    "Rule '%s' composite bitIndex %d fuori range",
+                                    r.name.c_str(), in.bitIndex);
+                                ok = false;
+                            }
+                        }
+
+                        // OUTPUT
+                        if (r.composite.output.area < 0 ||
+                            r.composite.output.area >= buf.size()) {
+                            LOG_EF("Automation",
+                                "Rule '%s' composite output area %d fuori range",
+                                r.name.c_str(), r.composite.output.area);
+                            ok = false;
+                        }
+
+                        if (r.composite.output.bitIndex < 0 ||
+                            r.composite.output.bitIndex > 31) {
+                            LOG_EF("Automation",
+                                "Rule '%s' composite output bitIndex %d fuori range",
+                                r.name.c_str(), r.composite.output.bitIndex);
+                            ok = false;
+                        }
+                    }
+                }
+
+                // ============================================================
+                // 6.3 VALIDAZIONE SEQUENCES
+                // ============================================================
+                for (const auto& seq : autoCfg.sequences) {
+                    for (const auto& st : seq.steps) {
+
+                        if (st.area < 0 || st.area >= buf.size()) {
+                            LOG_EF("Automation",
+                                "Sequence step usa area %d fuori range",
+                                st.area);
+                            ok = false;
+                        }
+
+                        if (buf.IsVirtual(st.area)) {
+                            LOG_WF("Automation",
+                                "Sequence step scrive su area virtuale %d",
+                                st.area);
+                        }
+                    }
+                }
+            }
+        }
+        
         // Costruzione automazioni usando la config persistente
         AutomationBuilder builder;
 
@@ -831,7 +1115,7 @@ public:
         for (auto& dev : deviceManager.getDevices()) {
 
             // Device in errore?
-            if (dev.IsInError()) {
+            if (dev.GetError().IsInError()) {
 
                 int ch = -1;
                 int item = -1;
@@ -864,6 +1148,8 @@ public:
     }
 
     void loop(EthernetClient &client, ModbusTCPClient &modbusTCPClient,unsigned long now) {
+        this->hmiClient = &client;
+
         #if HOTSTANDBY_ENABLED
             hotStandby.poll();
             if (!isClusterMasterFlag) {
@@ -875,7 +1161,9 @@ public:
         // MASTER → ciclo completo
         Update(client, modbusTCPClient, now);
 
-        if(powerOnCycleCompleted) {
+        if(ipCycleCompleted) {
+            LOG_DF("LOOP", "taskIndex=%d fn=%p", loopTaskIndex, loopTasks[loopTaskIndex].fn);
+
             //Task eseguiti solo dopo un ciclo completo di acquisizioni
             LoopTask& t = loopTasks[loopTaskIndex];
 
@@ -901,18 +1189,18 @@ public:
             unsigned long now)
     {
         unsigned long _runningT = now;
-        static unsigned long _lastPnlPoll = now;
         static short ipIdx = 0;
-        static bool _rw = false;
-        
-        auto& ip = ipManager.GetIps()[ipIdx];
+
+        auto& ips = ipManager.GetIps();
+        if (ips.empty()) return;
+
+        auto& ip = ips[ipIdx];
 
         // ============================================================
         // 1) CIRCUIT BREAKER: NON tentare se in COOLDOWN o EXCLUDED
         // ============================================================
         if (!ipManager.ShouldQuery(ipIdx, now)) {
-            // Passa all’IP successivo
-            ipIdx = (ipIdx + 1) % ipManager.GetIps().size();
+            ipIdx = (ipIdx + 1) % ips.size();
             return;
         }
 
@@ -926,67 +1214,91 @@ public:
                 ip.Errors);
 
             ipManager.Exclude(ipIdx);
-
-            ipIdx = (ipIdx + 1) % ipManager.GetIps().size();
+            ipIdx = (ipIdx + 1) % ips.size();
             return;
         }
 
         // ============================================================
-        // 3) Tentativo di connessione + lettura/scrittura Modbus
+        // 3) MODBUS CLIENT — ORCHESTRATO
         // ============================================================
-        bool ok= logic.getModbus().RunClient(modbusTCPClient, ipIdx, config.modbusRTU.port , mbReadBuffer, now);
-        if (!ok) {
-            // RunClient ha già chiamato ReportError()
-            ipIdx = (ipIdx + 1) % ipManager.GetIps().size();
-            return;
-        }
+        int modbusId = protocolIds[(int)ProtocolType::MODBUS_RTU];
+        if (net.tryAcquire(modbusId, now)) {
 
+            ModbusManager::ClientState state = logic.getModbus().RunClient(
+                modbusTCPClient,
+                ipIdx,
+                502,
+                mbReadBuffer,
+                now
+            );
 
-        // ============================================================
-        // 4) Se siamo qui → IP OK → reset errori e log restore
-        // ============================================================
-        
-        // Passa all’IP successivo
-        if (ipIdx < ipManager.GetIps().size() - 1) {
-            ipIdx++;
-        } else {
-            ipIdx = 0;
-            ipCycleCompleted = true;
-            
-            // ============================================================
-            // 5) Poll pannello Modbus TCP (porta 502)
-            // ============================================================
-            
-            if(config.hmi.enabled) {
-                if ((now - _lastPnlPoll >= this->config.hmi.pollingMs ) || _rw) {
-                    logic.getModbus().RunServer(
-                        m_leds,
-                        client,
-                        "Server1",
-                        _rw,
-                        now
-                    );
+            // ========================================================
+            // 3.1) PACING DINAMICO
+            // ========================================================
+            switch (state) {
 
-                    // WRITE → ciclo RW completato (una sola volta)
-                    if (_rw == true && !powerOnCycleCompleted) {
-                        powerOnCycleCompleted = true;
-                    }
+                case ModbusManager::ClientState::READ_DONE:
+                    // Non avanza IP, non è un errore
+                    net.setMinInterval(modbusId, 20);   // velocissimo ex 20
+                    break;
 
-                    _rw = !_rw;
-                    _lastPnlPoll = now;
+                case ModbusManager::ClientState::WRITE_DONE:
+                    // Non usato, ma coerente
+                    net.setMinInterval(modbusId, 15);
+                    break;
+
+                case ModbusManager::ClientState::CYCLE_OK:
+                    net.setMinInterval(modbusId, 15); // era 50
+                    ipManager.ReportSuccess(ipIdx);
+                    break;
+
+                case ModbusManager::ClientState::DEVICE_ERROR:
+                    net.setMinInterval(modbusId, 80); //Era 20
+                    // nessun ReportError(ipIdx)
+                    break;
+
+                case ModbusManager::ClientState::ERROR:
+                    net.setMinInterval(modbusId, 120); //Era 30
+                    ipManager.ReportError(ipIdx, now);
+                    break;
+            }
+
+            // ========================================================
+            // 3.2) AVANZAMENTO IP
+            // ========================================================
+            if (state == ModbusManager::ClientState::CYCLE_OK ||
+                state == ModbusManager::ClientState::ERROR ||
+                state == ModbusManager::ClientState::DEVICE_ERROR)
+            {
+                // Avanza IP
+                ipIdx = (ipIdx + 1) % ips.size();
+
+                // Fine ciclo completo
+                if (ipIdx == 0) {
+                    activityPrepareReady=true;
+                    ipCycleCompleted = true;
+                    hmiCycleReady = true;   // 🔥 trigger Task_HMI
                 }
-            } else powerOnCycleCompleted = true;
-            
+
+                net.release(modbusId, now);
+                return;
+            }
+
+            // Se arrivo qui → READ_DONE → NON avanza IP
+            net.release(modbusId, now);
         }
 
+        // ============================================================
+        // 4) LEDS (non di rete)
+        // ============================================================
         m_leds.update(now);
 
         // ============================================================
-        // 6) Aggiorna watchdog
+        // 5) WATCHDOG
         // ============================================================
         unsigned long _exec = now - _runningT;
         UpdateTiming(timings.updateCycle, _exec, getConfig().watchdog.spikeThresholdFactor_fp);
-    } 
+    }
 
     void DefineBufferElement(int modbusArea, int modbusAreaToWrite, bool WriteToPanel,
                              bool ReadFromPanel, bool Reverse, const char* name)  {
@@ -1010,6 +1322,7 @@ public:
 DomoManager* DomoManager::instance = nullptr;
 
 void mySplitCallback(const SplitOutManager::Split& s, bool isStart) {
+    auto& dm = DomoManager::instance->devices();
     Buffer* buf = &DomoManager::instance->getBuffer();
     unsigned long now = DomoManager::instance->getTimeManager().nowMs();
 
@@ -1018,15 +1331,46 @@ void mySplitCallback(const SplitOutManager::Split& s, bool isStart) {
            isStart ? 1 : 0,
            s.mainArea,
            (unsigned)s.outAreas.size());   
+
     for (int a : s.outAreas) {
+
+        GenericPrgDevice* devFound = nullptr;
+        int ch = -1;
+        int item = -1;
+
+        // 1️⃣ CERCA IL DEVICE CHE CONTIENE L’AREA
+        for (auto& dev : dm.getDevices()) {
+            if (dev.FindChannelByArea(a, ch, item)) {
+                devFound = &dev;
+                break;
+            }
+        }
+
+        // 2️⃣ SE NON ESISTE → skip
+        if (!devFound) {
+            LOG_WF("SplitCallback", 
+                   "Area %d non appartiene a nessun device", a);
+            continue;
+        }
+
+        // 3️⃣ SE IL DEVICE È ESCLUSO → skip
+        if (devFound->GetError().IsInError()) {
+            LOG_WF("SplitCallback", 
+                   "Skip WRITE: device %s area %d is excluded",
+                   devFound->GetName(), a);
+            continue;
+        }
+
+        // 4️⃣ SCRITTURA NEL BUFFER
         int value = isStart ? 1 : 0;
         buf->WriteElement(a, Field, value, now);
-        
-         LOG_DF("SplitCallback", 
+
+        LOG_DF("SplitCallback", 
                " → Write area=%d value=%d (isStart=%d)", 
                a, value, isStart ? 1 : 0);
     }
 }
+
 
 class DomoScheduler : public AsyncScheduler {
 public:
@@ -1040,13 +1384,13 @@ public:
 };
 
 DomoManager::LoopTask DomoManager::loopTasks[] = {
-    { Task_Splits,     2, 0 },   // media
-    { Task_Automation, 3, 0 },   // bassa priorità
+    { Task_Splits,     10, 0 },   // media
+    { Task_Automation, 25, 0 },   // bassa priorità
     { Task_ActivityLoop,   5, 0 },
-    { Task_Scheduler,  20, 0 },   // bassa priorità
-    { Task_WatchdogAndRunningT, 5, 0 },   // ogni 5 cicli circa
-    { Task_DeviceErrors, 10, 0 },   // ogni ~10 cicli, timer interno gestisce i 10s
-    { Task_RestartIP, 25, 0 }   // ogni ~20 cicli, timer interno gestisce i 5s
+    { Task_Scheduler,  55, 0 },   // bassa priorità
+    { Task_WatchdogAndRunningT, 15, 0 },   // ogni 5 cicli circa
+    { Task_RestartIP, 120, 0 },   // ogni ~50 cicli, timer interno gestisce i 5s
+    { Task_HMI,       30, 0 }   // eseguito ogni ~20 cicli, ma solo se hmiCycleReady==true
 };
 
 const uint8_t DomoManager::loopTaskCount =
@@ -1205,7 +1549,7 @@ bool DomoConfigValidator::validateStatic(const DomoManagerConfig& cfg, DomoManag
         }
     }
 
-    LOG_DF("Config", "VALIDAZIONE STATICA OK.");
+    LOG_IF("Config", "VALIDAZIONE STATICA OK.");
     return true;
 }
 
@@ -1277,7 +1621,7 @@ bool DomoConfigValidator::validateDynamic(const DomoManagerConfig& cfg, DomoMana
     for (auto& d : devs) {
 
         // Device in errore
-        if (d.IsInError()) {
+        if (d.GetError().IsInError()) {
             LOG_EF("Config",
                    "Device '%s' in errore durante l'inizializzazione",
                    d.GetName());
@@ -1396,195 +1740,6 @@ bool DomoConfigValidator::validateDynamic(const DomoManagerConfig& cfg, DomoMana
     }
 
     // ============================================================
-    // 6) AUTOMATION JSON CHECK
-    // ============================================================
-    {
-        const auto& autoCfg = dm.getAutomationBuilderConfig();
-
-        // 🔥 Se non ci sono automazioni → skip totale
-        if (autoCfg.scenes.empty() &&
-            autoCfg.rules.empty() &&
-            autoCfg.sequences.empty())
-        {
-            LOG_IF("Automation", "Nessuna automazione configurata → skip validazione");
-        }
-        else
-        {
-            // ---- Raccolta nomi scene (compatibile con Arduino) ----
-            std::vector<String> sceneNames;
-            sceneNames.reserve(autoCfg.scenes.size());
-            for (const auto& s : autoCfg.scenes)
-                sceneNames.push_back(s.name);
-
-            // Funzione di lookup semplice (niente lambda)
-            auto sceneExists = [&](const String& name) -> bool {
-                for (size_t i = 0; i < sceneNames.size(); i++)
-                    if (sceneNames[i] == name)
-                        return true;
-                return false;
-            };
-
-            // ============================================================
-            // 6.1 VALIDAZIONE SCENE
-            // ============================================================
-            for (const auto& s : autoCfg.scenes) {
-
-                if (s.actions.empty()) {
-                    LOG_WF("Automation",
-                        "Scene '%s' non contiene azioni",
-                        s.name.c_str());
-                }
-
-                for (const auto& a : s.actions) {
-
-                    if (a.area < 0 || a.area >= buf.size()) {
-                        LOG_EF("Automation",
-                            "Scene '%s' usa area %d fuori range",
-                            s.name.c_str(), a.area);
-                        ok = false;
-                    }
-
-                    if (buf.IsVirtual(a.area)) {
-                        LOG_WF("Automation",
-                            "Scene '%s' scrive su area virtuale %d",
-                            s.name.c_str(), a.area);
-                    }
-                }
-            }
-
-            // ============================================================
-            // 6.2 VALIDAZIONE RULES
-            // ============================================================
-            for (const auto& r : autoCfg.rules) {
-
-                // ---- SceneTrue / SceneFalse ----
-                if (!r.sceneTrue.isEmpty() && !sceneExists(r.sceneTrue)) {
-                    LOG_EF("Automation",
-                        "Rule '%s' sceneTrue '%s' non esiste",
-                        r.name.c_str(), r.sceneTrue.c_str());
-                    ok = false;
-                }
-
-                if (!r.sceneFalse.isEmpty() && !sceneExists(r.sceneFalse)) {
-                    LOG_EF("Automation",
-                        "Rule '%s' sceneFalse '%s' non esiste",
-                        r.name.c_str(), r.sceneFalse.c_str());
-                    ok = false;
-                }
-
-                // ---- Trend ----
-                if (r.type == "trend") {
-                    if (r.trend.area < 0 || r.trend.area >= buf.size()) {
-                        LOG_EF("Automation",
-                            "Rule '%s' trend area %d fuori range",
-                            r.name.c_str(), r.trend.area);
-                        ok = false;
-                    }
-                }
-
-                // ---- Threshold ----
-                if (r.type == "threshold") {
-                    if (r.threshold.area < 0 || r.threshold.area >= buf.size()) {
-                        LOG_EF("Automation",
-                            "Rule '%s' threshold area %d fuori range",
-                            r.name.c_str(), r.threshold.area);
-                        ok = false;
-                    }
-                }
-
-                // ---- Bitmask ----
-                if (r.type == "bitmask") {
-                    if (r.bitmask.area < 0 || r.bitmask.area >= buf.size()) {
-                        LOG_EF("Automation",
-                            "Rule '%s' bitmask area %d fuori range",
-                            r.name.c_str(), r.bitmask.area);
-                        ok = false;
-                    }
-                    if (r.bitmask.bitIndex < 0 || r.bitmask.bitIndex > 31) {
-                        LOG_EF("Automation",
-                            "Rule '%s' bitmask bitIndex %d fuori range",
-                            r.name.c_str(), r.bitmask.bitIndex);
-                        ok = false;
-                    }
-                }
-
-                // ---- Multi ----
-                if (r.type == "multi") {
-                    for (const auto& c : r.multi.conditions) {
-                        if (c.area < 0 || c.area >= buf.size()) {
-                            LOG_EF("Automation",
-                                "Rule '%s' multi condition area %d fuori range",
-                                r.name.c_str(), c.area);
-                            ok = false;
-                        }
-                    }
-                }
-
-                // ---- Composite ----
-                if (r.type == "composite") {
-
-                    // INPUTS
-                    for (const auto& in : r.composite.inputs) {
-
-                        if (in.area < 0 || in.area >= buf.size()) {
-                            LOG_EF("Automation",
-                                "Rule '%s' composite input area %d fuori range",
-                                r.name.c_str(), in.area);
-                            ok = false;
-                        }
-
-                        if (in.type == "bitmask" &&
-                            (in.bitIndex < 0 || in.bitIndex > 31)) {
-                            LOG_EF("Automation",
-                                "Rule '%s' composite bitIndex %d fuori range",
-                                r.name.c_str(), in.bitIndex);
-                            ok = false;
-                        }
-                    }
-
-                    // OUTPUT
-                    if (r.composite.output.area < 0 ||
-                        r.composite.output.area >= buf.size()) {
-                        LOG_EF("Automation",
-                            "Rule '%s' composite output area %d fuori range",
-                            r.name.c_str(), r.composite.output.area);
-                        ok = false;
-                    }
-
-                    if (r.composite.output.bitIndex < 0 ||
-                        r.composite.output.bitIndex > 31) {
-                        LOG_EF("Automation",
-                            "Rule '%s' composite output bitIndex %d fuori range",
-                            r.name.c_str(), r.composite.output.bitIndex);
-                        ok = false;
-                    }
-                }
-            }
-
-            // ============================================================
-            // 6.3 VALIDAZIONE SEQUENCES
-            // ============================================================
-            for (const auto& seq : autoCfg.sequences) {
-                for (const auto& st : seq.steps) {
-
-                    if (st.area < 0 || st.area >= buf.size()) {
-                        LOG_EF("Automation",
-                            "Sequence step usa area %d fuori range",
-                            st.area);
-                        ok = false;
-                    }
-
-                    if (buf.IsVirtual(st.area)) {
-                        LOG_WF("Automation",
-                            "Sequence step scrive su area virtuale %d",
-                            st.area);
-                    }
-                }
-            }
-        }
-    }
-
-    // ============================================================
     // RISULTATO FINALE
     // ============================================================
     if (!ok) {
@@ -1592,7 +1747,7 @@ bool DomoConfigValidator::validateDynamic(const DomoManagerConfig& cfg, DomoMana
         return false;
     }
 
-    LOG_DF("Config", "VALIDAZIONE DINAMICA OK");
+    LOG_IF("Config", "VALIDAZIONE DINAMICA OK");
     return true;
 }
 
@@ -1729,8 +1884,6 @@ bool DomoConfigValidator::validateRoutes(
 }
 
 
-
-
 // ----------------------------------------------------------------------------
 // SPLITS
 // ----------------------------------------------------------------------------
@@ -1774,8 +1927,6 @@ bool DomoConfigValidator::validateSplits(
 
     return ok;
 }
-
-
 
 // ----------------------------------------------------------------------------
 // TOGGLES
