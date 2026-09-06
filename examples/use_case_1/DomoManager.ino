@@ -39,7 +39,8 @@ static const DiagnosticConfig diagnosticParams = {
         .reportNeverInitialized     = false,
         .reportMultipleInitialized  = true,
         .reportAutomationConfig     = false,
-        .reportLogBuffer            = true
+        .reportLogBuffer            = true,
+        .reportModbusTiming         = true
     };
 
 // Watch areas: indices of diagnostic bits to monitor, this stops debugging on SerialMonitor Arduino IDE
@@ -52,6 +53,7 @@ static const int watchAreas[] = {
 // - This lambda constructs the FrontendConfig instance used at startup.
 // - Many network and subsystem flags are disabled by default (bridge, mqtt, weather, ps).
 // ------------------------------------------------------------
+
 static FrontendConfig mainConfig = [](){
     FrontendConfig c;
 
@@ -59,7 +61,7 @@ static FrontendConfig mainConfig = [](){
     c.pins.leds = LedController::LedPins(
         LED_D0, //RS485 Read
         LED_D1, //RS485 Write
-        LED_D2, // HMI Read/Write   
+        LED_D2, // HMI, MQTT Read/Write   
         LED_D3  // Devices in error
     );
 
@@ -69,9 +71,9 @@ static FrontendConfig mainConfig = [](){
     c.net.gateway = IPAddress(192, 168, 12, 1);
     c.net.subnet  = IPAddress(255, 255, 255, 0);
 
-    // --- IOT ---
-    c.bridge.enabled    = true;
-    c.bridge.ip         = IPAddress(192,168,12,201);
+    // --- BRIDGE ---
+    c.bridge.enabled    = false;
+    c.bridge.ip         = IPAddress(192,168,12,201); //Indirizzo del PEER
     c.bridge.localPort  = 8888;
     c.bridge.remotePort = 8888;
     c.bridge.aee.vars  = AEE_VARS;
@@ -79,15 +81,43 @@ static FrontendConfig mainConfig = [](){
 
 
     // --- MODBUS TCP to RTU ---
-    c.modbus.timeoutMs = 250; //200ms non scendere mai sotto questo valore 15.05.2026, valore ok=250 cautelativo
+    c.modbus.enabled = true;
+    c.modbus.timeoutMs = 200; //200ms non scendere mai sotto questo valore 15.05.2026
     
-    // --- MQTT ---
+    
+    // ============================================================================
+    // CONFIG MQTT NEL FRONTEND
+    // ============================================================================
+
     c.mqtt.enabled = false;
-    c.mqtt.broker = IPAddress(192,168,1,10);
-    c.mqtt.port = 1883;
     c.mqtt.nodeId = "opta_domotica";
-    c.mqtt.vars      = MQTT_VARS;
-    c.mqtt.varCount  = sizeof(MQTT_VARS) / sizeof(MQTT_VARS[0]);
+    c.mqtt.clients = MQTT_CLIENTS;
+    c.mqtt.clientCount =
+        sizeof(MQTT_CLIENTS) /
+        sizeof(MQTT_CLIENTS[0]);
+
+    // ----------------------------------------------------------------------------
+    // Devices
+    // ----------------------------------------------------------------------------
+    //
+    // IMPORTANTE:
+    // al momento la struttura FrontendConfig proposta usa un unico array
+    // devices[]. Se manteniamo questa struttura, il passo successivo è aggiungere
+    // al Device il riferimento al client MQTT di appartenenza.
+    //
+    // Per ora mettiamo tutti i device in un unico array.
+    // ----------------------------------------------------------------------------
+
+    static const FrontendConfig::MQTT::Device MQTT_DEVICES[] =
+    {
+        MQTT_HA_Devices[0],
+        MQTT_SMHub_Devices[0]
+    };
+
+    c.mqtt.devices = MQTT_DEVICES;
+    c.mqtt.deviceCount =
+        sizeof(MQTT_DEVICES) /
+        sizeof(MQTT_DEVICES[0]);
 
     // --- DomoManager ---
     c.domoManager=domoConfig;
@@ -135,7 +165,7 @@ static FrontendConfig mainConfig = [](){
 
     // --- SECURITY ---
     c.security.enabled    = true;
-    c.security.intervalMs = 2000;
+    c.security.intervalMs = 1500;
     c.security.startupInhibitMs = 10000;
     c.security.sensors = WIRED_SENSOR_CONFIG;
     c.security.count   = sizeof(WIRED_SENSOR_CONFIG) / sizeof(WIRED_SENSOR_CONFIG[0]);

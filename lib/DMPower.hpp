@@ -94,7 +94,7 @@ energy‑management layer for embedded photovoltaic and battery systems.
 #include <Arduino.h>
 #include <math.h>
 
-#include "DMBaseClass.hpp"
+#include "DMBaseClassCore.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"

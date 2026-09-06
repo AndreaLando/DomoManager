@@ -561,7 +561,7 @@ public:
 
             // --- MAIN AREA ---
             BufferSourceInfo infoMain;
-            if (buffer.GetData(s.mainArea, Field, infoMain)) {
+            if (buffer.GetData(s.mainArea, infoMain)) {
                 Serial.print("Main value: ");
                 Serial.println(infoMain.value);
 
@@ -572,16 +572,16 @@ public:
                 if (s.maxTime > 0 && now - infoMain.time > s.maxTime)
                     Serial.println(" - WARNING: Main area timeout exceeded.");
             } else {
-                Serial.println(" - ERROR: Main area has no Field value.");
+                Serial.println(" - ERROR: Main area has no value.");
             }
 
             // --- OUT AREAS ---
             for (int out : s.outAreas) {
                 BufferSourceInfo infoOut;
-                if (!buffer.GetData(out, Field, infoOut)) {
+                if (!buffer.GetData(out, infoOut)) {
                     Serial.print(" - ERROR: Out area ");
                     Serial.print(out);
-                    Serial.println(" has no Field value.");
+                    Serial.println(" has no value.");
                     continue;
                 }
 
@@ -590,7 +590,7 @@ public:
                 Serial.print(" value: ");
                 Serial.println(infoOut.value);
 
-                if (buffer.GetData(s.mainArea, Field, infoMain)) {
+                if (buffer.GetData(s.mainArea, infoMain)) {
                     if (infoMain.value != infoOut.value)
                         Serial.println(" - WARNING: Inconsistent split (main != out).");
                 }
@@ -690,6 +690,12 @@ public:
         if (cfg.reportLogBuffer)
             Logger::ReportLogBuffer(Serial);
 
+        // ============================================================
+        // MODBUS DIAGNOSTIC (device + global)
+        // ============================================================
+        if (cfg.reportModbusTiming) {
+            manager.getLogic().getModbus().reportDeviceTiming();
+        }
     }
 
     static void SimpleReport(DomoManager& manager) {
@@ -731,17 +737,24 @@ void Diagnostic::ReportDeviceErrors(DomoManager& dm)
 
     Serial.println("\n===== DEVICE ERROR REPORT =====");
 
-    unsigned long mask = 0;
+    unsigned long errorMask  = 0;
+    unsigned long parkedMask = 0;
+
     int index = 0;
     int totalErrors = 0;
     int totalParked = 0;
+    int totalOk = 0;
 
     for (auto& dev : devs) {
 
         auto& err = dev.GetError();
+        auto ip   = dev.GetIp();
 
-        // 🔥 1. Device in PARKING → NON mostrarlo negli errori
+        // ============================================================
+        // 1) DEVICE PARKED
+        // ============================================================
         if (err.IsVisibleParked()) {
+            bitSet(parkedMask, index);
             totalParked++;
 
             Serial.print("Device ");
@@ -749,20 +762,22 @@ void Diagnostic::ReportDeviceErrors(DomoManager& dm)
             Serial.print(" → PARKED | ");
             Serial.print(dev.GetName());
             Serial.print(" | IP=");
-            Serial.print(dev.GetIp()[0]); Serial.print(".");
-            Serial.print(dev.GetIp()[1]); Serial.print(".");
-            Serial.print(dev.GetIp()[2]); Serial.print(".");
-            Serial.print(dev.GetIp()[3]);
+            Serial.print(ip[0]); Serial.print(".");
+            Serial.print(ip[1]); Serial.print(".");
+            Serial.print(ip[2]); Serial.print(".");
+            Serial.print(ip[3]);
             Serial.print(" | Addr=");
             Serial.println(dev.GetDeviceAddress());
 
             index++;
-            continue;   // 🔥 NON entra nella sezione ERROR
+            continue;
         }
 
-        // 🔥 2. Device in errore normale
+        // ============================================================
+        // 2) DEVICE IN ERRORE
+        // ============================================================
         if (err.IsVisibleError()) {
-            bitSet(mask, index);
+            bitSet(errorMask, index);
             totalErrors++;
 
             Serial.print("Device ");
@@ -770,27 +785,49 @@ void Diagnostic::ReportDeviceErrors(DomoManager& dm)
             Serial.print(" → ERROR | ");
             Serial.print(dev.GetName());
             Serial.print(" | IP=");
-            Serial.print(dev.GetIp()[0]); Serial.print(".");
-            Serial.print(dev.GetIp()[1]); Serial.print(".");
-            Serial.print(dev.GetIp()[2]); Serial.print(".");
-            Serial.print(dev.GetIp()[3]);
+            Serial.print(ip[0]); Serial.print(".");
+            Serial.print(ip[1]); Serial.print(".");
+            Serial.print(ip[2]); Serial.print(".");
+            Serial.print(ip[3]);
             Serial.print(" | Addr=");
             Serial.println(dev.GetDeviceAddress());
+
+            index++;
+            continue;
         }
 
+        // ============================================================
+        // 3) DEVICE OK
+        // ============================================================
+        totalOk++;
         index++;
     }
 
-    // 🔥 riepilogo
-    if (totalErrors == 0 && totalParked == 0) {
-        Serial.println("Nessun device in errore.");
-    }
+    // ============================================================
+    // RIEPILOGO
+    // ============================================================
+    Serial.println("\n===== SUMMARY =====");
+
+    Serial.print("Total devices: ");
+    Serial.println(devs.size());
+
+    Serial.print("OK: ");
+    Serial.println(totalOk);
+
+    Serial.print("Errors: ");
+    Serial.println(totalErrors);
+
+    Serial.print("Parked: ");
+    Serial.println(totalParked);
 
     Serial.print("Error bitmask = 0x");
-    Serial.println(mask, HEX);
+    Serial.println(errorMask, HEX);
 
-    Serial.print("Parked devices: ");
-    Serial.println(totalParked);
+    Serial.print("Parked bitmask = 0x");
+    Serial.println(parkedMask, HEX);
+
+    if (totalErrors == 0 && totalParked == 0)
+        Serial.println("Nessun device in errore o parked.");
 
     Serial.println("===== END DEVICE ERROR REPORT =====\n");
 }
@@ -1045,7 +1082,7 @@ inline void DiagnosticWatchAreas::printAll(DomoManager& manager) {
 
     for (auto& w : watched) {
         BufferSourceInfo info;
-        bool ok = buf.GetData(w.area, Field, info);
+        bool ok = buf.GetData(w.area, info);
 
         Serial.print("Area ");
         Serial.print(w.area);

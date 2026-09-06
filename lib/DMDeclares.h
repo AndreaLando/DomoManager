@@ -19,7 +19,6 @@
    
 
 #include "DMAEE.hpp"
-#include "DMMQTTEngine.hpp"
 #include "DMWebAPI.hpp"
 
 #include "DMHVAC.h"
@@ -43,6 +42,7 @@ struct DiagnosticConfig  {
     bool reportMultipleInitialized  = true;
     bool reportAutomationConfig     = true;
     bool reportLogBuffer            = true;
+    bool reportModbusTiming         = true;
 };
 
 // ************ DEFINIZIONE STRUTTURA DomoManager *******************************
@@ -51,8 +51,6 @@ class DomoManagerBufferEngine {
 public:
 
     struct AreaFlags {
-        bool hmiReadable;    // pannello può leggere
-        bool hmiWritable;    // pannello può scrivere
         bool reverse;        // negazione logica
     };
 
@@ -72,8 +70,6 @@ public:
     struct AreasConfig {
         std::vector<AreaConfig> list;
     };
-
-    //static void apply(DomoManager& manager, const AreasConfig& cfg);
 };
 
 class DomoManagerToggleEngine {
@@ -131,6 +127,7 @@ struct DomoManagerConfig {
         bool enabled = false;
         uint16_t port = 502;
         uint16_t pollingMs = 500;
+        int maxClients=1;
     } hmi;
 
     struct ModbusRTU {
@@ -147,7 +144,7 @@ struct DomoManagerConfig {
             String profile;
             std::vector<int> areas;
             int retry;
-            GenericPrgDevicePriority priority;
+            Priority priority;
         };
 
         std::vector<Device> list;
@@ -165,6 +162,17 @@ struct DomoManagerConfig {
 };
 
 // ************ DEFINIZIONE STRUTTURA FRONTEND*******************************
+struct NetworkProtocolConfig {
+    const char* name;
+
+    unsigned long minInterval = 0;
+    unsigned long maxDuration = 0;
+
+    bool pacingEnabled = true;
+
+    unsigned long slotDuration = 0;
+};
+
 struct FrontendConfig {
     struct Pins {
         int userButton;
@@ -202,31 +210,109 @@ struct FrontendConfig {
     // 3) CONFIG MODBUS
     // -----------------------------
     struct Modbus {
-        uint16_t timeoutMs = 300;
+        bool enabled = false;
+        uint16_t timeoutMs = 150;
     } modbus;
 
     // -----------------------------
     // 4) CONFIG MQTT (nuovo)
     // -----------------------------
-    struct MQTT {
+    struct MQTT
+    {
         bool enabled = false;
-        uint32_t intervalMs = 500;
 
-        IPAddress broker;
-        uint16_t port = 1883;
-        const char* nodeId = "opta_domotica";
+        // =========================================================
+        // IDENTITÀ DEL NODO DM
+        // =========================================================
 
-        struct Var {
-            const char* id;          // es. "temp_cucina"
-            const char* name;        // es. "Temperatura Cucina"
-            const char* unit;        // es. "°C" o nullptr
-            MQTTEngine_Var::HAType type;
-            int area;                // area buffer
-            float scale;             // es. 0.1f per /10, 1.0f per interi
+        const char* nodeId = nullptr;
+
+
+        // =========================================================
+        // CLIENT / BROKER MQTT
+        // =========================================================
+
+        struct Client
+        {
+            bool enabled = false;
+
+            IPAddress broker;
+            uint16_t port = 1883;
+
+            enum class Backend
+            {
+                GENERIC,
+                HOME_ASSISTANT,
+                ZIGBEE2MQTT,
+                SHELLY
+            };
+
+            Backend backend = Backend::GENERIC;
+
+            const char* name = nullptr;
         };
 
-        const Var* vars = nullptr;   // array dichiarato nel main
-        size_t varCount = 0;
+        const Client* clients = nullptr;
+        size_t clientCount = 0;
+
+
+        // =========================================================
+        // MAPPING MQTT <-> BUFFER
+        // =========================================================
+
+        struct Mapping
+        {
+            const char* field = nullptr;
+
+            enum class Direction
+            {
+                READ,
+                WRITE,
+                READ_WRITE
+            };
+
+            Direction direction = Direction::READ;
+
+            enum class DataType
+            {
+                INT,
+                FLOAT,
+                BOOL,
+                STRING
+            };
+
+            DataType type = DataType::INT;
+
+            // Area Buffer DM
+            int area = -1;
+
+            // Scaling
+            float scale = 1.0f;
+        };
+
+
+        // =========================================================
+        // DEVICE MQTT
+        // =========================================================
+
+        struct Device
+        {
+            uint8_t client = 0;
+
+            // Identificativo del device nel protocollo MQTT
+            // es. "0xa4c138a6a900c9d6"
+            const char* id = nullptr;
+
+            // Nome logico
+            const char* name = nullptr;
+
+            const Mapping* mappings = nullptr;
+            size_t mappingCount = 0;
+        };
+
+
+        const Device* devices = nullptr;
+        size_t deviceCount = 0;
     } mqtt;
 
     DomoManagerConfig domoManager;

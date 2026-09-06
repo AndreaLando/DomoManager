@@ -20,9 +20,9 @@
 #include <unordered_map>
 
 
-#include "DMBuffers.h"
+#include "DMBuffers.hpp"
 #include "DMSignal.hpp"
-#include "DMBaseClass.hpp"
+#include "DMBaseClassCore.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -55,185 +55,6 @@ public:
 
 };
 
-class ToggleManager {
-public:
-    struct ToggleSignalItem {
-        ToggleSignal Toggle;
-        int areaRead;
-        std::vector<int> forwardsFromAreas;
-    };
-
-private:
-    std::vector<ToggleSignalItem> toggles;
-
-    // cache: area → indice nel vector
-    std::unordered_map<int, size_t> cacheByArea;
-    std::unordered_set<int> forwardAreasCache;
-public:
-    ToggleManager() {}
-
-    bool isForwardArea(int area) const {
-        return forwardAreasCache.count(area) > 0;
-    }
-
-    const std::vector<ToggleSignalItem>& getAll() const { 
-        return toggles; 
-    }
-
-    void add(int areaRead, std::vector<int> forwards = {}) {
-        toggles.push_back({ToggleSignal(), areaRead, forwards});
-        cacheByArea[areaRead] = toggles.size() - 1;
-
-        for (int fwd : forwards)
-            forwardAreasCache.insert(fwd);
-    }
-
-
-    ToggleSignalItem& operator[](size_t index) {
-        return toggles[index];
-    }
-
-    size_t size() const {
-        return toggles.size();
-    }
-
-    ToggleSignalItem* get(size_t index) {
-        return index < toggles.size() ? &toggles[index] : nullptr;
-    }
-
-    // SAFE: ritorna nullptr se l’indice non è valido
-    inline ToggleSignalItem* get(int areaRead) {
-        auto it = cacheByArea.find(areaRead);
-        if (it == cacheByArea.end())
-            return nullptr;
-
-        size_t idx = it->second;
-        return idx < toggles.size() ? &toggles[idx] : nullptr;
-    }
-
-    inline int getForwardValue(int area, Buffer &buffer) {
-        int max = buffer.size();
-
-        // 1) lookup diretto tramite cache (ora sempre sicuro)
-        ToggleSignalItem* t = get(area);
-        if (!t) return 0;
-
-        if (t) {
-            for (int fwdArea : t->forwardsFromAreas) {
-                if (fwdArea >= 0 && fwdArea < max &&
-                    buffer.getValueFast(fwdArea) > 0)
-                {
-                    return 1;
-                }
-            }
-            return 0;
-        }
-
-        // 2) fallback lineare
-        /* Eliminato 18.6.2026 per maggiore velocita
-        for (const auto& item : toggles) {
-            if (item.areaRead != area)
-                continue;
-
-            for (int fwdArea : item.forwardsFromAreas) {
-                if (fwdArea >= 0 && fwdArea < max &&
-                    buffer.getValueFast(fwdArea) > 0)
-                {
-                    return 1;
-                }
-            }
-
-            return 0;
-        } */
-
-        return 0;
-    }
-};
-
-class RouteManager {
-public:
-    // ====== STRUTTURE UFFICIALI DEL SISTEMA ======
-
-    struct RouteAction {
-        int targetArea;
-        int value;
-    };
-
-    struct RouteCase {
-        int triggerValue;                 // es. 0 o 1
-        std::vector<RouteAction> actions; // azioni da eseguire
-    };
-
-    struct RouteConfig {
-        String name;
-        int triggerArea;                  // <-- questo è il campo giusto
-        std::vector<RouteCase> cases;
-    };
-
-    struct SafeRoute {
-        std::vector<RouteCase> cases;
-    };
-
-private:
-    std::unordered_map<int, SafeRoute> routes;
-
-public:
-
-    // ============================================================
-    // CARICAMENTO CONFIGURAZIONE (semplice e sicuro)
-    // ============================================================
-    void load(const std::vector<RouteConfig>& cfg) {
-        for (auto& r : cfg) {
-            routes[r.triggerArea] = { r.cases };   // <-- FIX QUI
-        }
-    }
-
-    bool hasRoute(int area) const {
-        return routes.count(area) > 0;
-    }
-
-    // ============================================================
-    // ESECUZIONE ROUTE (blindata)
-    // ============================================================
-    void execute(int srcArea, long value, Buffer& buffer, unsigned long now) const {
-        auto it = routes.find(srcArea);
-        if (it == routes.end())
-            return;
-
-        const auto& route = it->second;
-
-        for (auto& rc : route.cases) {
-            if (rc.triggerValue != value)
-                continue;
-
-            for (auto& act : rc.actions) {
-
-                // 🔥 Protezione totale
-                if (act.targetArea < 0 || act.targetArea >= buffer.size()) {
-                    LOG_WF("RouteManager",
-                           "Skip route write: invalid targetArea=%d (srcArea=%d)",
-                           act.targetArea, srcArea);
-                    continue;
-                }
-
-                buffer.WriteElement(act.targetArea, Field, act.value, now);
-            }
-        }
-    }
-};
-
-
-enum GenericPrgDevicePriority {
-  Low=0, 
-  Normal=1,
-  Medium=2, 
-  High=3 
-};
-
- typedef struct {
-    int DeviceIndex;
-    GenericPrgDevicePriority Priority;
-  }PriorityMgmt;
 
 class GenericPrgDevice {
   public:  
@@ -267,15 +88,18 @@ class GenericPrgDevice {
       bool ok;
     }structRead; 
 
-    GenericPrgDevice(const char* name, arduino::IPAddress ip, unsigned int deviceAddress, std::vector<GenericPrgDeviceChannel> channels, std::vector<int> ioAreas, short ErrorCnt, GenericPrgDevicePriority priority);     
+    GenericPrgDevice(const char* name, arduino::IPAddress ip, unsigned int deviceAddress, std::vector<GenericPrgDeviceChannel> channels, std::vector<int> ioAreas, short ErrorCnt, Priority priority);     
     bool Run();
     structRead Read(ModbusTCPClient &mb, int channel, uint16_t* outBuffer, unsigned long now);
     bool Write(ModbusClient &mb, int channel, int address, int value, unsigned long now);
     int GetArea(int channel, int address);
     bool FindChannelByArea(int area, int &channel, int &item);
-    GenericPrgDeviceChannel GetChannelInfo(int channel);
-    arduino::IPAddress GetIp();
-    GenericPrgDevicePriority GetPriority();
+    //GenericPrgDeviceChannel GetChannelInfo(int channel);
+    const GenericPrgDeviceChannel& GetChannelInfo(int channel) const;
+
+    const arduino::IPAddress& GetIp() const;
+
+    Priority GetPriority();
     size_t GetChannelsSize();
     const char* GetName();
     unsigned int GetDeviceAddress();
@@ -290,7 +114,7 @@ class GenericPrgDevice {
   private:  
     short bank;
     std::vector<int> _ioAreas;
-    GenericPrgDevicePriority _priority;
+    Priority _priority;
     const char* _name;
     unsigned int _deviceAddress;
     arduino::IPAddress _ip;
@@ -304,10 +128,14 @@ class GenericPrgDeviceManager {
 public:
     void BuildPriorityCache(std::vector<GenericPrgDevice>& devices);
     void DebugPriorityCache(std::vector<GenericPrgDevice>& devices);
-    int GetDevicesByPriority(GenericPrgDevicePriority priority,
-                             arduino::IPAddress ip,
-                             std::vector<int>& out);
+    
+    const std::vector<int>& GetDevicesByPriority(
+        Priority priority,
+        const arduino::IPAddress& ip) const;
 
+    bool HasDevicesByPriority(
+        Priority priority,
+        const arduino::IPAddress& ip) const;
 private:
     // Chiave: (IP << 8) | priority
     std::unordered_map<uint64_t, std::vector<int>> _cachePriorityIndex;
@@ -325,7 +153,13 @@ public:
     static const int AREA_SYSTEM_ERRORS=1;
     static const int AREA_SYSTEM_RUNNING_T=2;
     
-    const int AREA_LAST_RESERVED=9; //Bit flags
+    static const int AREA_LAST_RESERVED=9; //Bit flags
+
+    static inline bool IsReservedArea(int area) {
+        return area >= DeviceManager::AREA_TRASH &&
+            area <= DeviceManager::AREA_LAST_RESERVED;
+    }
+
     // END RESERVED
 
     DeviceManager()
@@ -341,7 +175,7 @@ public:
                        int deviceAddress,
                        const std::vector<GenericPrgDevice::GenericPrgDeviceChannel>& channels,
                        int retry,
-                       GenericPrgDevicePriority priority)
+                       Priority priority)
     {
         int count = 0;
         for (auto& ch : channels)
@@ -373,7 +207,7 @@ public:
                      const std::vector<GenericPrgDevice::GenericPrgDeviceChannel>& channels,
                      const std::vector<int>& areas,
                      int retry,
-                     GenericPrgDevicePriority priority)
+                     Priority priority)
     {
         // 1. Aggiungi il device
         PrgDevices.emplace_back(
@@ -416,7 +250,8 @@ public:
             int channels = dev.GetChannelsSize();
 
             for (int ch = 0; ch < channels; ch++) {
-                auto info = dev.GetChannelInfo(ch);
+                //auto info = dev.GetChannelInfo(ch);
+                const auto& info = dev.GetChannelInfo(ch);
                 int size = info.items * info.ItemsPerCall;
                 if (size > maxSize)
                     maxSize = size;
@@ -460,8 +295,8 @@ public:
             int channels = dev.GetChannelsSize();
 
             for (int ch = 0; ch < channels; ch++) {
-                auto info = dev.GetChannelInfo(ch);
-
+                //auto info = dev.GetChannelInfo(ch);
+                const auto& info = dev.GetChannelInfo(ch);
                 for (int i = 0; i < info.items; i++) {
                     int area = dev.GetArea(ch, i);
                     if (area > maxArea)
@@ -472,11 +307,400 @@ public:
 
         return maxArea;
     }
-
 };
 
-int GetJump(GenericPrgDevicePriority priority);
+class ToggleManager {
+public:
 
+    struct ToggleSignalItem {
+        ToggleSignal Toggle;
+        int areaRead;
+        std::vector<int> forwardsFromAreas;
+    };
+
+private:
+
+    std::vector<ToggleSignalItem> toggles;
+
+    // Cache: areaRead → indice nel vector
+    std::unordered_map<int, size_t> cacheByArea;
+
+    // Cache: forward area → indice nel vector
+    // Serve per permettere ad EventManager di trovare
+    // direttamente il Toggle associato ad una forward area.
+    std::unordered_map<int, size_t> cacheByForwardArea;
+
+    // Manteniamo anche questa cache perché viene già utilizzata
+    // da RunClient / altra logica esistente.
+    std::unordered_set<int> forwardAreasCache;
+
+
+public:
+
+    ToggleManager() {}
+
+    bool handlesArea(int area) const
+    {
+        return cacheByArea.count(area) > 0 ||
+            cacheByForwardArea.count(area) > 0;
+    }
+
+    // ============================================================
+    // FORWARD AREA
+    // ============================================================
+
+    bool isForwardArea(int area) const
+    {
+        return forwardAreasCache.count(area) > 0;
+    }
+
+
+    // ============================================================
+    // ACCESSO
+    // ============================================================
+
+    const std::vector<ToggleSignalItem>& getAll() const
+    {
+        return toggles;
+    }
+
+
+    // ============================================================
+    // ADD TOGGLE
+    // ============================================================
+
+    void add(
+        int areaRead,
+        std::vector<int> forwards = {})
+    {
+        toggles.push_back({
+            ToggleSignal(),
+            areaRead,
+            forwards
+        });
+
+        const size_t index = toggles.size() - 1;
+
+        // Cache areaRead → Toggle
+        cacheByArea[areaRead] = index;
+
+        // Cache forwardArea → Toggle
+        for (int fwd : forwards)
+        {
+            forwardAreasCache.insert(fwd);
+
+            cacheByForwardArea[fwd] = index;
+        }
+    }
+
+
+    // ============================================================
+    // ACCESSO PER INDICE
+    // ============================================================
+
+    ToggleSignalItem* operator[](size_t index)
+    {
+        return index < toggles.size()
+            ? &toggles[index]
+            : nullptr;
+    }
+
+
+    size_t size() const
+    {
+        return toggles.size();
+    }
+
+
+    // ============================================================
+    // GET PER INDICE
+    // ============================================================
+
+    ToggleSignalItem* get(size_t index)
+    {
+        return index < toggles.size()
+            ? &toggles[index]
+            : nullptr;
+    }
+
+
+    // ============================================================
+    // GET PER AREA READ
+    // ============================================================
+
+    // SAFE:
+    // ritorna nullptr se l'area non è registrata
+    inline ToggleSignalItem* get(int areaRead)
+    {
+        auto it = cacheByArea.find(areaRead);
+
+        if (it == cacheByArea.end())
+            return nullptr;
+
+        const size_t idx = it->second;
+
+        return idx < toggles.size()
+            ? &toggles[idx]
+            : nullptr;
+    }
+
+
+    // ============================================================
+    // GET PER FORWARD AREA
+    // ============================================================
+
+    // NUOVO:
+    // permette di risalire dalla forward area
+    // al Toggle che la utilizza.
+    //
+    // Esempio:
+    //
+    // Toggle:
+    //     areaRead = 127
+    //     forwards = {130, 131}
+    //
+    // getByForwardArea(130)
+    //     → Toggle areaRead 127
+    //
+    // getByForwardArea(131)
+    //     → Toggle areaRead 127
+    //
+    // Lookup O(1).
+
+    inline ToggleSignalItem* getByForwardArea(int area)
+    {
+        auto it = cacheByForwardArea.find(area);
+
+        if (it == cacheByForwardArea.end())
+            return nullptr;
+
+        const size_t idx = it->second;
+
+        return idx < toggles.size()
+            ? &toggles[idx]
+            : nullptr;
+    }
+
+
+    // ============================================================
+    // GET FORWARD VALUE
+    // ============================================================
+
+    inline int getForwardValue(
+        int area,
+        Buffer &buffer)
+    {
+        const int max = buffer.size();
+
+        // Lookup diretto tramite areaRead
+        ToggleSignalItem* t = get(area);
+
+        if (!t)
+            return 0;
+
+
+        for (int fwdArea : t->forwardsFromAreas)
+        {
+            if (fwdArea >= 0 &&
+                fwdArea < max &&
+                buffer.getValueFast(fwdArea) > 0)
+            {
+                return 1;
+            }
+        }
+
+        return 0;
+    }
+
+    
+    struct ToggleResult
+    {
+        int area = Buffer::NO_AREA;
+        long value = 0;
+    };
+
+    bool processEvent(
+        int area,
+        long value,
+        Buffer& buffer,
+        unsigned long now,
+        ToggleResult& result)
+    {
+        ToggleSignalItem* toggle = get(area);
+
+        if (!toggle)
+            toggle = getByForwardArea(area);
+
+        if (!toggle)
+            return false;
+
+        long signalIn = value;
+
+        if (!toggle->forwardsFromAreas.empty())
+        {
+            signalIn = getForwardValue(
+                toggle->areaRead,
+                buffer
+            );
+
+            if (signalIn == 0)
+                signalIn = value;
+        }
+
+        const int areaToWrite =
+            buffer.GetAreaToWrite(toggle->areaRead);
+
+        if (areaToWrite <= 0)
+            return false;
+
+        BufferSourceInfo outputInfo;
+
+        if (!buffer.GetData(areaToWrite, outputInfo))
+            return false;
+
+        long toggleOut = outputInfo.value;
+
+        if (!toggle->Toggle.change(
+                signalIn,
+                toggleOut))
+        {
+            return false;
+        }
+
+        result.area = areaToWrite;
+        result.value = toggleOut;
+        return true;
+    }
+};
+
+class RouteManager
+{
+public:
+
+    // ============================================================
+    // STRUTTURE
+    // ============================================================
+
+    struct RouteAction
+    {
+        int targetArea;
+        int value;
+    };
+
+    struct RouteCase
+    {
+        int triggerValue;
+        std::vector<RouteAction> actions;
+    };
+
+    struct RouteConfig
+    {
+        String name;
+        int triggerArea;
+        std::vector<RouteCase> cases;
+    };
+
+    struct SafeRoute
+    {
+        std::vector<RouteCase> cases;
+    };
+
+
+private:
+
+    std::unordered_map<int, SafeRoute> routes;
+
+
+public:
+
+    // ============================================================
+    // LOAD
+    // ============================================================
+
+    void load(const std::vector<RouteConfig>& cfg)
+    {
+        for (const auto& r : cfg)
+        {
+            routes[r.triggerArea] = {
+                r.cases
+            };
+        }
+    }
+
+
+    // ============================================================
+    // LOOKUP
+    // ============================================================
+
+    inline bool hasRoute(int area) const
+    {
+        return routes.find(area) != routes.end();
+    }
+
+
+    // ============================================================
+    // EXECUTE
+    // ============================================================
+
+    std::vector<RouteAction> execute(
+        int srcArea,
+        long value,
+        Buffer& buffer) const
+    {
+        std::vector<RouteAction> actions;
+
+        const auto it = routes.find(srcArea);
+
+        if (it == routes.end())
+            return actions;
+
+        const auto& route = it->second;
+
+        const int bufferSize =
+            static_cast<int>(buffer.size());
+
+        for (const auto& rc : route.cases)
+        {
+            if (rc.triggerValue != value)
+                continue;
+
+            for (const auto& act : rc.actions)
+            {
+                if (act.targetArea < 0 ||
+                    act.targetArea >= bufferSize)
+                {
+                    LOG_WF(
+                        "RouteManager",
+                        "Skip route write: invalid targetArea=%d (srcArea=%d)",
+                        act.targetArea,
+                        srcArea
+                    );
+
+                    continue;
+                }
+
+                if (DeviceManager::IsReservedArea(
+                        act.targetArea))
+                {
+                    LOG_WF(
+                        "RouteManager",
+                        "Skip route write: reserved targetArea=%d (srcArea=%d)",
+                        act.targetArea,
+                        srcArea
+                    );
+
+                    continue;
+                }
+
+                actions.push_back(act);
+            }
+
+            break;
+        }
+
+        return actions;
+    }
+};
 
 class DeviceProfiles {
 public:
@@ -632,5 +856,7 @@ private:
         });
     }
 };
+
+
 
 #endif

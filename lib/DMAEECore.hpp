@@ -19,7 +19,10 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
-#include "DMBaseClass.hpp"
+#include "DMBaseClassCore.hpp"
+
+class AEERegistry;   // 🔥 forward declaration
+
 // ============================================================
 //  CONFIGURAZIONE VARIABILI
 // ============================================================
@@ -168,7 +171,7 @@ public:
     virtual bool fromJson(const JsonVariant& v) = 0;
 
     virtual void forceChanged(unsigned long now) = 0;
-
+    AEERegistry* owner = nullptr;
 };
 
 // ============================================================
@@ -201,6 +204,10 @@ public:
         changed = true;
 
         if (onChange) onChange(value);
+        
+        // 🔥 notifica al registry
+        if (owner)
+            owner->notifyChanged(this);
     }
 
     const T& get() const { return value; }
@@ -217,6 +224,9 @@ public:
     void forceChanged(unsigned long now) override {
         lastChange = now;
         changed = true;
+
+        if (owner)
+            owner->notifyChanged(this);
     }
 
 };
@@ -228,9 +238,48 @@ public:
 class AEERegistry {
 private:
     std::vector<AEEVariableBase*> vars;
+    std::vector<AEEVariableBase*> changedVars;   // 🔥 nuovo
 
 public:
     void add(AEEVariableBase* v) { vars.push_back(v); }
+
+    void notifyChanged(AEEVariableBase* v) {
+        changedVars.push_back(v);
+    }
+
+    template<typename F>
+    void forEachChanged(F fn) {
+        for (auto* v : changedVars)
+            fn(v);
+    }
+
+    // 🔥 vecchia API (compatibilità)
+    template<typename F>
+    void forEach(F fn) const {
+        for (auto* v : vars)
+            fn(v);
+    }
+
+    // 🔥 nuova API
+    void clearAllChanged() {
+        for (auto* v : changedVars)
+            v->clearChanged();
+        changedVars.clear();
+    }
+
+    // 🔥 nuova API: usata da DMBridge per snapshot iniziale
+    void forceAllChanged(unsigned long now) {
+        for (auto* v : vars) {
+            v->forceChanged(now);
+            notifyChanged(v);   // aggiunge alla lista changed
+        }
+    }
+    
+    bool hasChanges() const {
+        return !changedVars.empty();
+    }
+
+    size_t size() const { return vars.size(); }
 
     AEEVariableBase* find(const String& name) {
         for (auto* v : vars)
@@ -238,41 +287,6 @@ public:
                 return v;
         return nullptr;
     }
-
-    template<typename F>
-    void forEach(F fn) const {
-        for (auto* v : vars)
-            fn(v);
-    }
-
-    template<typename F>
-    void forEachChanged(F fn) {
-        for (auto* v : vars)
-            if (v->hasChanged())
-                fn(v);
-    }
-
-    void clearAllChanged() {
-        for (auto* v : vars)
-            v->clearChanged();
-    }
-
-    size_t size() const {
-        return vars.size();
-    }
-
-    bool hasChanges() const {
-        for (auto* v : vars)
-            if (v->hasChanged())
-                return true;
-        return false;
-    }
-
-    void forceAllChanged(unsigned long now) {
-        for (auto* v : vars)
-            v->forceChanged(now);
-    }
-
 };
 
 // ============================================================
@@ -301,9 +315,12 @@ public:
     }
 
     void registerAll(AEERegistry& reg) {
-        for (auto* v : vars)
+        for (auto* v : vars) {
+            v->owner = &reg;   // 🔥 nuovo
             reg.add(v);
+        }
     }
+
 };
 
 // ============================================================
@@ -319,61 +336,72 @@ public:
     AEEProtocol() = default;              // 🔥 default ctor
     AEEProtocol(bool master) : isMaster(master) {}
 
-    String serializeChangedJSON(AEERegistry& reg) {
+    String serializeChangedJSON(AEERegistry& reg, uint32_t seq) {
         DynamicJsonDocument doc(1024);
 
-        reg.forEachChanged([&](AEEVariableBase* v){
-            AEEDirection dir = v->def.direction;
+        reg.forEachChanged([&](AEEVariableBase* v) {
+            const AEEDirection dir = v->def.direction;
 
-            bool shouldSend =
-                (isMaster  && (dir == AEEDirection::FrontendToModule || dir == AEEDirection::Bidirectional)) ||
-                (!isMaster && (dir == AEEDirection::ModuleToFrontend  || dir == AEEDirection::Bidirectional));
+            const bool shouldSend =
+                (isMaster &&
+                 (dir == AEEDirection::FrontendToModule ||
+                  dir == AEEDirection::Bidirectional)) ||
+                (!isMaster &&
+                 (dir == AEEDirection::ModuleToFrontend ||
+                  dir == AEEDirection::Bidirectional));
 
             if (shouldSend)
                 v->toJson(doc);
         });
 
-        if (doc.size() == 0) return "";
+        if (doc.size() == 0)
+            return "";
 
-        doc["seq"] = ++seqCounter;
+        doc["seq"] = seq;
 
         String out;
         serializeJson(doc, out);
         return out;
     }
-
-    bool parseJSON(const String& json, AEERegistry& reg) {
-        StaticJsonDocument<1024> doc;
-        if (deserializeJson(doc, json)) return false;
-
-        for (auto kv : doc.as<JsonObject>()) {
+    
+    bool parseJSON(JsonDocument& doc, AEERegistry& reg)
+    {
+        for (auto kv : doc.as<JsonObject>())
+        {
             const char* key = kv.key().c_str();
-            if (strcmp(key, "seq") == 0) continue;
+
+            if (strcmp(key, "seq") == 0)
+                continue;
 
             AEEVariableBase* v = reg.find(key);
-            if (!v) continue;
+
+            if (!v)
+                continue;
 
             AEEDirection dir = v->def.direction;
-            bool canApply =
-                (isMaster  && (dir == AEEDirection::ModuleToFrontend || dir == AEEDirection::Bidirectional)) ||
-                (!isMaster && (dir == AEEDirection::FrontendToModule || dir == AEEDirection::Bidirectional));
 
-            if (canApply) {
-                bool changedBefore = v->hasChanged();
+            const bool canApply =
+                (isMaster &&
+                    (dir == AEEDirection::ModuleToFrontend ||
+                    dir == AEEDirection::Bidirectional))
+                ||
+                (!isMaster &&
+                    (dir == AEEDirection::FrontendToModule ||
+                    dir == AEEDirection::Bidirectional));
+
+            if (canApply)
+            {
                 v->fromJson(kv.value());
 
-                // 🔥 SOLO SLAVE deve azzerare i changed
-                // MASTER deve mantenere changed per Task_AEE_Monitor
-                if (!isMaster) {
+                // SOLO SLAVE deve azzerare changed.
+                // MASTER deve mantenere changed.
+                if (!isMaster)
                     v->clearChanged();
-                }
             }
-
         }
 
         return true;
     }
-
         // ============================================================
     //  SCHEMA EXPORT / IMPORT
     // ============================================================
@@ -463,6 +491,8 @@ public:
 
 };
 
+
+    
 
 // ============================================================
 //  HELPER CAST

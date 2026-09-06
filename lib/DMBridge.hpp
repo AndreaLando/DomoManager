@@ -17,8 +17,7 @@
 
 #include <Arduino.h>
 
-#include "DMBaseClass.hpp"
-#include "DMAdapters.hpp"
+#include "DMTransport.hpp"
 
 
 #define LOG_LEVEL LogLevel::INFO
@@ -28,7 +27,7 @@ class DMBridge;   // forward
 class BridgeProtocol {
 public:
     static bool handleIncoming(
-        const String& msg,
+        JsonDocument& doc,
         AEERegistry& reg,
         ICommandTransport& transport,
         AEEProtocol& proto,
@@ -84,36 +83,38 @@ public:
         uint32_t nextSeq() { return ++seqCounter; }
     };
 
-    static void send(AEERegistry& reg, AckState& state, AEEProtocol& proto, SendCallback sendFn) {
-        String json = proto.serializeChangedJSON(reg);
-        if (json.length() == 0) return;
+    
+    static void send(
+        AEERegistry& reg,
+        AckState& state,
+        AEEProtocol& proto,
+        SendCallback sendFn)
+    {
+        const uint32_t seq = state.nextSeq();
 
-        StaticJsonDocument<1024> doc;
-        deserializeJson(doc, json);
+        String out = proto.serializeChangedJSON(reg, seq);
 
-        uint32_t seq = state.nextSeq();
-        doc["seq"] = seq;
+        if (out.length() == 0)
+            return;
 
-        String out;
-        serializeJson(doc, out);
-
-        // 🔵 LOG AEE TX (solo pacchetti AEE, non ping, non schema)
-        LOG_IF("BRIDGE::AEE::TX", "Sending AEE update: %s", out.c_str());
+        LOG_IF(
+            "BRIDGE::AEE::TX",
+            "Sending AEE update: %s",
+            out.c_str()
+        );
 
         sendFn(out);
 
         state.lastSentSeq = seq;
         state.lastSendTime = millis();
 
-        // 🟦 PATCH: reset dei flag changed dopo l’invio
         reg.clearAllChanged();
     }
 
-
-    static void onPacket(const String& msg, AckState& state) {
-        StaticJsonDocument<256> doc;
-        if (deserializeJson(doc, msg)) return;
-
+    static void onPacket(
+        JsonDocument& doc,
+        AckState& state)
+    {
         if (doc.containsKey("ack"))
             state.lastAckSeq = doc["ack"];
     }
@@ -166,7 +167,6 @@ protected:
 
     // --- LOG RATE LIMIT ---
     unsigned long lastRxLog = 0;
-    unsigned long lastTxLog = 0;
     bool lastPeerOnline = false;
 
     bool helloSent = false;
@@ -174,6 +174,8 @@ protected:
     static constexpr unsigned long HELLO_TIMEOUT = 8000;
     bool schemaRequested = false;
     bool schemaReceived  = false;
+
+    IBridgePacer* pacer = nullptr;
 
     // ============================================================
     //  INTERNAL CLASS: SCHEMA MULTIFRAME ENGINE
@@ -186,24 +188,27 @@ protected:
         // TX (MASTER)
         struct TxState {
             bool active = false;
-            std::vector<String> frames;
-            size_t index = 0;
-            unsigned long lastSend = 0;
-            const unsigned long SEND_INTERVAL = 20;
-            const unsigned long ACK_TIMEOUT   = 800;
+
+            // indice del frame corrente
+            int index = 0;
+
+            // frame per cui stiamo aspettando ACK (-1 = nessuno)
             int waitingAckFor = -1;
 
-            // --- Retry counter (optional but recommended) ---
-            int ackRetryCount = 0;
+            // timestamp ultimo invio
+            unsigned long lastSend = 0;
+            unsigned long startTime = 0;
 
-            // --- Reset TX state ---
+            // vettore dei frame JSON pronti da inviare
+            std::vector<String> frames;
+
             void reset() {
                 active = false;
-                frames.clear();
                 index = 0;
-                lastSend = 0;
                 waitingAckFor = -1;
-                ackRetryCount = 0;
+                lastSend = 0;
+                startTime = 0;
+                frames.clear();
             }
         } tx;
 
@@ -211,19 +216,21 @@ protected:
         // RX (SLAVE)
         struct RxState {
             bool active = false;
-            String buffer;
-            int expected = -1;
-            int received = 0;
-            unsigned long startTs = 0;
-            const unsigned long TIMEOUT = 35000;
+            uint16_t expected = 0;
+            uint16_t received = 0;
 
-            // --- Reset RX state ---
+            char buffer[8192];
+            uint16_t offset = 0;
+
+            unsigned long startTs = 0;
+
             void reset() {
                 active = false;
-                buffer = "";
-                expected = -1;
+                expected = 0;
                 received = 0;
+                offset = 0;
                 startTs = 0;
+                buffer[0] = 0;
             }
         } rx;
 
@@ -260,34 +267,42 @@ protected:
         // ------------------------------------------------------------
         void startTx(const String& fullSchema) {
             const size_t MAX_CHUNK = 160;
+            const unsigned long now = millis();
 
-            // 🔥 reset completo stato TX
+            // reset stato TX
             tx.reset();
-
             tx.frames.clear();
             tx.index = 0;
             tx.active = true;
 
+            // Timestamp dell'inizio della TX completa.
+            tx.startTime = now;
+
             size_t total = (fullSchema.length() + MAX_CHUNK - 1) / MAX_CHUNK;
+            tx.frames.reserve(total);   // 🔥 evita realloc
 
             for (size_t i = 0; i < total; i++) {
                 size_t start = i * MAX_CHUNK;
                 size_t len   = min(MAX_CHUNK, fullSchema.length() - start);
 
-                String chunk = fullSchema.substring(start, start + len);
+                // 🔥 buffer statico → zero allocazioni
+                char chunkBuf[MAX_CHUNK + 1];
+                memcpy(chunkBuf, fullSchema.c_str() + start, len);
+                chunkBuf[len] = 0;
 
-                StaticJsonDocument<512> doc;
+                StaticJsonDocument<256> doc;
                 doc["schema_part"] = (int)i;
                 doc["total"]       = (int)total;
-                doc["data"]        = chunk;
-                doc["fid"]         = (int)i;
+                doc["data"]        = chunkBuf;
 
                 String out;
                 serializeJson(doc, out);
                 tx.frames.push_back(out);
             }
 
-            LOG_IF("BRIDGE::SCHEMA", "TX multiframe avviato (%u frames)", tx.frames.size());
+            LOG_IF("BRIDGE::SCHEMA",
+                "TX multiframe avviato (%u frames)",
+                tx.frames.size());
         }
 
         // ------------------------------------------------------------
@@ -297,6 +312,7 @@ protected:
             if (!parent->isMaster) return;
             if (!tx.active) return;
 
+            // completato
             if (tx.index >= tx.frames.size()) {
                 LOG_IF("BRIDGE::SCHEMA", "TX multiframe COMPLETATO");
                 tx.active = false;
@@ -305,17 +321,27 @@ protected:
 
             // attesa ACK
             if (tx.waitingAckFor >= 0) {
-                if (now - tx.lastSend > tx.ACK_TIMEOUT) {
-                    //LOG_WF("BRIDGE::SCHEMA", "ACK timeout frame %d → ritrasmissione",
-                    //       tx.waitingAckFor);
+
+                // 🔥 timeout dinamico
+                unsigned long ackTimeout =
+                    parent->peer.isOnline() ? 400 : 900;
+
+                if (now - tx.lastSend > ackTimeout) {
                     transport->send(tx.frames[tx.index]);
                     tx.lastSend = now;
+
+                    LOG_WF("BRIDGE::SCHEMA",
+                        "ACK timeout frame %d → ritrasmissione",
+                        tx.waitingAckFor);
                 }
                 return;
             }
 
-            // pacing
-            if (now - tx.lastSend < tx.SEND_INTERVAL)
+            // 🔥 pacing dinamico
+            unsigned long interval =
+                parent->peer.isOnline() ? 10 : 25;
+
+            if (now - tx.lastSend < interval)
                 return;
 
             // invia frame corrente
@@ -323,34 +349,49 @@ protected:
             transport->send(frame);
             tx.lastSend = now;
 
-            StaticJsonDocument<256> doc;
+            // 🔥 niente più fid → usa schema_part
+            StaticJsonDocument<64> doc;
             deserializeJson(doc, frame);
-            tx.waitingAckFor = doc["fid"];
+            tx.waitingAckFor = doc["schema_part"];
 
-            //LOG_IF("BRIDGE::SCHEMA::TX", "Frame %u inviato (fid=%d)",
-            //       tx.index+1, tx.waitingAckFor);
+            // 🔥 log rate-limit
+            static unsigned long lastLog = 0;
+            if (now - lastLog > 200) {
+                LOG_IF("BRIDGE::SCHEMA::TX",
+                    "Frame %u inviato (part=%d)",
+                    tx.index + 1,
+                    tx.waitingAckFor);
+                lastLog = now;
+            }
         }
 
         // ------------------------------------------------------------
         // SLAVE: ricezione frame + ACK
         // ------------------------------------------------------------
         bool handleRx(const JsonDocument& doc, unsigned long now) {
-            // --- ACK from SLAVE to MASTER ---
+
+            // ------------------------------------------------------------
+            // ACK schema (SLAVE → MASTER)
+            // ------------------------------------------------------------
             if (doc.containsKey("schema_ack")) {
                 int ack = doc["schema_ack"];
+
                 if (parent->isMaster && tx.waitingAckFor == ack) {
-                    //LOG_IF("BRIDGE::SCHEMA", "ACK received for frame %d", ack);
                     tx.waitingAckFor = -1;
                     tx.index++;
                 }
                 return true;
             }
 
-            // --- Not a schema frame ---
+            // ------------------------------------------------------------
+            // Non è un frame schema
+            // ------------------------------------------------------------
             if (!doc.containsKey("schema_part"))
                 return false;
 
-            // --- MASTER never receives schema parts ---
+            // ------------------------------------------------------------
+            // MASTER non riceve mai schema_part
+            // ------------------------------------------------------------
             if (parent->isMaster)
                 return true;
 
@@ -358,68 +399,99 @@ protected:
             int total = doc["total"];
             const char* data = doc["data"];
 
-            // --- If a new frame 0 arrives while RX is active → reset ---
+            // ------------------------------------------------------------
+            // Nuovo frame 0 mentre RX è attivo → IGNORA, NON RESETTA
+            // ------------------------------------------------------------
             if (part == 0 && rx.active && rx.received > 0) {
                 LOG_WF("BRIDGE::SCHEMA",
-                    "New frame 0 received while RX in progress → resetting RX");
-                rx.reset();
+                    "New frame 0 received while RX in progress → ignored");
+                return true;
             }
 
-            /// --- Start new RX session ---
+            // ------------------------------------------------------------
+            // Avvio sessione RX
+            // ------------------------------------------------------------
             if (!rx.active) {
-                // La sessione può iniziare SOLO da frame 0
+
                 if (part != 0) {
                     LOG_WF("BRIDGE::SCHEMA",
                         "First frame must be 0, got %d → ignoring", part);
-                    return true; // non resetto, semplicemente ignoro questo frame
+                    return true;
                 }
 
                 rx.active   = true;
                 rx.expected = total;
                 rx.received = 0;
-                rx.buffer   = "";
+                rx.offset   = 0;
                 rx.startTs  = now;
 
-                LOG_IF("BRIDGE::SCHEMA", "RX multiframe started (%d parts)", total);
+                LOG_IF("BRIDGE::SCHEMA",
+                    "RX multiframe started (%d parts)", total);
             }
 
-            // --- Reject out-of-order frames ---
+            // ------------------------------------------------------------
+            // Frame fuori ordine → IGNORA, NON RESETTA
+            // ------------------------------------------------------------
             if (part != rx.received) {
                 LOG_WF("BRIDGE::SCHEMA",
-                    "Out-of-order frame: expected %u, got %u → resetting RX",
+                    "Out-of-order frame: expected %u, got %u → ignored",
                     rx.received, part);
+                return true;
+            }
+
+            // ------------------------------------------------------------
+            // Append chunk (buffer statico, zero allocazioni)
+            // ------------------------------------------------------------
+            size_t len = strlen(data);
+
+            if (rx.offset + len >= sizeof(rx.buffer)) {
+                LOG_WF("BRIDGE::SCHEMA",
+                    "RX buffer overflow → reset");
                 rx.reset();
                 return true;
             }
 
-            // --- Append data ---
-            rx.buffer += data;
+            memcpy(rx.buffer + rx.offset, data, len);
+            rx.offset += len;
+
             rx.received++;
 
-            //LOG_DF("BRIDGE::SCHEMA", "RX frame %d/%d (len=%u)",
-            //    part + 1, total, rx.buffer.length());
-
-            // --- Send ACK ---
-            StaticJsonDocument<128> ack;
+            // ------------------------------------------------------------
+            // ACK frame
+            // ------------------------------------------------------------
+            StaticJsonDocument<64> ack;
             ack["schema_ack"] = part;
+
             String out;
             serializeJson(ack, out);
             transport->send(out);
 
-            // --- Timeout ---
-            if (now - rx.startTs > rx.TIMEOUT) {
-                LOG_WF("BRIDGE::SCHEMA", "RX multiframe timeout → reset");
+            // ------------------------------------------------------------
+            // Timeout dinamico
+            // ------------------------------------------------------------
+            unsigned long timeout =
+                parent->peer.isOnline() ? 15000 : 35000;
+
+            if (now - rx.startTs > timeout) {
+                LOG_WF("BRIDGE::SCHEMA",
+                    "RX multiframe timeout → reset");
                 rx.reset();
                 return true;
             }
 
-            // --- Completed ---
+            // ------------------------------------------------------------
+            // Completato
+            // ------------------------------------------------------------
             if (rx.received == rx.expected) {
-                LOG_IF("BRIDGE::SCHEMA", "RX multiframe COMPLETE (len=%u)",
-                    rx.buffer.length());
+
+                LOG_IF("BRIDGE::SCHEMA",
+                    "RX multiframe COMPLETE (len=%u)", rx.offset);
+
+                rx.buffer[rx.offset] = 0;
 
                 StaticJsonDocument<8192> doc2;
                 auto err = deserializeJson(doc2, rx.buffer);
+
                 if (err) {
                     LOG_WF("BRIDGE::SCHEMA",
                         "Multiframe JSON error: %s", err.c_str());
@@ -437,12 +509,16 @@ protected:
 
             return true;
         }
-
     };
 
     SchemaMultiframe schema;
 
 public:
+    void setPacer(IBridgePacer& p)
+    {
+        pacer = &p;
+    }
+
     DMBridge() {}
 
     virtual ~DMBridge() {}
@@ -468,22 +544,52 @@ public:
 
     AEERegistry* getRegistry() { return reg; }
 
-    virtual void loop(unsigned long now) {
-        if (!transport || !reg) return;
 
-        schema.handleTx(now);
+    virtual void loop(unsigned long now)
+    {
+        if (!transport || !reg)
+            return;
 
+        // ============================================================
+        // RX / STATE MACHINE
+        //
+        // DEVONO essere sempre eseguiti, indipendentemente
+        // dall'arbitraggio TX.
+        // ============================================================
         transport->loop(now);
         processIncoming(now);
         runStateMachine(now);
         handleResend(now);
 
         // ============================================================
-        //  LOG PEER ONLINE/OFFLINE
+        // NETWORK ARBITRATION
         // ============================================================
-        bool online = peer.isOnline();
+        bool acquired = true;
+
+        if (pacer)
+            acquired = pacer->acquire(now);
+
+        // ============================================================
+        // TX
+        //
+        // Il Bridge trasmette solo se possiede la rete.
+        // ============================================================
+        if (acquired) {
+            schema.handleTx(now);
+
+            // ========================================================
+            // RELEASE IMMEDIATO
+            // ========================================================
+            if (pacer)
+                pacer->release(now);
+        }
+
+        // ============================================================
+        // LOG PEER ONLINE/OFFLINE
+        // ============================================================
+        const bool online = peer.isOnline();
+
         if (online != lastPeerOnline) {
-            //LOG_IF("MASTER::PEER", "Peer %s", online ? "ONLINE" : "OFFLINE");
             lastPeerOnline = online;
         }
     }
@@ -492,13 +598,6 @@ public:
         if (!transport) return;
 
         transport->send(payload);
-
-        /*
-        // --- LOG TX (rate-limited) ---
-        if (millis() - lastTxLog > 300) {
-            LOG_IF("MASTER::TX", "TX: %s", payload.c_str());
-            lastTxLog = millis();
-        } */
     }
 
 
@@ -622,12 +721,14 @@ protected:
                 // ============================================================
                 // 1) AEE: invio SOLO quando serve
                 // ============================================================
-                if (reg->hasChanges()) {
+                const bool hasChanges = reg->hasChanges();
+
+                if (hasChanges) {
                     LOG_IF("BRIDGE::AEE::PENDING",
                         "AEE pending → hasChanges=1 (now=%lu)", now);
                 }
 
-                if (reg->hasChanges() && (now - lastAEEtx > AEE_TX_INTERVAL)) {
+                if (hasChanges && (now - lastAEEtx > AEE_TX_INTERVAL)) {
                     AEEProtocolEngine::send(*reg, ack, aee, [&](const String& out){
                         //LOG_IF("BRIDGE::AEE::PAYLOAD", "%s", out.c_str());
                         transport->send(out);
@@ -713,43 +814,77 @@ protected:
     // ============================================================
     //  PACKET PROCESSING
     // ============================================================
-    void processIncoming(unsigned long now) {
-        String msg;    
+    void processIncoming(unsigned long now)
+    {
+        String msg;
 
-        while (transport->receive(msg)) {
-            //LOG_DF("BRIDGE::RAW::RX::processIncoming", "RX raw: %s", msg.c_str());
-
+        while (transport->receive(msg))
+        {
             if (msg.length() < 2)
                 continue;
 
             peer.onPacket(now);
 
-            // --- riconoscimento veloce frame schema ---
-            bool isSchemaFrame =
-                msg.startsWith("{\"schema_part\"") ||
-                msg.startsWith("{\"schema_ack\"");
+            // ------------------------------------------------------------
+            // FAST PATH: ping (no JSON parsing)
+            // ------------------------------------------------------------
+            if (msg.startsWith("{\"ping\""))
+                continue;
 
             // ------------------------------------------------------------
-            //  VALIDAZIONE JSON (solo non-schema)
+            // FAST PATH: ack (no JSON parsing)
             // ------------------------------------------------------------
-            if (!isSchemaFrame) {
-                if (msg[0] != '{' || msg[msg.length()-1] != '}') {
-                    LOG_WF("BRIDGE::DROP", "DROP: invalid JSON boundaries: %s", msg.c_str());
+            if (msg.startsWith("{\"ack\""))
+            {
+                StaticJsonDocument<64> ackDoc;
+                if (!deserializeJson(ackDoc, msg))
+                    AEEProtocolEngine::onPacket(ackDoc, ack);
+                continue;
+            }
 
+            // ------------------------------------------------------------
+            // FAST PATH: schema ACK (no JSON parsing)
+            // ------------------------------------------------------------
+            if (msg.startsWith("{\"schema_ack\""))
+            {
+                StaticJsonDocument<64> ackDoc;
+                if (!deserializeJson(ackDoc, msg))
+                    schema.handleRx(ackDoc, now);
+                continue;
+            }
+
+            // ------------------------------------------------------------
+            // RICONOSCIMENTO FRAME SCHEMA (schema_part)
+            // ------------------------------------------------------------
+            const bool isSchemaFrame = msg.startsWith("{\"schema_part\"");
+
+            // ------------------------------------------------------------
+            // VALIDAZIONE JSON (solo non-schema)
+            // ------------------------------------------------------------
+            if (!isSchemaFrame)
+            {
+                if (msg[0] != '{' || msg[msg.length() - 1] != '}')
+                {
+                    LOG_WF("BRIDGE::DROP",
+                        "DROP: invalid JSON boundaries: %s",
+                        msg.c_str());
                     continue;
                 }
             }
 
             // ------------------------------------------------------------
-            //  PARSE JSON
+            // FRAME SCHEMA (schema_part)
             // ------------------------------------------------------------
-            StaticJsonDocument<2048> doc;
-
-            if (isSchemaFrame) {
+            if (isSchemaFrame)
+            {
                 StaticJsonDocument<512> schemaDoc;
                 auto err = deserializeJson(schemaDoc, msg);
-                if (err) {
-                    LOG_WF("BRIDGE::SCHEMA", "deserializeJson FALLITA su frame schema: %s", err.c_str());
+
+                if (err)
+                {
+                    LOG_WF("BRIDGE::SCHEMA",
+                        "deserializeJson FALLITA su frame schema: %s",
+                        err.c_str());
                     continue;
                 }
 
@@ -759,25 +894,52 @@ protected:
                 continue;
             }
 
+            // ------------------------------------------------------------
+            // JSON NORMALE (AEE, request schema, ecc.)
+            // ------------------------------------------------------------
+            StaticJsonDocument<2048> doc;
             auto err = deserializeJson(doc, msg);
-            if (err) {
-                LOG_WF("SLAVE::AEE", "deserializeJson FALLITA: %s", err.c_str());
+
+            if (err)
+            {
+                LOG_WF("SLAVE::AEE",
+                    "deserializeJson FALLITA: %s",
+                    err.c_str());
                 continue;
             }
 
+            // ------------------------------------------------------------
+            // Schema eventualmente ricevuto
+            // ------------------------------------------------------------
             if (schema.handleRx(doc, now))
                 continue;
 
-            // richiesta schema
-            if (doc.containsKey("request") && doc["request"] == "schema") {
+            // ------------------------------------------------------------
+            // Richiesta schema
+            // ------------------------------------------------------------
+            if (doc.containsKey("request") &&
+                doc["request"] == "schema")
+            {
                 if (isMaster)
                     onSchemaRequest();
-
                 continue;
             }
 
-            BridgeProtocol::handleIncoming(msg, *reg, *transport, aee, this);
-            AEEProtocolEngine::onPacket(msg, ack);
+            // ------------------------------------------------------------
+            // AEE
+            // ------------------------------------------------------------
+            BridgeProtocol::handleIncoming(
+                doc,
+                *reg,
+                *transport,
+                aee,
+                this
+            );
+
+            // ------------------------------------------------------------
+            // ACK
+            // ------------------------------------------------------------
+            AEEProtocolEngine::onPacket(doc, ack);
         }
     }
 
@@ -796,39 +958,46 @@ protected:
 //  BRIDGE PROTOCOL (AEE + ACK)
 // ============================================================
 bool BridgeProtocol::handleIncoming(
-    const String& msg,
+    JsonDocument& doc,
     AEERegistry& reg,
     ICommandTransport& transport,
     AEEProtocol& proto,
     DMBridge* parent
 ) {
-    StaticJsonDocument<256> doc;
-    if (deserializeJson(doc, msg)) return false;
+    // Il JSON è già stato deserializzato da processIncoming().
+    // NON effettuare un secondo deserializeJson().
 
-    bool ok = proto.parseJSON(msg, reg);
-    if (!ok) return false;
+    bool ok = proto.parseJSON(doc, reg);
 
-    unsigned long now = millis();
-    reg.forEach([&](AEEVariableBase* v){
-        if (v->lastChange != 0) {
-            // callback interna (override)
-            parent->onAEEVariableChanged(v, now);
+    if (!ok)
+        return false;
 
-            // callback frontend (registrata dall’utente)
-            if (parent->onFrontendAEEChange)
-                parent->onFrontendAEEChange(v, now);
-            
-            v->lastChange = 0;   // 🔥 reset dopo notifica
-        }
+    const unsigned long now = millis();
+
+    reg.forEachChanged([&](AEEVariableBase* v)
+    {
+        parent->onAEEVariableChanged(v, now);
+
+        if (parent->onFrontendAEEChange)
+            parent->onFrontendAEEChange(v, now);
+
+        v->lastChange = 0;
     });
 
-    if (doc.containsKey("seq")) {
-        uint32_t seq = doc["seq"];
+    // 🔥 pulizia lista changed
+    reg.clearAllChanged();
+
+
+    if (doc.containsKey("seq"))
+    {
+        const uint32_t seq = doc["seq"];
+
         StaticJsonDocument<64> ack;
         ack["ack"] = seq;
 
         String out;
         serializeJson(ack, out);
+
         transport.send(out);
     }
 
@@ -839,47 +1008,116 @@ bool BridgeProtocol::handleIncoming(
 // ============================================================
 //  MASTER IMPLEMENTATION
 // ============================================================
-class DMMasterBridge : public DMBridge {
+class DMMasterBridge : public DMBridge
+{
 public:
-    DMMasterBridge() {  }
+
+    DMMasterBridge() {}
 
 protected:
-    void onSchemaRequest() override {
+
+    void onSchemaRequest() override
+    {
         static String cachedSchema;
         static unsigned long lastBuild = 0;
-        const unsigned long CACHE_TIME = 10000; // 10 secondi
-        
-        schemaRequested = true;   // 🔥 SLAVE ha chiesto lo schema
 
-        // 🔥 Se c'è una TX attiva, abortiscila e riparti da zero
-        if (schema.tx.active) {
-            LOG_IF("MASTER::AEE",
-                   "Schema request while TX active → abort & restart");
+        static constexpr unsigned long CACHE_TIME = 10000;
+        static constexpr unsigned long TX_TIMEOUT  = 5000;
+
+        const unsigned long now = millis();
+
+        schemaRequested = true;
+
+        // ============================================================
+        // TX SCHEMA GIÀ ATTIVA
+        // ============================================================
+
+        if (schema.tx.active)
+        {
+            const unsigned long elapsed =
+                static_cast<unsigned long>(
+                    now - schema.tx.startTime
+                );
+
+            // --------------------------------------------------------
+            // TX ancora valida:
+            // non interrompiamo il trasferimento.
+            // --------------------------------------------------------
+
+            if (elapsed < TX_TIMEOUT)
+            {
+                LOG_IF(
+                    "MASTER::AEE",
+                    "Schema request while TX active "
+                    "(%lu ms) → richiesta ignorata",
+                    elapsed
+                );
+
+                return;
+            }
+
+            // --------------------------------------------------------
+            // TX bloccata:
+            // reset e ripartenza.
+            // --------------------------------------------------------
+
+            LOG_WF(
+                "MASTER::AEE",
+                "Schema TX timeout (%lu ms) "
+                "→ abort & restart",
+                elapsed
+            );
+
             schema.abortTx();
         }
 
-        // Ricostruisci lo schema solo se necessario
-        if (cachedSchema.length() == 0 || millis() - lastBuild > CACHE_TIME) {
+        // ============================================================
+        // CACHE SCHEMA
+        // ============================================================
+
+        if (
+            cachedSchema.length() == 0 ||
+            static_cast<unsigned long>(
+                now - lastBuild
+            ) > CACHE_TIME
+        )
+        {
             DynamicJsonDocument doc(4096);
-            JsonArray arr = doc.createNestedArray("schema");
+
+            JsonArray arr =
+                doc.createNestedArray("schema");
 
             aee.ExportSchema(*reg, arr);
 
             cachedSchema = "";
-            serializeJson(doc, cachedSchema);
 
-            lastBuild = millis();
+            serializeJson(
+                doc,
+                cachedSchema
+            );
 
-            LOG_IF("MASTER::AEE", "Schema ricostruito (%u vars)", reg->size());
-        } else {
-            LOG_IF("MASTER::AEE", "Schema inviato (cached)");
+            lastBuild = now;
+
+            LOG_IF(
+                "MASTER::AEE",
+                "Schema ricostruito (%u vars)",
+                reg->size()
+            );
+        }
+        else
+        {
+            LOG_IF(
+                "MASTER::AEE",
+                "Schema inviato (cached)"
+            );
         }
 
-        //Invia schema
+        // ============================================================
+        // START TX
+        // ============================================================
+
         schema.startTx(cachedSchema);
     }
-
-
 };
 
 #endif

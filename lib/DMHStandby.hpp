@@ -18,7 +18,7 @@
    ============================================================================ */
 
 #include "DMRS485Node.hpp"
-#include "DMBaseClass.hpp"
+
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"

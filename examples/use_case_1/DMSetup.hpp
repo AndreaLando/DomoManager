@@ -21,7 +21,6 @@
 #include <ArduinoJson.h>
 #include "DM.hpp"
 #include "DMHVAC.h"
-#include "DMMQTTEngine.hpp"
 #include "DMWeather.hpp"
 #include "DMWiredSensors.hpp"
 #include "DMDiagnostic.hpp"
@@ -238,224 +237,224 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
 {
     // --- PARTE 1 ---
     // Lettura consumi ID=1
-    { AREA_PMETER_VOLTAGE, 0, "Lettura tensione", {true,false,false}, {50,200} },
-    { AREA_PMETER_CURRENT, 0, "Lettura corrente", {true,false,false}, {50,100} },
-    { AREA_PMETER_POWER,   0, "Lettura consumo W.", {true,false,false}, {400,700} },
+    { AREA_PMETER_VOLTAGE, 0, "Lettura tensione", {false}, {50,200} },
+    { AREA_PMETER_CURRENT, 0, "Lettura corrente", {false}, {50,100} },
+    { AREA_PMETER_POWER,   0, "Lettura consumo W.", {false}, {600,800} },
 
-    { 13, 0, "Lettura consumo 4", {true,false,false}, {-1,-1} },
-    { 14, 0, "Lettura frequenza Hz.", {true,false,false}, {10,20} },
+    { 13, 0, "Lettura consumo 4", {false}, {-1,-1} },
+    { 14, 0, "Lettura frequenza Hz.", {false}, {10,20} },
 
     // **** 4 DI EbYTE ID=8 
-    { 15, 0, "", {false,false,false}, {-1,-1} },
-    { 16, 0, "Vasistas dx. chiuso", {true,false,false}, {-1,-1} },
-    { 17, 0, "", {false,false,false}, {-1,-1} },
-    { 18, 0, "Vasistas sx. chiuso", {true,false,false}, {-1,-1} },
+    { 15, 0, "", {false}, {-1,-1} },
+    { 16, 0, "Vasistas dx. chiuso", {false}, {-1,-1} },
+    { 17, 0, "", {false}, {-1,-1} },
+    { 18, 0, "Vasistas sx. chiuso", {false}, {-1,-1} },
 
     // 2 DO EbYTE ID=8
-    { 19, 0, "Luce letto 1", {false,false,false}, {-1,-1} },
-    { 20, 0, "Luce letto 2", {false,false,false}, {-1,-1} },
+    { 19, 0, "Luce letto 1", {false}, {-1,-1} },
+    { 20, 0, "Luce letto 2", {false}, {-1,-1} },
 
     // **** 32 DI EbYTE ID=4 (da 21 a 52)
-    { AREA_CAMERA_PIR_ALM,    0, "PIR Camera Allarme, NEGATO", {true,false,true}, {-1,-1} },
-    { AREA_CAMERA_PIR_TAMPER, 0, "Tamper PIR Camera, NEGATO",  {true,false,true}, {-1,-1} },
-    { AREA_CAMERA_SMOKE_ALM,  0, "Sensore fumo Camera, NEGATO",{true,false,true}, {-1,-1} },
+    { AREA_CAMERA_PIR_ALM,    0, "PIR Camera Allarme, NEGATO", {true}, {-1,-1} },
+    { AREA_CAMERA_PIR_TAMPER, 0, "Tamper PIR Camera, NEGATO",  {true}, {-1,-1} },
+    { AREA_CAMERA_SMOKE_ALM,  0, "Sensore fumo Camera, NEGATO",{true}, {-1,-1} },
 
-    { 30, 0, "", {false,false,false}, {-1,-1} },
+    { 30, 0, "", {false}, {-1,-1} },
     // ============================================================
     // ========================   SCALE   ==========================
     // ============================================================
 
     // **** 4 DI EbYTE ID=2
-    { AREA_INGRESSO_DOOR_ALM, 0, "Sensore porta ingresso, NEGATO", {false,false,true}, {-1,-1} },
+    { AREA_INGRESSO_DOOR_ALM, 0, "Sensore porta ingresso, NEGATO", {true}, {-1,-1} },
 
     // Pulsanti scala
-    { 54, 57, "Pulsante scala 3", {true,true,false}, {-1,-1} },   // forwardArea = 57
-    { 55, 0,  "Pulsante scala 1", {true,true,false}, {-1,-1} },   // -------A
-    { 56, AREA_PLAFONIERA_EXT, "Pulsante scala 2 (Luce PT)", {true,true,false}, {-1,-1} }, // forwardArea = 59
+    { 54, 57, "Pulsante scala 3", {false}, {-1,-1} },   // forwardArea = 57
+    { 55, 0,  "Pulsante scala 1", {false}, {-1,-1} },   // -------A
+    { 56, AREA_PLAFONIERA_EXT, "Pulsante scala 2 (Luce PT)", {false}, {-1,-1} }, // forwardArea = 59
 
     // 4 DO EbYTE
-    { 57, 0, "Luce scale P1", {false,false,false}, {-1,-1} },
-    { 58, 0, "Luce scale PT", {false,false,false}, {-1,-1} },
-    { AREA_PLAFONIERA_EXT, 0, "Luce Ext.", {true,true,false}, {-1,-1} },
-    { 60, 0, "", {false,false,false}, {-1,-1} },
+    { 57, 0, "Luce scale P1", {false}, {-1,-1} },
+    { 58, 0, "Luce scale PT", {false}, {-1,-1} },
+    { AREA_PLAFONIERA_EXT, 0, "Luce Ext.", {false}, {-1,-1} },
+    { 60, 0, "", {false}, {-1,-1} },
     // ============================================================
     // =======================   QUADRO P1   =======================
     // ============================================================
 
     // **** 4 DI EbYTE ID=3
-    { 62, 0,  "Pulsante chiusura scuri", {true,true,false}, {-1,-1} },
-    { 63, 75, "Pulsante trave 2",        {true,true,false}, {-1,-1} },  // forwardArea = 75
-    { 64, 76, "Pulsante trave 1",        {true,true,false}, {-1,-1} },  // forwardArea = 76
-    { 65, 0,  "Pulsante apertura scuri", {true,true,false}, {-1,-1} },
+    { 62, 0,  "Pulsante chiusura scuri", {false}, {-1,-1} },
+    { 63, 75, "Pulsante trave 2",        {false}, {-1,-1} },  // forwardArea = 75
+    { 64, 76, "Pulsante trave 1",        {false}, {-1,-1} },  // forwardArea = 76
+    { 65, 0,  "Pulsante apertura scuri", {false}, {-1,-1} },
 
     // 4 DO EbYTE
-    { 66, 0, "Buzzer",          {false,false,false}, {-1,-1} },
-    { 67, 0, "Open/close scuro",{false,false,false}, {-1,-1} },
-    { 68, 0, "On/off scuro",    {false,false,false}, {-1,-1} },
-    { 69, 0, "",                {false,false,false}, {-1,-1} },
+    { 66, 0, "Buzzer",          {false}, {-1,-1} },
+    { 67, 0, "Open/close scuro",{false}, {-1,-1} },
+    { 68, 0, "On/off scuro",    {false}, {-1,-1} },
+    { 69, 0, "",                {false}, {-1,-1} },
     // ============================================================
     // =======================   PARETE P1   =======================
     // ============================================================
 
     // **** 4 DI EbYTE ID=5
-    { 70, 0, "", {false,false,false}, {-1,-1} },
-    { 71, 0, "", {false,false,false}, {-1,-1} },
-    { 72, 0, "", {false,false,false}, {-1,-1} },
-    { 73, 0, "", {false,false,false}, {-1,-1} },
+    { 70, 0, "", {false}, {-1,-1} },
+    { 71, 0, "", {false}, {-1,-1} },
+    { 72, 0, "", {false}, {-1,-1} },
+    { 73, 0, "", {false}, {-1,-1} },
 
     // 4 DO EbYTE ID=5
-    { 74, 0, "DO: Led binario", {false,false,false}, {-1,-1} },
-    { 75, 0, "DO: Led trave 2", {false,false,false}, {-1,-1} },
-    { 76, 0, "DO: Led trave 1", {false,false,false}, {-1,-1} },
-    { 77, 0, "", {false,false,false}, {-1,-1} },
+    { 74, 0, "DO: Led binario", {false}, {-1,-1} },
+    { 75, 0, "DO: Led trave 2", {false}, {-1,-1} },
+    { 76, 0, "DO: Led trave 1", {false}, {-1,-1} },
+    { 77, 0, "", {false}, {-1,-1} },
     // ============================================================
     // ===================   PULSANTI LETTO / VASISTAS   ==========
     // ============================================================
 
     // **** 32 DI EbYTE ID=6 - Pulsanti Letto e sensori
-    { 78, 0, "Pulsante Apertura serranda vasistas sx.", {true,true,false}, {-1,-1} },
-    { 79, 0, "Pulsante Chiusura serranda vasistas sx.", {true,true,false}, {-1,-1} },
-    { 80, 0, "Pulsante Apertura vasistas sx.", {true,true,false}, {-1,-1} },
-    { 81, 0, "Pulsante Chiusura vasistas sx.", {true,true,false}, {-1,-1} },
+    { 78, 0, "Pulsante Apertura serranda vasistas sx.", {false}, {-1,-1} },
+    { 79, 0, "Pulsante Chiusura serranda vasistas sx.", {false}, {-1,-1} },
+    { 80, 0, "Pulsante Apertura vasistas sx.", {false}, {-1,-1} },
+    { 81, 0, "Pulsante Chiusura vasistas sx.", {false}, {-1,-1} },
 
-    { 82, 0,  "Pulsante Letto sx. 1", {false,false,false}, {-1,-1} },   // -------A
-    { 83, 19, "Pulsante Letto sx. 2", {true,true,false}, {-1,-1} },     // forwardArea = 19
+    { 82, 0,  "Pulsante Letto sx. 1", {false}, {-1,-1} },   // -------A
+    { 83, 19, "Pulsante Letto sx. 2", {false}, {-1,-1} },     // forwardArea = 19
 
-    { 86, 0, "Pulsante Apertura serranda vasistas dx.", {true,true,false}, {-1,-1} },
-    { 87, 0, "Pulsante Chiusura serranda vasistas dx.", {true,true,false}, {-1,-1} },
-    { 88, 0, "Pulsante Apertura vasistas dx.", {true,true,false}, {-1,-1} },
-    { 89, 0, "Pulsante Chiusura vasistas dx.", {true,true,false}, {-1,-1} },
+    { 86, 0, "Pulsante Apertura serranda vasistas dx.", {false}, {-1,-1} },
+    { 87, 0, "Pulsante Chiusura serranda vasistas dx.", {false}, {-1,-1} },
+    { 88, 0, "Pulsante Apertura vasistas dx.", {false}, {-1,-1} },
+    { 89, 0, "Pulsante Chiusura vasistas dx.", {false}, {-1,-1} },
 
-    { 90, 74, "Pulsante Letto dx. 1", {true,true,false}, {-1,-1} },     // forwardArea = 74
-    { 91, 20, "Pulsante Letto dx. 2", {true,true,false}, {-1,-1} },     // forwardArea = 20
+    { 90, 74, "Pulsante Letto dx. 1", {false}, {-1,-1} },     // forwardArea = 74
+    { 91, 20, "Pulsante Letto dx. 2", {false}, {-1,-1} },     // forwardArea = 20
 
-    { 96, 0, "", {false,false,false}, {-1,-1} },
-    { 97, 0, "", {false,false,false}, {-1,-1} },
+    { 96, 0, "", {false}, {-1,-1} },
+    { 97, 0, "", {false}, {-1,-1} },
     // ============================================================
     // ==========================   CUCINA   =======================
     // ============================================================
 
-    { AREA_CUCINA_PIR_ALM,    0, "PIR Cucina Allarme, NEGATO", {true,false,true}, {-1,-1} },
-    { AREA_CUCINA_PIR_TAMPER, 0, "Tamper PIR Cucina, NEGATO",  {true,false,true}, {-1,-1} },
-    { AREA_CUCINA_DOOR_ALM,   0, "Sensore porta ingresso Cucina, NEGATO", {false,false,true}, {-1,-1} },
+    { AREA_CUCINA_PIR_ALM,    0, "PIR Cucina Allarme, NEGATO", {true}, {-1,-1} },
+    { AREA_CUCINA_PIR_TAMPER, 0, "Tamper PIR Cucina, NEGATO",  {true}, {-1,-1} },
+    { AREA_CUCINA_DOOR_ALM,   0, "Sensore porta ingresso Cucina, NEGATO", {true}, {-1,-1} },
 
-    { 101, 0, "", {false,false,false}, {-1,-1} },
+    { 101, 0, "", {false}, {-1,-1} },
 
-    { 106, 0, "Pulsante cucina fondo 1", {true,true,false}, {-1,-1} },
-    { 107, 0, "Pulsante cucina fondo 2", {true,true,false}, {-1,-1} },
-    { 109, 0, "Pulsante cucina fondo 3", {true,true,false}, {-1,-1} },
+    { 106, 0, "Pulsante cucina fondo 1", {false}, {-1,-1} },
+    { 107, 0, "Pulsante cucina fondo 2", {false}, {-1,-1} },
+    { 109, 0, "Pulsante cucina fondo 3", {false}, {-1,-1} },
 
     // **** 8 DO EbYTE ID=7 - Vasistas e scuri
-    { 110, 0, "Inv. vasistas sx.", {false,false,false}, {-1,-1} },
-    { 111, 0, "Ali. vasistas sx.", {false,false,false}, {-1,-1} },
-    { 112, 0, "", {false,false,false}, {-1,-1} },
-    { 113, 0, "", {false,false,false}, {-1,-1} },
-    { 114, 0, "", {false,false,false}, {-1,-1} },
-    { 115, 0, "", {false,false,false}, {-1,-1} },
-    { 116, 0, "", {false,false,false}, {-1,-1} },
-    { 117, 0, "X", {false,false,false}, {-1,-1} },
+    { 110, 0, "Inv. vasistas sx.", {false}, {-1,-1} },
+    { 111, 0, "Ali. vasistas sx.", {false}, {-1,-1} },
+    { 112, 0, "Inv. vasistas dx.", {false}, {-1,-1} },
+    { 113, 0, "Ali. vasistas dx.", {false}, {-1,-1} },
+    { 114, 0, "", {false}, {-1,-1} },
+    { 115, 0, "", {false}, {-1,-1} },
+    { 116, 0, "", {false}, {-1,-1} },
+    { 117, 0, "X", {false}, {-1,-1} },
     // ============================================================
     // =====================   SENSORI CAMERA   ====================
     // ============================================================
 
-    { SENSORE_CAMERA_CO,   0, "Co",          {true,false,false}, {-1,-1} },
-    { SENSORE_CAMERA_TEMP, 0, "Temperatura", {true,false,false}, {-1,-1} },
-    { SENSORE_CAMERA_HUM,  0, "Umidita",     {true,false,false}, {-1,-1} },
+    { SENSORE_CAMERA_CO,   0, "Co",          {false}, {-1,-1} },
+    { SENSORE_CAMERA_TEMP, 0, "Temperatura", {false}, {-1,-1} },
+    { SENSORE_CAMERA_HUM,  0, "Umidita",     {false}, {-1,-1} },
     // ============================================================
     // =======================   CUCINA PT   =======================
     // ============================================================
 
-    { SENSORE_CUCINA_CORRENTE, 0, "Sensore corrente Induzione", {false,false,false}, {-1,-1} },
+    { SENSORE_CUCINA_CORRENTE, 0, "Sensore corrente Induzione", {false}, {-1,-1} },
 
     // **** 4 DI EbYTE
-    { 123, 127, "Pulsante Cucina 1", {true,true,false}, {-1,-1} },   // forwardArea = 127
-    { 124, 129, "Pulsante Cucina 2", {true,true,false}, {-1,-1} },   // forwardArea = 129
+    { 123, 127, "Pulsante Cucina 1", {false}, {-1,-1} },   // forwardArea = 127
+    { 124, 129, "Pulsante Cucina 2", {false}, {-1,-1} },   // forwardArea = 129
 
-    { AREA_CUCINA_FLOOD_ALM, 0, "Allagamento Cucina", {false,false,false}, {-1,-1} },
-    { 126, 0, "", {false,false,false}, {-1,-1} },
+    { AREA_CUCINA_FLOOD_ALM, 0, "Allagamento Cucina", {false}, {-1,-1} },
+    { 126, 0, "", {false}, {-1,-1} },
 
     // **** 4 DO EbYTE
-    { 127, 0, "Luce cucina 1", {false,false,false}, {-1,-1} },
-    { 128, 0, "Bluetooth",     {true,true,false}, {-1,-1} },
-    { 129, 0, "Luce cucina 2", {false,false,false}, {-1,-1} },
-    { 130, 0, "", {false,false,false}, {-1,-1} },
+    { 127, 0, "Luce cucina 1", {false}, {-1,-1} },
+    { 128, 0, "Bluetooth",     {false}, {-1,-1} },
+    { 129, 0, "Luce cucina 2", {false}, {-1,-1} },
+    { 130, 0, "", {false}, {-1,-1} },
 
     // **** 4 DI EbYTE ID=4 Parete Cucina
-    { 131, 0, "Valvola calorifero bagno NC", {true,false,false}, {-1,-1} },
-    { 132, 0, "Valvola calorifero bagno NO", {true,false,false}, {-1,-1} },
-    { 133, 0, "", {false,false,false}, {-1,-1} },
-    { 134, 0, "", {false,false,false}, {-1,-1} },
+    { 131, 0, "Valvola calorifero bagno NC", {false}, {-1,-1} },
+    { 132, 0, "Valvola calorifero bagno NO", {false}, {-1,-1} },
+    { 133, 0, "", {false}, {-1,-1} },
+    { 134, 0, "", {false}, {-1,-1} },
 
     // **** 4 DO EbYTE ID=4
-    { AREA_ESTRATTORE_CUCINA, 0, "DO: Estrattore", {false,false,false}, {-1,-1} },
-    { 136, 0, "DO: Valvola calorifero bagno ON",  {true,false,false}, {-1,-1} },
-    { 137, 0, "DO: Valvola calorifero bagno OFF", {true,false,false}, {-1,-1} },
-    { 138, 0, "DO: Led Fondo", {true,true,false}, {-1,-1} },
+    { AREA_ESTRATTORE_CUCINA, 0, "DO: Estrattore", {false}, {-1,-1} },
+    { 136, 0, "DO: Valvola calorifero bagno ON",  {false}, {-1,-1} },
+    { 137, 0, "DO: Valvola calorifero bagno OFF", {false}, {-1,-1} },
+    { 138, 0, "DO: Led Fondo", {false}, {-1,-1} },
 
     // **** 4 AI EbYTE ID=5 Corridoio PT
-    { 139, 0, "Pressione rete H2O", {false,false,false}, {-1,-1} },
-    { 140, 0, "", {false,false,false}, {-1,-1} },
-    { 141, 0, "", {false,false,false}, {-1,-1} },
-    { 142, 0, "", {false,false,false}, {-1,-1} },
+    { 139, 0, "Pressione rete H2O", {false}, {-1,-1} },
+    { 140, 0, "", {false}, {-1,-1} },
+    { 141, 0, "", {false}, {-1,-1} },
+    { 142, 0, "", {false}, {-1,-1} },
 
     // **** 4 DO
-    { 143, 0, "Luci??", {false,false,false}, {-1,-1} },
-    { 144, 0, "", {false,false,false}, {-1,-1} },
-    { 145, 0, "", {false,false,false}, {-1,-1} },
-    { 146, 0, "", {false,false,false}, {-1,-1} },
+    { 143, 0, "Luci??", {false}, {-1,-1} },
+    { 144, 0, "", {false}, {-1,-1} },
+    { 145, 0, "", {false}, {-1,-1} },
+    { 146, 0, "", {false}, {-1,-1} },
 
     // **** 4 DI EbYTE ID=6
-    { AREA_INGRESSO_EV_OPEN_DI, 0, "Valvola acqua casa APERTA", {true,false,false}, {-1,-1} },
-    { 148, 0, "", {false,false,false}, {-1,-1} },
-    { 149, 0, "", {false,false,false}, {-1,-1} },
-    { 150, 0, "", {false,false,false}, {-1,-1} },
+    { AREA_INGRESSO_EV_OPEN_DI, 0, "Valvola acqua casa APERTA", {false}, {-1,-1} },
+    { 148, 0, "", {false}, {-1,-1} },
+    { 149, 0, "", {false}, {-1,-1} },
+    { 150, 0, "", {false}, {-1,-1} },
 
     // **** 4 DO
-    { RELAY_LED_BAGNO,      0, "Alimentatore LED bagno", {false,false,false}, {-1,-1} },
-    { AREA_INGRESSO_EV_CLOSE, 0, "Valvola acqua casa Alim (ON-Chiusa)", {true,true,false}, {-1,-1} },
-    { AREA_INGRESSO_EV_OPEN,  0, "Valvola acqua casa Aperta",          {true,true,false}, {-1,-1} },
-    { AREA_ESTRATTORE_BAGNO,  0, "Estrattore bagno",                   {true,true,false}, {-1,-1} },
+    { RELAY_LED_BAGNO,      0, "Alimentatore LED bagno", {false}, {-1,-1} },
+    { AREA_INGRESSO_EV_CLOSE, 0, "Valvola acqua casa Alim (ON-Chiusa)", {false}, {-1,-1} },
+    { AREA_INGRESSO_EV_OPEN,  0, "Valvola acqua casa Aperta",          {false}, {-1,-1} },
+    { AREA_ESTRATTORE_BAGNO,  0, "Estrattore bagno",                   {false}, {-1,-1} },
     // ============================================================
     // ==========================   BAGNO   ========================
     // ============================================================
 
     // **** 32 DI EbYTE ID=7
-    { AREA_BAGNO_PIR_ALM,    0, "PIR Bagno Allarme, NEGATO", {true,false,true}, {-1,-1} },
-    { AREA_BAGNO_PIR_TAMPER, 0, "Tamper PIR Bagno, NEGATO",  {true,false,true}, {-1,-1} },
-    { AREA_INGRESSO_PIR_ALM, 0, "PIR Ingresso Allarme, NEGATO", {true,false,true}, {-1,-1} },
-    { AREA_INGRESSO_PIR_TAMPER, 0, "Tamper PIR Ingresso, NEGATO", {true,false,true}, {-1,-1} },
+    { AREA_BAGNO_PIR_ALM,    0, "PIR Bagno Allarme, NEGATO", {true}, {-1,-1} },
+    { AREA_BAGNO_PIR_TAMPER, 0, "Tamper PIR Bagno, NEGATO",  {true}, {-1,-1} },
+    { AREA_INGRESSO_PIR_ALM, 0, "PIR Ingresso Allarme, NEGATO", {true}, {-1,-1} },
+    { AREA_INGRESSO_PIR_TAMPER, 0, "Tamper PIR Ingresso, NEGATO", {true}, {-1,-1} },
 
-    { 166, 0, "Pulsante bagno", {true,true,false}, {-1,-1} },
+    { 166, 0, "Pulsante bagno", {false}, {-1,-1} },
 
-    { AREA_BAGNO_FLOOD_ALM, 0, "DI: Sensore allagamento bagno", {true,false,false}, {-1,-1} },
+    { AREA_BAGNO_FLOOD_ALM, 0, "DI: Sensore allagamento bagno", {false}, {-1,-1} },
 
-    { BAGNO_IN_P1, 0, "DI: Int. Luce bagno",     {true,true,false}, {-1,-1} },
-    { BAGNO_IN_P2, 0, "DI: Int. Luce corridoio", {true,true,false}, {-1,-1} },
-    { BAGNO_IN_P3, 0, "Int. Luce ingresso",      {true,true,false}, {-1,-1} },
+    { BAGNO_IN_P1, 0, "DI: Int. Luce bagno",     {false}, {-1,-1} },
+    { BAGNO_IN_P2, 0, "DI: Int. Luce corridoio", {false}, {-1,-1} },
+    { BAGNO_IN_P3, 0, "Int. Luce ingresso",      {false}, {-1,-1} },
 
-    // Sensori bagno
-    { SENSORE_CUCINA_HUM,  0, "Umidita",     {true,false,false}, {-1,-1} },
-    { SENSORE_CUCINA_TEMP, 0, "Temperatura", {true,false,false}, {-1,-1} },
-    { SENSORE_CUCINA_LUX,  0, "Luminosita",  {true,false,false}, {-1,-1} },
+    // Sensori Cucina
+    { SENSORE_CUCINA_HUM,  0, "Umidita",     {false}, {-1,-1} },
+    { SENSORE_CUCINA_TEMP, 0, "Temperatura", {false}, {-1,-1} },
+    { SENSORE_CUCINA_LUX,  0, "Luminosita",  {false}, {-1,-1} },
 
     // RESI LED ID=8
-    { BAGNO_OUT_LED01B, 0, "Bagno LED B",    {true,true,false}, {-1,-1} },
-    { BAGNO_OUT_LED01W, 0, "Bagno LED W",    {true,true,false}, {-1,-1} },
-    { BAGNO_OUT_LED01G, 0, "Bagno LED G",    {true,true,false}, {-1,-1} },
-    { BAGNO_OUT_LED01R, 0, "Bagno LED R",    {true,true,false}, {-1,-1} },
-    { BAGNO_OUT_LED02,  0, "Bagno LED MAIN", {true,true,false}, {-1,-1} },
+    { BAGNO_OUT_LED01B, 0, "Bagno LED B",    {false}, {-1,-1} },
+    { BAGNO_OUT_LED01W, 0, "Bagno LED W",    {false}, {-1,-1} },
+    { BAGNO_OUT_LED01G, 0, "Bagno LED G",    {false}, {-1,-1} },
+    { BAGNO_OUT_LED01R, 0, "Bagno LED R",    {false}, {-1,-1} },
+    { BAGNO_OUT_LED02,  0, "Bagno LED MAIN", {false}, {-1,-1} },
 
     // Sensori bagno ID=11
-    { SENSORE_BAGNO_LUX, 0, "Lux",         {true,false,false}, {-1,-1} },
-    { SENSORE_BAGNO_TEMP,0, "Temperatura", {true,false,false}, {-1,-1} },
-    { SENSORE_BAGNO_HUM, 0, "Umidita",     {true,false,false}, {-1,-1} },
+    { SENSORE_BAGNO_LUX, 0, "Lux",         {false}, {-1,-1} },
+    { SENSORE_BAGNO_TEMP,0, "Temperatura", {false}, {-1,-1} },
+    { SENSORE_BAGNO_HUM, 0, "Umidita",     {false}, {-1,-1} },
     // ============================================================
     // ======================   AREE VIRTUALI   ====================
     // ============================================================
 
-    { AREA_CUCINA_ESTRATTORE_BIT, 0, "", {true,true,false}, {-1,-1} },
-    { AREA_BAGNO_ESTRATTORE_BIT,  0, "", {true,true,false}, {-1,-1} },
-    { AREA_SECURITY_STATUS,       0, "", {true,false,false}, {-1,-1} }
+    { AREA_CUCINA_ESTRATTORE_BIT, 0, "", {false}, {-1,-1} },
+    { AREA_BAGNO_ESTRATTORE_BIT,  0, "", {false}, {-1,-1} },
+    { AREA_SECURITY_STATUS,       0, "", {false}, {-1,-1} }
 }};
 
 // ************ ROUTES, SPLITS and TOGGLES *******************************
@@ -675,9 +674,10 @@ static const char* AUTOMATION_JSON = R"json(
 DomoManagerConfig makeDomoConfig() {
     DomoManagerConfig cfg;   // usa tutti i default della struct
 
-    cfg.hmi.enabled = true;   // opzionale, è già default
+    cfg.hmi.enabled = false;   // opzionale, è già default
     cfg.hmi.port = 502;        // default
-    cfg.hmi.pollingMs = 500;   // default
+    cfg.hmi.pollingMs = 250;   // default
+    cfg.hmi.maxClients = 1;
 
     // --- Modbus ---
     cfg.modbusRTU.port = 502;
@@ -849,37 +849,178 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     }
 };
 
-// ---------------------------------------------------------------------------
-// MQTT variables exported by the frontend configuration
-// Each entry maps a buffer area or sensor to an MQTT-friendly variable.
-// Fields: id, friendly name, unit, HA type, source area, scale factor.
-// ---------------------------------------------------------------------------
-static const FrontendConfig::MQTT::Var MQTT_VARS[] = {
+// ============================================================================
+// MQTT - CONFIGURAZIONE COMPLETA
+// ============================================================================
+
+
+// ============================================================================
+// 1) MAPPING - SMHUB / ZIGBEE2MQTT
+// ============================================================================
+//
+// Device reale:
+//   0xa4c138a6a900c9d6
+//
+// Topic base prodotto da Z2M:
+//   opta_domotica/0xa4c138a6a900c9d6
+//
+// Proprietà disponibili dal log:
+//   state_l1
+//   state_l2
+//   state_l3
+//   state_l4
+//
+// Le aree DM sono PROVVISORIE.
+// ============================================================================
+
+static const FrontendConfig::MQTT::Mapping MQTT_SMHub_Relay_Mappings[] =
+{
     {
-        "temp_cucina",
-        "Temperatura Cucina",
-        "°C",
-        MQTTEngine_Var::HAType::SENSOR,
-        SENSORE_CUCINA_TEMP,   // area buffer
-        0.1f                   // /10
-    },
-    {
-        "porta_ingresso",
-        "Porta Ingresso",
-        nullptr,
-        MQTTEngine_Var::HAType::BINARY_SENSOR,
-        AREA_INGRESSO_DOOR_ALM,
+        "state_l1",
+
+        FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+
+        FrontendConfig::MQTT::Mapping::DataType::BOOL,
+
+        127,                    // TODO: area DM reale
         1.0f
     },
+
     {
-        "tapparella_sala",
-        "Tapparella Sala",
-        nullptr,
-        MQTTEngine_Var::HAType::COVER,
-        16,                    // area buffer posizione tapparella
+        "state_l2",
+
+        FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+
+        FrontendConfig::MQTT::Mapping::DataType::BOOL,
+
+        301,                    // TODO: area DM reale
+        1.0f
+    },
+
+    {
+        "state_l3",
+
+        FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+
+        FrontendConfig::MQTT::Mapping::DataType::BOOL,
+
+        302,                    // TODO: area DM reale
+        1.0f
+    },
+
+    {
+        "state_l4",
+
+        FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+
+        FrontendConfig::MQTT::Mapping::DataType::BOOL,
+
+        303,                    // TODO: area DM reale
         1.0f
     }
 };
+
+
+// ============================================================================
+// 2) DEVICE - SMHUB / ZIGBEE2MQTT
+// ============================================================================
+
+static const FrontendConfig::MQTT::Device MQTT_SMHub_Devices[] =
+{
+    {
+        0,
+        "0xa4c138a6a900c9d6",
+        "Relay Cucina SMHub",
+        MQTT_SMHub_Relay_Mappings,
+        sizeof(MQTT_SMHub_Relay_Mappings) /
+        sizeof(MQTT_SMHub_Relay_Mappings[0])
+    }
+};
+
+
+// ============================================================================
+// 3) MAPPING - HOME ASSISTANT
+// ============================================================================
+//
+// Esempio di variabile già esistente:
+//   temp_cucina
+//
+// Topic previsto dal backend HA:
+//   homeassistant/state/opta_domotica/temp_cucina
+//
+// Anche qui l'area è quella attuale del tuo sensore.
+// ============================================================================
+
+static const FrontendConfig::MQTT::Mapping MQTT_HA_Cucina_Mappings[] =
+{
+    {
+        "temp_cucina",
+
+        FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+
+        FrontendConfig::MQTT::Mapping::DataType::FLOAT,
+
+        189,                    // Temperatura cucina
+        0.1f
+    }
+};
+
+
+// ============================================================================
+// 4) DEVICE - HOME ASSISTANT
+// ============================================================================
+
+static const FrontendConfig::MQTT::Device MQTT_HA_Devices[] =
+{
+    {
+        1,
+        "opta_domotica",
+        "Home Assistant",
+        MQTT_HA_Cucina_Mappings,
+        sizeof(MQTT_HA_Cucina_Mappings) /
+        sizeof(MQTT_HA_Cucina_Mappings[0])
+    }
+};
+
+
+// ============================================================================
+// 5) CLIENT MQTT
+// ============================================================================
+//
+// Per ora entrambi puntano allo stesso broker.
+// In seguito puoi mettere broker diversi.
+//
+// Client 0 = Home Assistant
+// Client 1 = SMHub / Zigbee2MQTT
+// ============================================================================
+
+static const FrontendConfig::MQTT::Client MQTT_CLIENTS[] =
+{
+    {
+        true,
+
+        IPAddress(192, 168, 12, 100),
+
+        1883,
+
+        FrontendConfig::MQTT::Client::Backend::ZIGBEE2MQTT,
+
+        "SMHub"
+    }
+    /*{
+        true,
+
+        IPAddress(192, 168, 12, 215),
+
+        1883,
+
+        FrontendConfig::MQTT::Client::Backend::HOME_ASSISTANT,
+
+        "Home Assistant"
+    },*/
+};
+
+
 
 // ------------------------------------------------------------
 // GENERIC SENSOR CONFIGURATION

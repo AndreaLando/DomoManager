@@ -1,5 +1,5 @@
-#ifndef DMBaseClass_HPP
-#define DMBaseClass_HPP
+#ifndef DMBaseClassCore_HPP
+#define DMBaseClassCore_HPP
 
 #pragma once
 
@@ -11,28 +11,12 @@
    Contatto:        mail@domo-manager.it
   
    Versione modulo: 1.0.0
-   Ultima modifica: 2026‑03‑24
+   Ultima modifica: 2026‑07‑24
    Note:
                     • Nessuna
 
    ============================================================================ */
 
-/*===============================================================================
-DMBaseClass — Core utilities for state tracking, averaging, thresholds, timers
-===============================================================================
-This module provides foundational building blocks for the entire system:
-- Cell: reactive value container with change‑detection.
-- safeRead: safe function wrapper with fallback.
-- Group & AverageCalculator: moving averages and trend detection.
-- AnalogThresholdManager: dynamic analog threshold selection.
-- SplitOutManager: split‑output logic with TON timers and callbacks.
-- Errors: automatic error accumulation and timed recovery.
-- Watchdog: execution‑time monitoring, spike detection, overload alerts.
-- LedController: non‑blocking LED control with blink and pulse modes.
-- AreaRegistry: symbolic area registry with auto‑registration macros.
-- AsyncScheduler: cooperative task engine with steps, branching, delays,
-                  skip conditions, priorities and completion callbacks.
-=============================================================================== */
 
 
 #include <Arduino.h>
@@ -43,6 +27,231 @@ This module provides foundational building blocks for the entire system:
 #include "DMSignal.hpp"
 #include "DMLogger.hpp"
 #include "DMOptaRTC.hpp"
+
+enum Priority {
+  Low=0, 
+  Normal=1,
+  Medium=2, 
+  High=3 
+};
+
+constexpr int PriorityCount =
+    static_cast<int>(Priority::High) + 1;
+
+ typedef struct {
+    int deviceIndex;
+    Priority priority;
+  }PriorityMgmt;
+
+
+class OwnerManager {
+public:
+    enum Mode {
+        OWNER,
+        GUEST,
+        DEVELOPER
+    };
+
+
+    enum Reason {
+        USER_REQUEST,
+        IOT_REQUEST,
+        TIME_EXPIRED,
+        SECURITY_EVENT,
+        SYSTEM_REBOOT
+    };
+
+    using ModeChangedCallback = void (*)(Mode oldMode, Mode newMode, Reason reason);
+
+private:
+    Mode currentMode = OWNER;
+    unsigned long guestExpireAt = 0;
+    bool logsPaused = false;
+    bool initialized = false;   // 🔥 evita reset involontario al primo ciclo
+
+    ModeChangedCallback onModeChanged = nullptr;
+
+    // IOT integration
+    bool iotGuestRequest = false;
+    unsigned long iotGuestDuration = 0;
+
+    // ---------------------------------------------------------
+    // INTERNAL HELPERS
+    // ---------------------------------------------------------
+    const char* modeToStr(Mode m) const {
+        switch (m) {
+            case OWNER:     return "OWNER";
+            case GUEST:     return "GUEST";
+            case DEVELOPER: return "DEVELOPER";
+        }
+        return "UNKNOWN";
+    }
+
+
+    const char* reasonToStr(Reason r) const {
+        switch (r) {
+            case USER_REQUEST:   return "USER_REQUEST";
+            case IOT_REQUEST:    return "IOT_REQUEST";
+            case TIME_EXPIRED:   return "TIME_EXPIRED";
+            case SECURITY_EVENT: return "SECURITY_EVENT";
+            case SYSTEM_REBOOT:  return "SYSTEM_REBOOT";
+        }
+        return "UNKNOWN";
+    }
+
+    void triggerCallback(Mode oldMode, Mode newMode, Reason reason) {
+        LOG_DF("OwnerManager",
+            "Cambio modalità: %s → %s (reason=%s)",
+            modeToStr(oldMode),
+            modeToStr(newMode),
+            reasonToStr(reason));
+
+        if (onModeChanged)
+            onModeChanged(oldMode, newMode, reason);
+    }
+
+public:
+    OwnerManager() {}
+
+    // ---------------------------------------------------------
+    // EVENT HOOKS
+    // ---------------------------------------------------------
+    void setCallback(ModeChangedCallback cb) {
+        onModeChanged = cb;
+        LOG_DF("OwnerManager", "Callback registrato");
+    }
+
+    bool hasCallback() const {
+        return onModeChanged != nullptr;
+    }
+
+    // ---------------------------------------------------------
+    // SET MODE
+    // ---------------------------------------------------------
+    void setOwner(Reason reason = USER_REQUEST) {
+        if (currentMode == OWNER) return;
+
+        Mode old = currentMode;
+        currentMode = OWNER;
+
+        triggerCallback(old, OWNER, reason);
+    }
+
+    void setGuest(unsigned long expireTimestamp, Reason reason = USER_REQUEST) {
+        Mode old = currentMode;
+        currentMode = GUEST;
+        guestExpireAt = expireTimestamp;
+
+        LOG_DF("OwnerManager",
+               "Set mode → GUEST (expire in %lu ms)",
+               (expireTimestamp > millis()) ? (expireTimestamp - millis()) : 0);
+
+        triggerCallback(old, GUEST, reason);
+    }
+
+    void setDeveloper(Reason reason = USER_REQUEST) {
+        if (currentMode == DEVELOPER) return;
+
+        Mode old = currentMode;
+        currentMode = DEVELOPER;
+
+        // 🔥 Developer = log sempre attivi
+        LogManager::enable();
+
+        triggerCallback(old, DEVELOPER, reason);
+    }
+
+    // ---------------------------------------------------------
+    // EXPIRATION / UPDATE
+    // ---------------------------------------------------------
+    bool isGuestExpired(unsigned long now) const {
+        return (currentMode == GUEST) && (now > guestExpireAt);
+    }
+
+    void update(unsigned long now) {
+        // 🔥 Primo ciclo → non fare nulla
+        if (!initialized) {
+            initialized = true;
+            return;
+        }
+
+        if (currentMode == GUEST && now > guestExpireAt) {
+            LOG_DF("OwnerManager", "Guest scaduto → ritorno a OWNER");
+            setOwner(TIME_EXPIRED);
+        }
+
+        if (iotGuestRequest) {
+            LOG_DF("OwnerManager",
+                "Richiesta IOT → attivo Guest per %lu ms",
+                iotGuestDuration);
+
+            iotGuestRequest = false;
+            setGuest(now + iotGuestDuration, IOT_REQUEST);
+        }
+    }
+
+
+    bool hasPendingIOTRequest() const {
+        return iotGuestRequest;
+    }
+
+    unsigned long getPendingIOTDuration() const {
+        return iotGuestDuration;
+    }
+
+    // ---------------------------------------------------------
+    // PERMISSIONS
+    // ---------------------------------------------------------
+    bool canModifySettings() const {
+        return currentMode == OWNER;
+    }
+
+    bool canControlAllDevices() const {
+        return currentMode == OWNER;
+    }
+
+    bool canAccessLogs() const {
+        return currentMode == OWNER;
+    }
+
+    bool canUseAutomation() const {
+        return currentMode == OWNER;
+    }
+
+    bool areLogsPaused() const {
+        return logsPaused;
+    }
+
+    // ---------------------------------------------------------
+    // ACCESSORS
+    // ---------------------------------------------------------
+    const char* getModeName() const {
+        return modeToStr(currentMode);
+    }
+
+    Mode getMode() const {
+        return currentMode;
+    }
+
+    unsigned long getGuestExpireAt() const {
+        return guestExpireAt;
+    }
+
+    // ---------------------------------------------------------
+    // LOGS
+    // ---------------------------------------------------------
+    void pauseLogs() {
+        logsPaused = true;
+        LogManager::disable();
+    }
+
+    void resumeLogs() {
+        logsPaused = false;
+
+        if (currentMode == DEVELOPER)
+            LogManager::enable();
+    }
+};
 
 class TimeManager {
 public:
@@ -101,8 +310,6 @@ private:
     time_t lastEpoch;
     unsigned long lastMillis;
 };
-
-
 
 struct GenericSensorConfig {
     enum class Type {
@@ -164,267 +371,6 @@ class Cell {
     }
 };
 
-  //Calcolatore Medie
-#define NUM_VARIATIONS 5
-class Group {
-public:
-    enum Trend {
-        CONSTANT,
-        INCREASING,
-        DECREASING
-    };
-
-    // --- API pubblica invariata ---
-    String name;
-
-    Group(String n, int size = 5, float sens = 0.1)
-        : name(n), maxSize(size), threshold(sens)
-    {
-        if (maxSize > MAX_SIZE) {
-            LOG_WF("Group", "maxSize=%d supera MAX_SIZE=%d, ridimensiono", maxSize, MAX_SIZE);
-            maxSize = MAX_SIZE;
-        }
-
-        // inizializza buffer
-        for (int i = 0; i < MAX_SIZE; i++) buffer[i] = 0;
-        for (int i = 0; i < MAX_VAR; i++) variations[i] = 0;
-    }
-
-    // ---------------------------------------------------------
-    // API pubblica: updateMeasurement
-    // ---------------------------------------------------------
-    void updateMeasurement(float value) {
-        // rimuovi valore vecchio dalla somma
-        if (count == maxSize)
-            sum -= buffer[head];
-
-        // variazione rispetto al precedente
-        if (count > 0) {
-            float last = buffer[(head - 1 + maxSize) % maxSize];
-            float diff = value - last;
-            updateVariation(diff);
-        }
-
-        // inserisci nuovo valore
-        buffer[head] = value;
-        sum += value;
-
-        head = (head + 1) % maxSize;
-        if (count < maxSize) count++;
-    }
-
-    // ---------------------------------------------------------
-    // API pubblica: average O(1)
-    // ---------------------------------------------------------
-    float average() const {
-        return (count == 0) ? 0 : (sum / count);
-    }
-
-    // ---------------------------------------------------------
-    // API pubblica: trend O(1)
-    // ---------------------------------------------------------
-    Trend trend() const {
-        if (countVar == 0) return CONSTANT;
-
-        float m = averageVariations();
-
-        if (m < threshold && m > -threshold) return CONSTANT;
-        if (m > 0) return INCREASING;
-        return DECREASING;
-    }
-
-private:
-    // =========================================================
-    //  PRIVATE — tutto ciò che non serve all’esterno
-    // =========================================================
-
-    static constexpr int MAX_SIZE = 16;
-    static constexpr int MAX_VAR  = NUM_VARIATIONS;
-
-    float buffer[MAX_SIZE];
-    float variations[MAX_VAR];
-
-    int maxSize;
-    int head = 0;
-    int count = 0;
-
-    int headVar = 0;
-    int countVar = 0;
-
-    float threshold;
-
-    // somme mantenute per O(1)
-    float sum = 0;
-    float sumVar = 0;
-
-    // ---------------------------------------------------------
-    // updateVariation — O(1)
-    // ---------------------------------------------------------
-    void updateVariation(float diff) {
-        if (countVar == MAX_VAR) {
-            sumVar -= variations[headVar];
-        }
-
-        variations[headVar] = diff;
-        sumVar += diff;
-
-        headVar = (headVar + 1) % MAX_VAR;
-        if (countVar < MAX_VAR) countVar++;
-    }
-
-    // ---------------------------------------------------------
-    // averageVariations — O(1)
-    // ---------------------------------------------------------
-    float averageVariations() const {
-        return (countVar == 0) ? 0 : (sumVar / countVar);
-    }
-};
-
-class AverageCalculator {
-public:
-    std::vector<Group> groups;
-
-private:
-    // Lookup O(1) senza unordered_map
-    static constexpr int MAX_GROUPS = 64;
-    static constexpr int MAX_NAME_LEN = 32;
-
-    // Tabella di lookup: nome → indice
-    struct NameEntry {
-        char name[MAX_NAME_LEN];
-        int index;
-    };
-
-    NameEntry nameTable[MAX_GROUPS];
-    uint8_t nameCount = 0;
-
-public:
-
-    AverageCalculator() {
-        for (int i = 0; i < MAX_GROUPS; i++)
-            nameTable[i].index = -1;
-    }
-
-    // ---------------------------------------------------------
-    // createGroup — identico, ma con lookup O(1)
-    // ---------------------------------------------------------
-    void createGroup(const String& name, int size = 5, float threshold = 0.1) {
-        if (groups.size() >= MAX_GROUPS) {
-            LOG_WF("AverageCalculator", "MAX_GROUPS superato (%u)", MAX_GROUPS);
-            return;
-        }
-
-        groups.emplace_back(name, size, threshold);
-
-        // registra nome in lookup table
-        strncpy(nameTable[nameCount].name, name.c_str(), MAX_NAME_LEN);
-        nameTable[nameCount].name[MAX_NAME_LEN - 1] = '\0';
-        nameTable[nameCount].index = groups.size() - 1;
-        nameCount++;
-    }
-
-    // ---------------------------------------------------------
-    // findGroup — ora O(1)
-    // ---------------------------------------------------------
-    Group* findGroup(const String& name) {
-        const char* target = name.c_str();
-
-        for (uint8_t i = 0; i < nameCount; i++) {
-            if (strcmp(nameTable[i].name, target) == 0)
-                return &groups[nameTable[i].index];
-        }
-
-        return nullptr;
-    }
-
-    // ---------------------------------------------------------
-    // addMeasurement — ora velocissimo
-    // ---------------------------------------------------------
-    void addMeasurement(const String& groupName, float value, float threshold = 0.1) {
-        Group* g = findGroup(groupName);
-
-        if (!g) {
-            createGroup(groupName, 5, threshold);
-            g = findGroup(groupName);   // ora O(1)
-        }
-
-        g->updateMeasurement(value);
-    }
-
-    // ---------------------------------------------------------
-    float groupAverage(const String& groupName) {
-        Group* g = findGroup(groupName);
-        return g ? g->average() : 0;
-    }
-
-    Group::Trend groupTrend(const String& groupName) {
-        Group* g = findGroup(groupName);
-        return g ? g->trend() : Group::CONSTANT;
-    }
-};
-
-/* ottimizzata il 19.6.
-class AnalogThresholdManager {
-public:
-    struct Item {
-        int area;
-        int thresholdLow;
-        int thresholdHigh;
-    };
-
-private:
-    // --- Ottimizzazione 1: array statico ---
-    static constexpr int MAX_ITEMS = 64;
-    Item items[MAX_ITEMS];
-    uint8_t count = 0;
-
-    // --- Ottimizzazione 2: lookup O(1) senza unordered_map ---
-    static constexpr int MAX_AREAS = 1024;
-    int indexByArea[MAX_AREAS];
-
-public:
-    AnalogThresholdManager() {
-        for (int i = 0; i < MAX_AREAS; i++)
-            indexByArea[i] = -1;
-    }
-
-    // ---------------------------------------------------------
-    // ADD — identico, ma senza allocazioni dinamiche
-    // ---------------------------------------------------------
-    void add(int area, int low, int high = -1) {
-        if (count >= MAX_ITEMS) {
-            LOG_WF("AnalogThresholdManager", "MAX_ITEMS superato (%u)", MAX_ITEMS);
-            return;
-        }
-
-        items[count] = { area, low, high };
-        indexByArea[area] = count;
-        count++;
-    }
-
-    // ---------------------------------------------------------
-    // GET — lookup O(1) reale
-    // ---------------------------------------------------------
-    const Item* get(int area) const {
-        if (area < 0 || area >= MAX_AREAS) return nullptr;
-        int idx = indexByArea[area];
-        return (idx >= 0) ? &items[idx] : nullptr;
-    }
-
-    // ---------------------------------------------------------
-    // THRESHOLD — velocissimo
-    // ---------------------------------------------------------
-    int getThreshold(int area, long value) const {
-        const Item* it = get(area);
-        if (!it)
-            return 20;   // fallback
-
-        if (it->thresholdHigh > 0 && value > 1000)
-            return it->thresholdHigh;
-
-        return it->thresholdLow;
-    }
-};*/
 class AnalogThresholdManager {
 public:
     struct Item {
@@ -590,7 +536,7 @@ public:
 
         splits.push_back(std::move(it));
 
-        LOG_DF("SplitOutManager", "Added split area=%d maxTime=%lu", mainArea, maxTime);
+        //LOG_DF("SplitOutManager", "Added split area=%d maxTime=%lu", mainArea, maxTime);
     }
 
     Item* get(int areaRead) {
@@ -613,7 +559,7 @@ public:
             LOG_IF("SplitOutManager", "Start ignored: area %d already running", areaRead);
             return;
         }
-        LOG_DF("TIMING", "[SPLIT_START] main=%d time=%lu", areaRead, millis());
+        //LOG_DF("TIMING", "[SPLIT_START] main=%d time=%lu", areaRead, millis());
 
         it->running = true;
         callback(it->split, true);
@@ -659,7 +605,7 @@ public:
                 break;
             }
         }
-        LOG_DF("TIMING", "[SPLIT_END] main=%d time=%lu", areaRead, millis());
+        //LOG_DF("TIMING", "[SPLIT_END] main=%d time=%lu", areaRead, millis());
     }
 
     // ---------------------------------------------------------
@@ -684,200 +630,11 @@ public:
     bool IsRunning(int areaRead) {
         Item* it = get(areaRead);
         bool r = it ? it->running : false;
-        LOG_DF("SplitOutManager", "IsRunning area=%d → %d", areaRead, r);
+        //LOG_DF("SplitOutManager", "IsRunning area=%d → %d", areaRead, r);
         return r;
     }
 };
 
-/*
-class Errors {
-public:
-    using StateChangedFn = std::function<void()>;
-
-    Errors(short maxErrors, unsigned long retryWindow = 60000)
-        : _maxErrors(maxErrors),
-          _retryWindow(retryWindow) {}
-
-    inline void SetStateChangedCallback(StateChangedFn fn) {
-        _onStateChanged = fn;
-    }
-
-    inline void SetName(const char* n) { _name = n; }
-
-    inline bool Loop(bool inError, unsigned long now)
-    {
-        // Log solo quando cambia inError
-        if (inError != _lastInError) {
-            LOG_DF("ERR", "[%s] inError CHANGED → %d", _name, inError);
-            _lastInError = inError;
-        }
-
-        // Se la lettura è OK → il device ha risposto almeno una volta
-        if (!inError && !_everSucceeded) {
-            LOG_DF("ERR", "[%s] FIRST SUCCESSFUL READ", _name);
-            _everSucceeded = true;
-        }
-
-        // Cache locali (più veloci)
-        bool error  = _error;
-        bool parked = _parked;
-
-        // 1) PARCHEGGIATO → early exit
-        if (parked) {
-            updateVisibleState(error, true);
-            return false;
-        }
-
-        // 2) NON IN ERRORE
-        if (!error) {
-
-            if (inError) {
-                if (++_cnt >= _maxErrors) {
-                    enterError(now);
-                    LOG_DF("ERR", "[%s] ENTER INTERNAL ERROR (retryAt=%lu)", _name, _retryAt);
-                    updateVisibleState(true, false);
-                    return true;
-                }
-                LOG_DF("ERR", "[%s] cnt=%d/%d", _name, _cnt, _maxErrors);
-            } else {
-                if (_cnt) LOG_DF("ERR", "[%s] cnt RESET", _name);
-                _cnt = 0;
-            }
-
-            updateVisibleState(false, false);
-            return true;
-        }
-
-        // 3) IN ERRORE → retry window
-        if (now >= _retryAt) {
-
-            LOG_DF("ERR", "[%s] RETRY WINDOW EXPIRED (retryCycles=%d/%d)",
-                _name, _retryCycles, _maxRetryCycles);
-
-            if (++_retryCycles >= _maxRetryCycles) {
-                _parked = true;
-                LOG_DF("ERR", "[%s] ENTER PARKED", _name);
-                updateVisibleState(true, true);
-                return false;
-            }
-
-            LOG_DF("ERR", "[%s] CLEAR INTERNAL ERROR", _name);
-            clear();
-            updateVisibleState(false, false);
-            return true;
-        }
-
-        // Ancora in errore, retry non scaduto
-        updateVisibleState(true, false);
-        return false;
-    }
-
-    inline bool IsInError() const  { return _error; }
-    inline bool IsParked() const   { return _parked; }
-
-    inline bool IsVisibleError() const  { return _visibleErrorState; }
-    inline bool IsVisibleParked() const { return _visibleParkedState; }
-
-private:
-
-    inline void enterError(unsigned long now)
-    {
-        _error     = true;
-        _lastError = now;
-        _retryAt   = now + (_retryWindow * _maxErrors);
-    }
-
-    inline void clear()
-    {
-        _error     = false;
-        _cnt       = 0;
-        _lastError = 0;
-        _retryAt   = 0;
-    }
-
-    inline void updateVisibleState(bool newError, bool newParked)
-    {
-        // 🔥 Filtro: device mai riuscito → non può risultare OK
-        if (!_everSucceeded && !newError) {
-            LOG_DF("ERR", "[%s] FILTERED FALSE OK (never succeeded)", _name);
-            return;
-        }
-
-        // Cache locali per velocità
-        bool pe = _pendingErrorState;
-        bool pp = _pendingParkedState;
-
-        // 1) Se pending cambia → reset immediato
-        if (newError != pe || newParked != pp) {
-            LOG_DF("ERR", "[%s] PENDING RESET (new E=%d P=%d)", _name, newError, newParked);
-            _pendingErrorState  = newError;
-            _pendingParkedState = newParked;
-            _pendingCount       = 1;
-            return;
-        }
-
-        // 2) Pending invariato → incrementa
-        int pc = ++_pendingCount;
-
-        // Conferma pending al secondo ciclo
-        if (pc == 2) {
-            LOG_DF("ERR", "[%s] PENDING CONFIRMED (E=%d P=%d)", _name, newError, newParked);
-        }
-
-        // 3) Se pending < 2 → non fare nulla
-        if (pc < 2)
-            return;
-
-        // Cache visibili
-        bool ve = _visibleErrorState;
-        bool vp = _visibleParkedState;
-
-        // 4) Se lo stato visibile è già uguale → niente callback
-        if (ve == newError && vp == newParked)
-            return;
-
-        // 5) Cambio visibile → log + callback
-        LOG_DF("ERR", "[%s] VISIBLE CHANGE → E:%d P:%d", _name, newError, newParked);
-
-        _visibleErrorState  = newError;
-        _visibleParkedState = newParked;
-
-        if (_onStateChanged) {
-            LOG_DF("ERR", "[%s] CALLBACK FIRED", _name);
-            _onStateChanged();
-        }
-    }
-
-
-private:
-    const char* _name = "dev";
-
-    short         _maxErrors;
-    unsigned long _retryWindow;
-
-    bool          _error       = false;
-    short         _cnt         = 0;
-    unsigned long _lastError   = 0;
-    unsigned long _retryAt     = 0;
-
-    bool          _parked        = false;
-    short         _retryCycles   = 0;
-    short         _maxRetryCycles = 5;
-
-    StateChangedFn _onStateChanged = nullptr;
-
-    bool _visibleErrorState  = false;
-    bool _visibleParkedState = false;
-
-    bool _pendingErrorState  = false;
-    bool _pendingParkedState = false;
-    int  _pendingCount       = 0;
-
-    bool _lastInError = false;
-
-    // 🔥 Patch: un device che non ha mai risposto non può risultare OK
-    bool _everSucceeded = false;
-};*/
 class Errors {
 public:
     using StateChangedFn = std::function<void()>;
@@ -896,13 +653,11 @@ public:
     {
         // Log solo quando cambia inError
         if (inError != _lastInError) {
-            LOG_DF("ERR", "[%s] inError CHANGED → %d", _name, inError);
             _lastInError = inError;
         }
 
         // Se la lettura è OK → il device ha risposto almeno una volta
         if (!inError && !_everSucceeded) {
-            LOG_DF("ERR", "[%s] FIRST SUCCESSFUL READ", _name);
             _everSucceeded = true;
         }
 
@@ -926,9 +681,7 @@ public:
                     updateVisibleState(true, false);
                     return true;
                 }
-                LOG_DF("ERR", "[%s] cnt=%d/%d", _name, _cnt, MAX_ERRORS);
             } else {
-                if (_cnt) LOG_DF("ERR", "[%s] cnt RESET", _name);
                 _cnt = 0;
             }
 
@@ -938,10 +691,6 @@ public:
 
         // 3) IN ERRORE → retry window
         if (now >= _retryAt) {
-
-            LOG_DF("ERR", "[%s] RETRY WINDOW EXPIRED (retryCycles=%d/%d)",
-                _name, _retryCycles, MAX_RETRY_CYCLES);
-
             if (++_retryCycles >= MAX_RETRY_CYCLES) {
                 _parked = true;
                 LOG_DF("ERR", "[%s] ENTER PARKED", _name);
@@ -987,54 +736,38 @@ private:
     {
         // 🔥 Filtro: device mai riuscito → non può risultare OK
         if (!_everSucceeded && !newError) {
-            LOG_DF("ERR", "[%s] FILTERED FALSE OK (never succeeded)", _name);
             return;
         }
 
-        // Cache locali per velocità
-        bool pe = _pendingErrorState;
-        bool pp = _pendingParkedState;
+        // Stato pending attuale
+        bool pendingState = (_pendingErrorState || _pendingParkedState);
+        bool newState     = (newError || newParked);
 
-        // 1) Se pending cambia → reset immediato
-        if (newError != pe || newParked != pp) {
-            LOG_DF("ERR", "[%s] PENDING RESET (new E=%d P=%d)", _name, newError, newParked);
+        // 1) Stato cambiato → inizializza pending
+        if (newState != pendingState) {
             _pendingErrorState  = newError;
             _pendingParkedState = newParked;
             _pendingCount       = 1;
             return;
         }
 
-        // 2) Pending invariato → incrementa
-        int pc = ++_pendingCount;
-
-        // Conferma pending al secondo ciclo
-        if (pc == 2) {
-            LOG_DF("ERR", "[%s] PENDING CONFIRMED (E=%d P=%d)", _name, newError, newParked);
-        }
-
-        // 3) Se pending < 2 → non fare nulla
-        if (pc < 2)
+        // 2) Stato invariato → incrementa pending
+        if (++_pendingCount < 2)
             return;
 
-        // Cache visibili
-        bool ve = _visibleErrorState;
-        bool vp = _visibleParkedState;
+        // 3) Conferma stato visibile solo se cambia
+        if (_visibleErrorState != newError || _visibleParkedState != newParked) {
+            _visibleErrorState  = newError;
+            _visibleParkedState = newParked;
 
-        // 4) Se lo stato visibile è già uguale → niente callback
-        if (ve == newError && vp == newParked)
-            return;
-
-        // 5) Cambio visibile → log + callback
-        LOG_DF("ERR", "[%s] VISIBLE CHANGE → E:%d P:%d", _name, newError, newParked);
-
-        _visibleErrorState  = newError;
-        _visibleParkedState = newParked;
-
-        if (_onStateChanged) {
-            LOG_DF("ERR", "[%s] CALLBACK FIRED", _name);
-            _onStateChanged();
+            if (_onStateChanged)
+                _onStateChanged();
         }
+
+        // Reset pending
+        _pendingCount = 0;
     }
+
 
 private:
     const char* _name = "dev";
@@ -1067,7 +800,6 @@ private:
     // 🔥 Patch: un device che non ha mai risposto non può risultare OK
     bool _everSucceeded = false;
 };
-
 
 class Watchdog {
 public:
@@ -1289,9 +1021,11 @@ public:
         int panel = NO_PIN;
         int err   = NO_PIN;
 
-        constexpr LedPins() = default;
+        // 🔥 Ripristino costruttore a 4 parametri
         constexpr LedPins(int r, int w, int p, int e)
             : read(r), write(w), panel(p), err(e) {}
+
+        constexpr LedPins() = default;
     };
 
     enum Channel : uint8_t {
@@ -1306,134 +1040,166 @@ public:
     void begin() {
         if (m_initialized) return;
 
-        // Precalcolo dei pin validi (più veloce)
-        m_validPins[ONE]   = m_pins.read;
-        m_validPins[TWO]   = m_pins.write;
-        m_validPins[THREE] = m_pins.panel;
-        m_validPins[FOUR]  = m_pins.err;
+        validRead  = (m_pins.read  != NO_PIN);
+        validWrite = (m_pins.write != NO_PIN);
+        validPanel = (m_pins.panel != NO_PIN);
+        validErr   = (m_pins.err   != NO_PIN);
 
-        for (uint8_t i = 0; i < CHANNEL_COUNT; ++i) {
-            int pin = m_validPins[i];
-            if (pin >= 0) {
-                pinMode(pin, OUTPUT);
-            }
-        }
-
-        // Stato iniziale
-        setAll(false);
+        if (validRead)  pinMode(m_pins.read,  OUTPUT);
+        if (validWrite) pinMode(m_pins.write, OUTPUT);
+        if (validPanel) pinMode(m_pins.panel, OUTPUT);
+        if (validErr)   pinMode(m_pins.err,   OUTPUT);
 
         m_initialized = true;
     }
 
-    void update(unsigned long now) {
-        for (uint8_t i = 0; i < CHANNEL_COUNT; ++i) {
-            ChannelState& s = m_state[i];
-
-            // Blink
-            if (s.blinking && now - s.lastToggle >= s.currentInterval) {
-                s.lastToggle = now;
-                s.on = !s.on;
-                s.currentInterval = s.on ? s.blinkOnMs : s.blinkOffMs;
-                applyChannel((Channel)i);
-            }
-
-            // Pulse
-            if (s.pulsing && now - s.pulseStart >= s.pulseDuration) {
-                s.pulsing = false;
-                s.on = s.pulseRestoreState;
-                applyChannel((Channel)i);
-            }
+    // 🔥 Compatibilità: hasChannel()
+    inline bool hasChannel(Channel ch) const {
+        switch (ch) {
+            case ONE:   return validRead;
+            case TWO:   return validWrite;
+            case THREE: return validPanel;
+            case FOUR:  return validErr;
+            default:    return false;
         }
     }
 
-    void set(Channel ch, bool on) {
-        ChannelState& s = m_state[ch];
-        s.on = on;
-        s.blinking = false;
-        s.pulsing = false;
-        applyChannel(ch);
+    // 🔥 Compatibilità: setAll()
+    inline void setAll(bool on) {
+        if (validRead)  set(ONE,   on);
+        if (validWrite) set(TWO,   on);
+        if (validPanel) set(THREE, on);
+        if (validErr)   set(FOUR,  on);
     }
 
-    void setAll(bool on) {
-        // Loop più veloce
-        for (uint8_t i = 0; i < CHANNEL_COUNT; ++i)
-            set((Channel)i, on);
+    // 🔥 Compatibilità: update()
+    inline void update(unsigned long /*now*/) {
+        // Se in futuro vuoi fare blinking o animazioni, qui è il posto giusto.
+        // Per ora è un NO-OP veloce.
     }
 
-    bool hasChannel(Channel ch) const {
-        return m_validPins[ch] >= 0;
+    inline void set(Channel ch, bool on)
+    {
+        const uint8_t idx = static_cast<uint8_t>(ch);
+
+        if (idx >= CHANNEL_COUNT)
+            return;
+
+        const int pin = getPin(ch);
+        if (pin == NO_PIN)
+            return;
+
+        m_blink[idx].active = false;
+
+        digitalWrite(pin, (on ^ m_activeLow) ? HIGH : LOW);
     }
 
-    void blink(Channel ch, unsigned long onMs, unsigned long offMs, unsigned long now) {
-        ChannelState& s = m_state[ch];
+    inline void toggle(Channel ch)
+    {
+        const uint8_t idx = static_cast<uint8_t>(ch);
 
-        if (onMs == 0 || offMs == 0) {
-            s.blinking = false;
+        if (idx >= CHANNEL_COUNT)
+            return;
+
+        const int pin = getPin(ch);
+        if (pin == NO_PIN)
+            return;
+
+        m_blink[idx].active = false;
+
+        bool current = digitalRead(pin);
+
+        digitalWrite(
+            pin,
+            (!current ^ m_activeLow) ? HIGH : LOW
+        );
+    }
+
+    inline void blink(Channel ch,
+                  unsigned long onTime,
+                  unsigned long offTime,
+                  unsigned long now)
+    {
+        const uint8_t idx = static_cast<uint8_t>(ch);
+
+        if (idx >= CHANNEL_COUNT)
+            return;
+
+        const int pin = getPin(ch);
+        if (pin == NO_PIN)
+            return;
+
+        BlinkState& state = m_blink[idx];
+
+        // Prima chiamata
+        if (!state.active)
+        {
+            state.active = true;
+            state.on = true;
+            state.lastChange = now;
+
+            digitalWrite(pin, m_activeLow ? LOW : HIGH);
             return;
         }
 
-        s.blinking = true;
-        s.blinkOnMs = onMs;
-        s.blinkOffMs = offMs;
-        s.on = true;                     // parte acceso
-        s.currentInterval = onMs;
-        s.lastToggle = now;
+        const unsigned long interval = state.on ? onTime : offTime;
 
-        applyChannel(ch);
-    }
+        if (now - state.lastChange < interval)
+            return;
 
-    void stopBlink(Channel ch) {
-        m_state[ch].blinking = false;
+        state.lastChange = now;
+        state.on = !state.on;
+
+        digitalWrite(
+            pin,
+            (state.on ^ m_activeLow) ? HIGH : LOW
+        );
     }
 private:
-    struct ChannelState {
+    LedPins m_pins;
+    bool    m_activeLow = false;
+    bool    m_initialized = false;
+
+    bool validRead  = false;
+    bool validWrite = false;
+    bool validPanel = false;
+    bool validErr   = false;
+
+    inline int getPin(Channel ch) const {
+        switch (ch) {
+            case ONE:   return validRead  ? m_pins.read  : NO_PIN;
+            case TWO:   return validWrite ? m_pins.write : NO_PIN;
+            case THREE: return validPanel ? m_pins.panel : NO_PIN;
+            case FOUR:  return validErr   ? m_pins.err   : NO_PIN;
+            default:    return NO_PIN;
+        }
+    }
+
+    struct BlinkState
+    {
+        unsigned long lastChange = 0;
+        bool active = false;
         bool on = false;
-
-        bool blinking = false;
-        unsigned long blinkOnMs = 0;
-        unsigned long blinkOffMs = 0;
-        unsigned long currentInterval = 0;
-        unsigned long lastToggle = 0;
-
-        bool pulsing = false;
-        unsigned long pulseDuration = 0;
-        unsigned long pulseStart = 0;
-        bool pulseRestoreState = false;
     };
 
-    LedPins m_pins;
-    bool m_activeLow = false;
-    bool m_initialized = false;
-
-    int m_validPins[CHANNEL_COUNT] = { -1, -1, -1, -1 };
-    ChannelState m_state[CHANNEL_COUNT];
-
-    inline void applyChannel(Channel ch) {
-        int pin = m_validPins[ch];
-        if (pin < 0) return;
-
-        bool out = m_state[ch].on;
-        if (m_activeLow) out = !out;
-
-        // digitalWrite è già ottimizzato internamente
-        digitalWrite(pin, out ? HIGH : LOW);
-    }
+    BlinkState m_blink[CHANNEL_COUNT];
 };
 
- class ButtonManager {
-    public:
-        struct ButtonState {
-            bool pressedNow = false;
-            bool pressedAtStartup = false;  // evento una tantum
-        };
 
-    private:
-        int pin;
-        bool startupState = false;
-        bool startupConsumed = false;   // <-- AGGIUNTO
-        bool lastState = false;
+class ButtonManager {
+public:
+    struct ButtonState {
+        bool pressedNow = false;
+        bool pressedAtStartup = false;  // evento una tantum
+    };
 
-    public:
+private:
+    int pin;
+    bool startupState = false;
+    bool startupConsumed = false;   // <-- AGGIUNTO
+    bool lastState = false;
+
+public:
         ButtonManager(int pin) : pin(pin) {}
 
         void begin() {
@@ -1652,6 +1418,7 @@ inline uint16_t AreaRegistry::maxValue() {
         AutoReg_##name() { AreaRegistry::registerArea(#name, value); } \
     } autoRegInstance_##name;
 
+
 /* ============================================================
    AsyncScheduler (Generic Version)
    ============================================================ */
@@ -1785,7 +1552,6 @@ public:
 
             // Normal step
             bool done = step.fnc(context);
-
             if (done) {
                 job.nextRunTime = now + step.delayAfterMs;
                 job.currentStep++;

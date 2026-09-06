@@ -644,7 +644,10 @@ public:
 
             long v = buffer.getValueFast(c.cmdArea);
             v = bitWrite(v, 1, engage);
-            buffer.WriteElement(c.cmdArea, BufferFlagType::ToPanel, v, now);
+            dm->forceInternalEvent(
+                c.cmdArea,
+                v
+            );
 
             s->Engage(engage);
 
@@ -701,185 +704,349 @@ public:
 // ============================================================
 //  TASK ENGINE (BACKEND / ORCHESTRATOR)
 // ============================================================
-/*
-class TaskEngineOrchestrator {
-public:
-    using TaskFn = void(*)(DomoManager&, unsigned long);
 
-    struct Task {
-        TaskFn fn;
-        uint32_t interval;
-        uint32_t lastRun;
-        bool enabled;
+class TaskEngineOrchestrator
+{
+public:
+
+    // ============================================================
+    // CONFIGURAZIONE
+    // ============================================================
+
+    using TaskFn = void (*)(DomoManager&, unsigned long);
+
+    static constexpr uint16_t STORAGE_MAX_TASKS = 32;
+
+    // Limite dinamico:
+    //
+    //   1..2 task  -> 1 task/ciclo
+    //   3..4       -> 2
+    //   5..6       -> 3
+    //   7..8       -> 4
+    //   >8        -> massimo 4
+    //
+    // In questo modo la crescita dei task non porta ad una
+    // crescita indiscriminata del lavoro eseguito nello stesso
+    // passaggio.
+    static constexpr uint16_t MIN_TASKS_PER_CYCLE = 1;
+    static constexpr uint16_t MAX_TASKS_PER_CYCLE = 3;
+
+    struct Task
+    {
+        TaskFn   fn       = nullptr;
+        uint32_t interval = 0;
+        uint32_t lastRun  = 0;
+        bool     enabled  = false;
     };
 
 private:
+
     static inline bool frontendCycleDone = false;
-    static inline std::vector<Task> tasks;   // 🔥 ORA Task è già dichiarato
+
+    /*
+     * Mantengo il vector perché il tuo codice attuale lo usa già.
+     *
+     * IMPORTANTE:
+     * - nessuna push_back durante Loop()
+     * - AddTask() viene usato in Setup()
+     * - il Loop() non alloca memoria
+     */
+    static inline std::vector<Task> tasks;
+
     static inline const FrontendConfig* cfg = nullptr;
 
+    // Tie-break rotazionale tra task con la stessa urgenza.
+    static inline uint16_t rrCursor = 0;
+
 public:
-    static void Setup(const FrontendConfig& c) {
-        cfg = &c;   // 🔥
+
+    // ============================================================
+    // SETUP
+    // ============================================================
+
+    static void Setup(const FrontendConfig& c)
+    {
+        cfg = &c;
+
         Clear();
+
+        // Evita riallocazioni durante AddTask().
+        if (tasks.capacity() < STORAGE_MAX_TASKS)
+            tasks.reserve(STORAGE_MAX_TASKS);
     }
 
-    // Aggiunge un task dinamico
-    static void AddTask(TaskFn fn, uint32_t intervalMs, bool enabled) {
-        tasks.push_back({fn, intervalMs, 0, enabled});
-    }
+    // ============================================================
+    // ADD TASK
+    // ============================================================
 
-    // Cancella tutti i task (usato dal frontend in Setup)
-    static void Clear() {
-        tasks.clear();
-    }
+    static void AddTask(
+        TaskFn fn,
+        uint32_t intervalMs,
+        bool enabled)
+    {
+        if (!fn)
+        {
+            LOG_WF(
+                "TASK-LOOP",
+                "AddTask: callback nullo"
+            );
 
-    // Loop principale del motore
-    static void Loop(DomoManager& manager, unsigned long now) {
-        static const uint8_t MAX_TASKS_PER_CYCLE = 3;
-        uint8_t executed = 0;
-
-        LOG_IF("TASK-LOOP", "---- NEW CYCLE now=%lu ----", now);
-
-        int index = 0;
-        for (auto& t : tasks) {
-
-            LOG_IF("TASK-LOOP", "Task[%d]: enabled=%d interval=%lu lastRun=%lu",
-                index, t.enabled, t.interval, t.lastRun);
-
-            if (!t.enabled) {
-                LOG_IF("TASK-LOOP", "Task[%d] SKIPPED (disabled)", index);
-                index++;
-                continue;
-            }
-
-            if (now - t.lastRun < t.interval) {
-                LOG_IF("TASK-LOOP", "Task[%d] SKIPPED (interval not reached)", index);
-                index++;
-                continue;
-            }
-
-            if (executed >= MAX_TASKS_PER_CYCLE) {
-                LOG_IF("TASK-LOOP", "Task[%d] SKIPPED (MAX_TASKS_PER_CYCLE reached)", index);
-                index++;
-                continue;
-            }
-
-            LOG_IF("TASK-LOOP", "Task[%d] EXECUTED", index);
-
-            t.lastRun = now;
-            t.fn(manager, now);
-            executed++;
-
-            delayMicroseconds(50);
-            index++;
+            return;
         }
 
-        frontendCycleDone = true;
+        if (tasks.size() >= STORAGE_MAX_TASKS)
+        {
+            LOG_WF(
+                "TASK-LOOP",
+                "Numero massimo task superato: %u/%u",
+                static_cast<unsigned>(tasks.size()),
+                static_cast<unsigned>(STORAGE_MAX_TASKS)
+            );
+
+            return;
+        }
+
+        tasks.push_back({
+            fn,
+            intervalMs,
+            0,
+            enabled
+        });
     }
 
+    // ============================================================
+    // CLEAR
+    // ============================================================
 
-    // ------------------------------------------------------------
-    //  FRONTEND CYCLE STATUS
-    // ------------------------------------------------------------
-    static bool hasFrontendCycleCompleted() {
-        return frontendCycleDone;
-    }
-
-    static void resetFrontendCycleFlag() {
-        frontendCycleDone = false;
-    }
-
-    static const FrontendConfig& getCfg() {
-        return *cfg;
-    }
-};*/
-class TaskEngineOrchestrator {
-public:
-    using TaskFn = void(*)(DomoManager&, unsigned long);
-
-    struct Task {
-        TaskFn fn;
-        uint32_t interval;
-        uint32_t lastRun;
-        bool enabled;
-    };
-
-private:
-    static inline bool frontendCycleDone = false;
-    static inline std::vector<Task> tasks;
-    static inline const FrontendConfig* cfg = nullptr;
-    static inline uint16_t nextIndex = 0;   // 🔥 indice di partenza rotante
-
-public:
-    static void Setup(const FrontendConfig& c) {
-        cfg = &c;
-        Clear();
-        nextIndex = 0;
-    }
-
-    static void AddTask(TaskFn fn, uint32_t intervalMs, bool enabled) {
-        tasks.push_back({fn, intervalMs, 0, enabled});
-    }
-
-    static void Clear() {
+    static void Clear()
+    {
         tasks.clear();
-        nextIndex = 0;
+
+        frontendCycleDone = false;
+        rrCursor = 0;
     }
 
-    static void Loop(DomoManager& manager, unsigned long now) {
-        static const uint8_t MAX_TASKS_PER_CYCLE = 3;
-        uint8_t executed = 0;
+    // ============================================================
+    // LOOP
+    // ============================================================
 
-        if (tasks.empty()) {
+    static void Loop(
+        DomoManager& manager,
+        unsigned long now)
+    {
+        frontendCycleDone = false;
+
+        const uint16_t count =
+            static_cast<uint16_t>(tasks.size());
+
+        if (count == 0)
+        {
             frontendCycleDone = true;
             return;
         }
 
-        uint16_t count = tasks.size();
-        uint16_t start = nextIndex % count;
+        /*
+         * Numero massimo di task da eseguire in questo passaggio.
+         *
+         * Nessuna funzione costosa: semplice aritmetica.
+         */
+        uint16_t maxTasks =
+            static_cast<uint16_t>((count + 1u) >> 1);
 
-        //LOG_IF("TASK-LOOP::Loop", "---- NEW CYCLE now=%lu ----", now);
+        if (maxTasks < MIN_TASKS_PER_CYCLE)
+            maxTasks = MIN_TASKS_PER_CYCLE;
 
-        // giro circolare: partiamo da start e facciamo count passi max
-        for (uint16_t step = 0; step < count; ++step) {
-            uint16_t i = (start + step) % count;
-            auto& t = tasks[i];
+        if (maxTasks > MAX_TASKS_PER_CYCLE)
+            maxTasks = MAX_TASKS_PER_CYCLE;
 
-            //LOG_IF("TASK-LOOP::Loop", "Task[%u]: enabled=%d interval=%lu lastRun=%lu", i, t.enabled, t.interval, t.lastRun);
+        if (maxTasks > count)
+            maxTasks = count;
 
-            if (!t.enabled) {
-                //LOG_IF("TASK-LOOP::Loop", "Task[%u] SKIPPED (disabled)", i);
-                continue;
+        uint16_t executed = 0;
+
+        /*
+         * Per evitare di rieseguire lo stesso task nel medesimo
+         * Loop(), manteniamo una piccola bitmap locale.
+         *
+         * 32 task massimi -> uint32_t.
+         *
+         * Nessuna allocazione.
+         */
+        uint32_t selectedMask = 0;
+
+        // ========================================================
+        // SELEZIONE TASK PIÙ URGENTI
+        // ========================================================
+
+        while (executed < maxTasks)
+        {
+            int bestIndex = -1;
+            uint32_t bestLateness = 0;
+            uint16_t bestDistance = UINT16_MAX;
+
+            /*
+             * Scansione completa dei task.
+             *
+             * Il costo massimo è:
+             *
+             *   MAX_TASKS_PER_CYCLE * taskCount
+             *
+             * Con 4 * 8 = 32 confronti nel tuo caso.
+             * È trascurabile rispetto al lavoro dei task reali.
+             */
+            for (uint16_t i = 0; i < count; ++i)
+            {
+                // Già selezionato in questo passaggio.
+                if (selectedMask & (1UL << i))
+                    continue;
+
+                const Task& t = tasks[i];
+
+                if (!t.enabled || !t.fn)
+                    continue;
+
+                /*
+                 * unsigned subtraction:
+                 * corretta anche in caso di rollover di millis().
+                 */
+                const uint32_t elapsed =
+                    static_cast<uint32_t>(now - t.lastRun);
+
+                /*
+                 * Task non ancora scaduto.
+                 */
+                if (elapsed < t.interval)
+                    continue;
+
+                /*
+                 * Urgenza = quanto siamo oltre la scadenza.
+                 *
+                 * interval 0:
+                 * task sempre pronto.
+                 */
+                const uint32_t lateness =
+                    elapsed - t.interval;
+
+                /*
+                 * A parità di lateness usiamo il cursore
+                 * rotazionale.
+                 */
+                uint16_t distance;
+
+                if (i >= rrCursor)
+                    distance = i - rrCursor;
+                else
+                    distance =
+                        static_cast<uint16_t>(
+                            count - rrCursor + i
+                        );
+
+                if (
+                    bestIndex < 0 ||
+                    lateness > bestLateness ||
+                    (
+                        lateness == bestLateness &&
+                        distance < bestDistance
+                    )
+                )
+                {
+                    bestIndex = i;
+                    bestLateness = lateness;
+                    bestDistance = distance;
+                }
             }
 
-            if (now - t.lastRun < t.interval) {
-                //LOG_IF("TASK-LOOP::Loop", "Task[%u] SKIPPED (interval not reached)", i);
-                continue;
-            }
+            // Nessun task pronto.
+            if (bestIndex < 0)
+                break;
 
-            if (executed >= MAX_TASKS_PER_CYCLE) {
-                //LOG_IF("TASK-LOOP::Loop", "Task[%u] SKIPPED (max tasks per cycle reached)", i);
-                continue;
-            }
+            Task& task = tasks[bestIndex];
 
-            t.lastRun = now;
-            //LOG_IF("TASK-LOOP::Loop", "Task[%u] EXECUTED", i);
-            t.fn(manager, now);
-            executed++;
+            /*
+             * IMPORTANTISSIMO:
+             *
+             * aggiorniamo lastRun PRIMA della callback.
+             *
+             * Così se il task genera un evento che porta
+             * nuovamente dentro il sistema, non viene considerato
+             * immediatamente nuovamente scaduto.
+             */
+            task.lastRun = static_cast<uint32_t>(now);
 
-            delayMicroseconds(50);
+            selectedMask |=
+                (1UL << bestIndex);
+
+            ++executed;
+
+            /*
+             * Esecuzione vera.
+             */
+            task.fn(manager, now);
+
+            /*
+             * Il prossimo tie-break parte dal task successivo.
+             *
+             * Questo evita starvation in caso di pari priorità/
+             * pari lateness.
+             */
+            rrCursor =
+                static_cast<uint16_t>(
+                    bestIndex + 1
+                );
+
+            if (rrCursor >= count)
+                rrCursor = 0;
         }
-
-        // prossimo ciclo partirà dal task successivo
-        nextIndex = (start + 1) % count;
 
         frontendCycleDone = true;
     }
 
-    static bool hasFrontendCycleCompleted() { return frontendCycleDone; }
-    static void resetFrontendCycleFlag() { frontendCycleDone = false; }
-    static const FrontendConfig& getCfg() { return *cfg; }
+    // ============================================================
+    // DIAGNOSTICA / ACCESSO
+    // ============================================================
+
+    static bool hasFrontendCycleCompleted()
+    {
+        return frontendCycleDone;
+    }
+
+    static void resetFrontendCycleFlag()
+    {
+        frontendCycleDone = false;
+    }
+
+    static const FrontendConfig& getCfg()
+    {
+        return *cfg;
+    }
+
+    static uint16_t getTaskCount()
+    {
+        return static_cast<uint16_t>(tasks.size());
+    }
+
+    static uint16_t getMaxTasksPerCycle()
+    {
+        const uint16_t count =
+            static_cast<uint16_t>(tasks.size());
+
+        if (count == 0)
+            return 0;
+
+        uint16_t result =
+            static_cast<uint16_t>((count + 1u) >> 1);
+
+        if (result < MIN_TASKS_PER_CYCLE)
+            result = MIN_TASKS_PER_CYCLE;
+
+        if (result > MAX_TASKS_PER_CYCLE)
+            result = MAX_TASKS_PER_CYCLE;
+
+        if (result > count)
+            result = count;
+
+        return result;
+    }
 };
 
 

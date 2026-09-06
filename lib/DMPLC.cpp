@@ -33,7 +33,7 @@ void GenericPrgDeviceManager::BuildPriorityCache(std::vector<GenericPrgDevice>& 
 
 void GenericPrgDeviceManager::DebugPriorityCache(std::vector<GenericPrgDevice>& devices)
 {
-    LOG_DF(__FUNCTION__, "=== Priority Cache Debug ===");
+    LOG_IF(__FUNCTION__, "=== Priority Cache Debug ===");
 
     for (auto& entry : _cachePriorityIndex) {
         uint64_t key = entry.first;
@@ -49,7 +49,7 @@ void GenericPrgDeviceManager::DebugPriorityCache(std::vector<GenericPrgDevice>& 
             ipRaw & 0xFF
         );
 
-        LOG_DF(__FUNCTION__,
+        LOG_IF(__FUNCTION__,
                "Key=%llu IP=%d.%d.%d.%d Priority=%d",
                (unsigned long long)key,
                ip[0], ip[1], ip[2], ip[3],
@@ -57,11 +57,11 @@ void GenericPrgDeviceManager::DebugPriorityCache(std::vector<GenericPrgDevice>& 
 
         String idxList;
         for (int idx : indices) idxList += String(idx) + " ";
-        LOG_DF(__FUNCTION__, "  Indici: %s", idxList.c_str());
+        LOG_IF(__FUNCTION__, "  Indici: %s", idxList.c_str());
 
         for (int idx : indices) {
             auto& dev = devices[idx];
-            LOG_DF(__FUNCTION__,
+            LOG_IF(__FUNCTION__,
                    "    -> Device[%d] IP=%d.%d.%d.%d Priority=%d",
                    idx,
                    dev.GetIp()[0], dev.GetIp()[1], dev.GetIp()[2], dev.GetIp()[3],
@@ -69,27 +69,49 @@ void GenericPrgDeviceManager::DebugPriorityCache(std::vector<GenericPrgDevice>& 
         }
     }
 
-    LOG_DF(__FUNCTION__, "=== Fine Debug ===");
+    LOG_IF(__FUNCTION__, "=== Fine Debug ===");
 }
 
 
-int GenericPrgDeviceManager::GetDevicesByPriority(GenericPrgDevicePriority priority,
-                                                  arduino::IPAddress ip,
-                                                  std::vector<int>& out) {
-    uint64_t key = MakeKey(ip, (uint8_t)priority);
+const std::vector<int>& GenericPrgDeviceManager::GetDevicesByPriority(
+    Priority priority,
+    const arduino::IPAddress& ip) const
+{
+    static const std::vector<int> empty;
 
-    auto it = _cachePriorityIndex.find(key);
+    const uint64_t key = MakeKey(
+        ip,
+        static_cast<uint8_t>(priority)
+    );
+
+    LOG_DF("CACHE::LOOKUP",
+        "LOOKUP ip=%d.%d.%d.%d prio=%d key=%llu",
+        ip[0], ip[1], ip[2], ip[3],
+        static_cast<int>(priority),
+        static_cast<unsigned long long>(key));
+
+    const auto it = _cachePriorityIndex.find(key);
+
     if (it == _cachePriorityIndex.end())
-        return 0;
+        return empty;
 
-    out = it->second;
-    return out.size();
+    LOG_DF("CACHE::FOUND",
+        "FOUND %d devices for key=%llu",
+        static_cast<int>(it->second.size()),
+        static_cast<unsigned long long>(key));
+
+    for (int idx : it->second) {
+        LOG_DF("CACHE::DEV",
+            "  devIdx=%d", idx);
+    }
+
+    return it->second;
 }
 
 
 
 ////////////////////////////////////////////////////////// GenericDevice
-GenericPrgDevice::GenericPrgDevice(const char* name, arduino::IPAddress ip, unsigned int deviceAddress, std::vector<GenericPrgDeviceChannel> channels, std::vector<int> ioAreas, short ErrorCnt, GenericPrgDevicePriority priority): Error(ErrorCnt, 30000)
+GenericPrgDevice::GenericPrgDevice(const char* name, arduino::IPAddress ip, unsigned int deviceAddress, std::vector<GenericPrgDeviceChannel> channels, std::vector<int> ioAreas, short ErrorCnt, Priority priority): Error(ErrorCnt, 30000)
 { 
  this->_channels=channels;
  
@@ -104,13 +126,27 @@ GenericPrgDevice::GenericPrgDevice(const char* name, arduino::IPAddress ip, unsi
 }
 
 int GenericPrgDevice::GetArea(int channel, int address) { 
-    if (this->_ioAreas.empty()) { 
-        LOG_EF(__FUNCTION__, "EMPTY IO AREA: ch=%d addr=%d", channel, address);
-        return -1;
-    }
+  if (this->_ioAreas.empty()) { 
+      LOG_EF(__FUNCTION__, "EMPTY IO AREA: ch=%d addr=%d", channel, address);
+      return -1;
+  }
 
-    int size = this->_channels[0].items * channel;
-    int index = size + address;
+  /*Questo presume che tutti i channel abbiano lo stesso numero di items.
+
+  Ma i profili non sono tutti così.
+
+  Per esempio:
+
+  CWT_SLTH_6W_S_C
+  channel 0 → 2 items
+  channel 1 → 1 item*/
+
+    //int size = this->_channels[0].items * channel;
+    //int index = size + address;
+    int index = address;
+
+    for (int i = 0; i < channel; ++i)
+        index += _channels[i].items;
 
     if (index < 0 || index >= this->_ioAreas.size()) {
         LOG_EF(__FUNCTION__, ">>> ERRORE: index fuori range! <<<");
@@ -120,31 +156,36 @@ int GenericPrgDevice::GetArea(int channel, int address) {
     return this->_ioAreas[index];
 }
 
+const GenericPrgDevice::GenericPrgDeviceChannel& GenericPrgDevice::GetChannelInfo(int channel) const
+{
+    static const GenericPrgDeviceChannel invalidChannel = {
+        NOTSET,
+        Coil,
+        0,
+        0,
+        0
+    };
 
+    if (channel >= 0 && channel < static_cast<int>(_channels.size()))
+        return _channels[channel];
 
-GenericPrgDevice::GenericPrgDeviceChannel GenericPrgDevice::GetChannelInfo(int channel) { 
-  if(channel<this->_channels.size())
-    return this->_channels[channel];
-  else { 
-    GenericPrgDeviceChannel tmp;
-    tmp.type=NOTSET;
-    return tmp;
-  }
+    return invalidChannel;
 }
+
 
 size_t GenericPrgDevice::GetChannelsSize()
 { 
   return this->_channels.size();
 }
 
-GenericPrgDevicePriority GenericPrgDevice::GetPriority()
+Priority GenericPrgDevice::GetPriority()
 { 
   return this->_priority;
 }
 
-arduino::IPAddress GenericPrgDevice::GetIp()
-{ 
-  return this->_ip;
+const arduino::IPAddress& GenericPrgDevice::GetIp() const
+{
+    return _ip;
 }
 
 unsigned int GenericPrgDevice::GetDeviceAddress()
@@ -157,6 +198,34 @@ const char* GenericPrgDevice::GetName()
   return this->_name;
 }
 
+bool GenericPrgDeviceManager::HasDevicesByPriority(
+    Priority priority,
+    const arduino::IPAddress& ip) const
+{
+    const uint64_t key =
+        MakeKey(ip, static_cast<uint8_t>(priority));
+
+    auto it = _cachePriorityIndex.find(key);
+
+    return it != _cachePriorityIndex.end()
+        && !it->second.empty();
+}
+
+bool GenericPrgDevice::FindChannelByArea(int area, int &channel, int &item) {
+    for (int ch = 0; ch < GetChannelsSize(); ch++) {
+      auto items=GetChannelInfo(ch).items;
+        for (int j = 0; j < items; j++) {
+            if (GetArea(ch, j) == area) {
+                channel = ch;
+                item = j;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// I/O Dependent
 GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
                                                     int channel,
                                                     uint16_t* outBuffer,
@@ -200,11 +269,11 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
     {
         case Hold:
           if (!this->Error.IsInError()) {
-            /*LOG_DF("READ HOLD", "Device %s addr=%d channel=%d bank=%d",
+            LOG_DF("READ HOLD", "Device %s addr=%d channel=%d bank=%d",
               this->_name,
               this->_deviceAddress,
               channel,
-              this->bank);*/
+              this->bank);
 
             int toRead = retVal.items * this->_channels[channel].ItemsPerCall;
         
@@ -228,7 +297,7 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
                 retVal.ok = true;
             } 
             else  {
-              //LOG_EF(__FUNCTION__, "ERROR (Hold): %s", cli.lastError());
+              LOG_DF(__FUNCTION__, "ERROR (Hold): %s", cli.lastError());
 
               this->Error.Loop(true, now);
               retVal.ok = false;
@@ -243,11 +312,11 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
 
         case Input:
             if (!this->Error.IsInError()) {
-              /*LOG_DF("READ INPUT", "Device %s addr=%d channel=%d bank=%d",
+              LOG_DF("READ INPUT", "Device %s addr=%d channel=%d bank=%d",
                 this->_name,
                 this->_deviceAddress,
                 channel,
-                this->bank);*/
+                this->bank);
 
               tmpRead = cli.requestFrom(this->_deviceAddress,
                                         INPUT_REGISTERS,
@@ -262,19 +331,19 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
                   retVal.ok = true;
               } else if(!this->Error.Loop(true, now)) {
                 
-                //LOG_EF(__FUNCTION__, "ERROR (Input): name=%s IP=%d.%d.%d.%d Addr=%d", this->_name, this->_ip[0], this->_ip[1], this->_ip[2], this->_ip[3], this->_deviceAddress);
-                //LOG_EF(__FUNCTION__, "ERROR (Input): %s", cli.lastError());
+                LOG_DF(__FUNCTION__, "ERROR (Input): name=%s IP=%d.%d.%d.%d Addr=%d", this->_name, this->_ip[0], this->_ip[1], this->_ip[2], this->_ip[3], this->_deviceAddress);
+                LOG_DF(__FUNCTION__, "ERROR (Input): %s", cli.lastError());
               }
             } else this->Error.Loop(true, now);
             break;
 
         case Discrete:
             if (!this->Error.IsInError()) {
-              /*LOG_DF("READ DISCRETE", "Device %s addr=%d channel=%d bank=%d",
+              LOG_DF("READ DISCRETE", "Device %s addr=%d channel=%d bank=%d",
                 this->_name,
                 this->_deviceAddress,
                 channel,
-                this->bank);*/
+                this->bank);
 
                 tmpRead = cli.requestFrom(this->_deviceAddress,
                                          DISCRETE_INPUTS,
@@ -288,8 +357,8 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
                     this->Error.Loop(false, now);
                     retVal.ok = true;
                 } else if(!this->Error.Loop(true, now)) {
-                  //LOG_EF(__FUNCTION__, "ERROR (Discrete): name=%s IP=%d.%d.%d.%d Addr=%d", this->_name, this->_ip[0], this->_ip[1], this->_ip[2], this->_ip[3], this->_deviceAddress);
-                  //LOG_EF(__FUNCTION__, "ERROR (Discrete): %s", cli.lastError());
+                  LOG_DF(__FUNCTION__, "ERROR (Discrete): name=%s IP=%d.%d.%d.%d Addr=%d", this->_name, this->_ip[0], this->_ip[1], this->_ip[2], this->_ip[3], this->_deviceAddress);
+                  LOG_DF(__FUNCTION__, "ERROR (Discrete): %s", cli.lastError());
                 }
             } else this->Error.Loop(true, now);
             break;
@@ -301,21 +370,6 @@ GenericPrgDevice::structRead GenericPrgDevice::Read(ModbusTCPClient &cli,
     }
 
     return retVal;
-}
-
-
-bool GenericPrgDevice::FindChannelByArea(int area, int &channel, int &item) {
-    for (int ch = 0; ch < GetChannelsSize(); ch++) {
-      auto items=GetChannelInfo(ch).items;
-        for (int j = 0; j < items; j++) {
-            if (GetArea(ch, j) == area) {
-                channel = ch;
-                item = j;
-                return true;
-            }
-        }
-    }
-    return false;
 }
 
 bool GenericPrgDevice::Write(ModbusClient &mb, int channel, int address, int value, unsigned long now) {
@@ -360,27 +414,4 @@ bool GenericPrgDevice::Write(ModbusClient &mb, int channel, int address, int val
     return false;
   }
 }
-
-
-int GetJump(GenericPrgDevicePriority priority) {
-  switch (priority)   {
-      case Low:
-        return 1;
-        break;
-
-      case Medium:
-        return 2;
-      break;
-      
-      case Normal:
-        return 3;
-      break;
-
-      default:
-        return 0;
-    }
-
-    return 0;
-}
-
 
