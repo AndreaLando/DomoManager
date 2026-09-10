@@ -1,338 +1,367 @@
-\# ============================================================
+# ============================================================
+# DOMOMANAGER – ARCHITETTURA A BLOCCHI
+# ============================================================
 
-\# ARCHITETTURA A BLOCCHI (ASCII)
+                         ┌──────────────────────┐
+                         │       HARDWARE       │
+                         │  Opta / Arduino I/O  │
+                         │  Sensori / Attuatori │
+                         │  Modbus TCP / RTU    │
+                         │  RS485 / Ethernet    │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
 
-\# ============================================================
-
-
-
-&#x20;                        ┌──────────────────────┐
-
-&#x20;                        │      HARDWARE        │
-
-&#x20;                        │  Opta / Arduino I/O  │
-
-&#x20;                        │  Sensori / Attuatori │
-
-&#x20;                        │  Modbus TCP / RTU    │
-
-&#x20;                        │  RS485               │
-
-&#x20;                        └──────────┬───────────┘
-
-&#x20;                                   │
-
-&#x20;                                   ▼
-
-\# ============================================================
-
-\# BACKEND CORE
-
-\# ============================================================
-
-
+# ============================================================
+# BACKEND CORE
+# ============================================================
 
 ┌────────────────────────────────────────────────────────────┐
-
-│                        DOMOMANAGER CORE                    │
-
+│                     DOMOMANAGER CORE                       │
+│                                                            │
 │  - Setup                                                   │
-
-│  - Loop backend                                            │
-
-│  - Validazione config                                      │
-
-│  - Routing dispositivi                                     │
-
+│  - Backend Loop                                            │
+│  - Config validation                                       │
+│  - Device routing                                          │
+│  - Backend cycle management                                │
 │  - Watchdog                                                │
+│  - Global orchestration                                    │
+└──────────────────────────┬─────────────────────────────────┘
+                           │
+                           ▼
 
-│  - Orchestrazione generale                                 │
+┌────────────────────────────────────────────────────────────┐
+│                       BUFFER ENGINE                        │
+│                                                            │
+│  - Single Source of Truth                                  │
+│  - Typed Areas                                             │
+│  - Timestamps                                              │
+│  - Change Tracking                                         │
+│  - Virtual Areas                                           │
+│  - Reverse                                                 │
+│  - Split                                                   │
+│  - Toggle                                                  │
+│  - Fast / deterministic access                             │
+└──────────────────────────┬─────────────────────────────────┘
+                           │
+                           ▼
 
-└───────────┬────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│                      DEVICE MANAGER                        │
+│                                                            │
+│  - Device profiles                                         │
+│  - Area → register mapping                                 │
+│  - Priorities                                              │
+│  - Error handling                                          │
+│  - Cooldown                                                │
+│  - Device state management                                 │
+└──────────────────────────┬─────────────────────────────────┘
+                           │
+                           ▼
 
-&#x20;           │
+┌────────────────────────────────────────────────────────────┐
+│                       MODBUS ENGINE                        │
+│                                                            │
+│  - Round-robin polling                                     │
+│  - Deterministic reads / writes                            │
+│  - Timeout handling                                        │
+│  - Retry                                                   │
+│  - Cooldown                                                │
+│  - Error management                                        │
+│  - Controlled connection lifecycle                         │
+└──────────────────────────┬─────────────────────────────────┘
+                           │
+                           ▼
 
-&#x20;           ▼
+┌────────────────────────────────────────────────────────────┐
+│                        TIME MANAGER                         │
+│                                                            │
+│  - Hardware RTC                                            │
+│  - NTP                                                     │
+│  - Reliable epoch                                          │
+│  - Second / minute / hour / day callbacks                  │
+│  - Temporal synchronization                                │
+│  - Time base for automation and HVAC                       │
+└──────────────────────────┬─────────────────────────────────┘
+                           │
+                           ▼
 
+┌────────────────────────────────────────────────────────────┐
+│                     AUTOMATION ENGINE                      │
+│                                                            │
+│  - Scenes                                                  │
+│  - Rules                                                   │
+│  - Sequences                                               │
+│  - Scheduled rules                                         │
+│  - Conditions                                              │
+│  - Composite logic                                         │
+│  - Trends                                                  │
+│  - Debounce                                                │
+│  - Dynamic automations                                     │
+│  - JSON Builder                                            │
+└──────────────────────────┬─────────────────────────────────┘
+                           │
+                           ▼
+
+# ============================================================
+# FRONTEND RUNTIME
+# ============================================================
+
+┌────────────────────────────────────────────────────────────┐
+│                    FRONTEND ENGINE                         │
+│                                                            │
+│  - Frontend orchestration                                  │
+│  - Task Engine                                              │
+│  - Task registration                                       │
+│  - Execution intervals                                     │
+│  - Enable / Disable                                        │
+│  - Frontend cycle management                               │
+│  - Backend ↔ Frontend synchronization                      │
+└──────────────────────────┬─────────────────────────────────┘
+                           │
+                           ▼
+
+# ============================================================
+# APPLICATION TASKS
+# ============================================================
+
+        ┌──────────────────────────────────────────────┐
+        │                  TASK ENGINE                 │
+        │                                              │
+        │  Centralized application task scheduling    │
+        └──────────────────────┬───────────────────────┘
+                               │
+          ┌────────────────────┼────────────────────┐
+          │                    │                    │
+          ▼                    ▼                    ▼
+
+┌──────────────────────┐ ┌──────────────────────┐ ┌──────────────────────┐
+│    SECURITY TASK     │ │      HVAC TASK       │ │   AVERAGES TASK      │
+│                      │ │                      │ │                      │
+│ - Wired sensors      │ │ - Zones              │ │ - Sensor groups      │
+│ - PIR / Door         │ │ - Setpoints           │ │ - Factors            │
+│ - Window / Smoke     │ │ - Fan coils           │ │ - Moving averages    │
+│ - Flood              │ │ - DHW / Anti-leg.     │ │ - Buffer updates     │
+│ - Security states    │ │ - Defrost             │ │ - Internal events    │
+│ - Bitmask            │ │ - Protection          │ │                      │
+└──────────────────────┘ └──────────────────────┘ └──────────────────────┘
 
 
 ┌────────────────────────────────────────────────────────────┐
-
-│                        BUFFER ENGINE                        │
-
-│  - Unica fonte di verità                                   │
-
-│  - Aree tipizzate                                           │
-
-│  - Timestamp                                                │
-
-│  - Change tracking                                          │
-
-│  - Virtual areas                                            │
-
-│  - Reverse / Split / Toggle                                │
-
-└───────────┬────────────────────────────────────────────────┘
-
-&#x20;           │
-
-&#x20;           ▼
-
-
-
-┌────────────────────────────────────────────────────────────┐
-
-│                     DEVICE MANAGER                          │
-
-│  - Profili dispositivi                                      │
-
-│  - Mappatura aree → registri                                │
-
-│  - Priorità / Errori / Cooldown                             │
-
-└───────────┬────────────────────────────────────────────────┘
-
-&#x20;           │
-
-&#x20;           ▼
-
-
-
-┌────────────────────────────────────────────────────────────┐
-
-│                      MODBUS ENGINE                          │
-
-│  - Polling round‑robin                                      │
-
-│  - Letture/scritture deterministiche                        │
-
-│  - Gestione errori                                          │
-
-│  - Timeout / Retry / Cooldown                               │
-
-└───────────┬────────────────────────────────────────────────┘
-
-&#x20;           │
-
-&#x20;           ▼
-
-
-
-┌────────────────────────────────────────────────────────────┐
-
-│                       TIME MANAGER                          │
-
-│  - RTC hardware / NTP                                       │
-
-│  - Epoch affidabile                                         │
-
-│  - Callback (sec/min/ora/giorno)                            │
-
-│  - Base temporale per automazioni e HVAC                    │
-
-└───────────┬────────────────────────────────────────────────┘
-
-&#x20;           │
-
-&#x20;           ▼
-
-
-
-┌────────────────────────────────────────────────────────────┐
-
-│                    AUTOMATION ENGINE                        │
-
-│  - Scene / Regole / Sequenze                                │
-
-│  - Scheduled rules                                           │
-
-│  - Trend / Debounce / Composite                              │
-
-│  - Builder JSON                                              │
-
-└───────────┬────────────────────────────────────────────────┘
-
-&#x20;           │
-
-&#x20;           ▼
-
-
-
-\# ============================================================
-
-\# FRONTEND ENGINES
-
-\# ============================================================
-
-
-
-┌────────────────────────────────────────────────────────────┐
-
-│                        FRONTEND ENGINE                      │
-
-│  - Orchestrazione cicli                                     │
-
-│  - Task scheduler                                           │
-
-│  - Setup + Loop                                             │
-
-└───────────┬────────────────────────────────────────────────┘
-
-&#x20;           │
-
-&#x20;           ▼
-
-&#x20;  ┌────────────────────────────────────────────────────────┐
-
-&#x20;  │                        HVAC ENGINE                      │
-
-&#x20;  │  - Zone                                                  │
-
-&#x20;  │  - Setpoint                                              │
-
-&#x20;  │  - Fan coil                                              │
-
-&#x20;  │  - ACS / Anti‑legionella                                 │
-
-&#x20;  │  - Defrost                                               │
-
-&#x20;  └──────────────────────────────────────────────────────────┘
-
-
-
-&#x20;  ┌────────────────────────────────────────────────────────┐
-
-&#x20;  │                       POWER ENGINE                      │
-
-&#x20;  │  - Carichi                                               │
-
-&#x20;  │  - Limiti                                                │
-
-&#x20;  │  - Forecast solare                                       │
-
-&#x20;  │  - Auto‑tuning                                           │
-
-&#x20;  └──────────────────────────────────────────────────────────┘
-
-
-
-&#x20;  ┌────────────────────────────────────────────────────────┐
-
-&#x20;  │                      WEATHER ENGINE                     │
-
-&#x20;  │  - Pioggia / Vento / Luce                                │
-
-&#x20;  │  - Medie mobili                                          │
-
-&#x20;  │  - Eventi                                                │
-
-&#x20;  └──────────────────────────────────────────────────────────┘
-
-
-
-&#x20;  ┌────────────────────────────────────────────────────────┐
-
-&#x20;  │                     SECURITY ENGINE                     │
-
-&#x20;  │  - PIR / DOOR / WINDOW / SMOKE / FLOOD                  │
-
-&#x20;  │  - Zone                                                  │
-
-&#x20;  │  - Callback                                              │
-
-&#x20;  └──────────────────────────────────────────────────────────┘
-
-
-
-&#x20;  ┌────────────────────────────────────────────────────────┐
-
-&#x20;  │                      MQTT ENGINE                        │
-
-&#x20;  │  - Home Assistant                                        │
-
-&#x20;  │  - Zigbee2MQTT                                           │
-
-&#x20;  │  - Shelly                                                │
-
-&#x20;  └──────────────────────────────────────────────────────────┘
-
-
-
-&#x20;  ┌───────────────────────────────────────────────────────┐
-
-&#x20;  │                      WEBAPI ENGINE                 			 	    │
-
-&#x20;  │  - GET/POST                                        			 	    │
-
-&#x20;  │  - Parsing pattern                                 			 	    │
-
-&#x20;  │  - Mapping buffer                                  				    │
-
-&#x20;  └───────────────────────────────────────────────────────┘
-
-
-
-&#x20;  ┌───────────────────────────────────────────────────────┐
-
-&#x20;  │                      RS485 ENGINE                       				│
-
-&#x20;  │  - Frame                                                				│
-
-&#x20;  │  - Ack/Nack                                             				│
-
-&#x20;  │  - Retry                                               				│
-
-&#x20;  └───────────────────────────────────────────────────────┘
-
-
-
-&#x20;  ┌───────────────────────────────────────────────────────┐
-
-&#x20;  │                      HOTSTANDBY ENGINE                  │
-
-&#x20;  │  - Master/Slave                                         │
-
-&#x20;  │  - Heartbeat                                            │
-
-&#x20;  │  - Failover                                             │
-
-&#x20;  └───────────────────────────────────────────────────────┘
-
-
-
-\---
-
-
-
-\# ============================================================
-
-\# DIAGNOSTICA
-
-\# ============================================================
-
-
-
-┌────────────────────────────────────────────────────────────┐
-
-│                    DIAGNOSTIC ENGINE                        │
-
-│  - Analisi automazioni                                      │
-
-│  - Analisi buffer                                           │
-
-│  - Analisi dispositivi                                      │
-
-│  - Analisi RTC                                              │
-
-│  - Analisi sicurezza                                        │
-
-│  - Analisi power                                            │
-
-│  - Analisi HVAC                                             │
-
-│  - Report strutturati                                       │
-
+│                       POWER ENGINE                          │
+│                                                            │
+│  - Load management                                         │
+│  - Priority management                                     │
+│  - Grid limits                                             │
+│  - Solar forecast                                          │
+│  - Auto-tuning                                             │
 └────────────────────────────────────────────────────────────┘
 
 
+┌────────────────────────────────────────────────────────────┐
+│                      WEATHER ENGINE                        │
+│                                                            │
+│  - Rain                                                   │
+│  - Wind                                                   │
+│  - Light                                                  │
+│  - Temperature                                            │
+│  - Moving averages                                        │
+│  - Weather events                                         │
+└────────────────────────────────────────────────────────────┘
 
+
+# ============================================================
+# COMMUNICATION RUNTIME
+# ============================================================
+
+                           ┌──────────────────────┐
+                           │ COMMUNICATION TASK   │
+                           │                      │
+                           │ - Runs in TaskEngine │
+                           │ - Master only        │
+                           │ - Power-on gating     │
+                           └──────────┬───────────┘
+                                      │
+                                      ▼
+
+                    ┌────────────────────────────────┐
+                    │   COMMUNICATION SCHEDULER      │
+                    │                                │
+                    │  Timed Round-Robin Scheduler  │
+                    │                                │
+                    │  - Interval                   │
+                    │  - Priority                   │
+                    │  - Enabled / Disabled         │
+                    │  - Non-blocking execution     │
+                    │  - Service isolation          │
+                    └───────────────┬────────────────┘
+                                    │
+                  ┌─────────────────┼─────────────────┐
+                  │                 │                 │
+                  ▼                 ▼                 ▼
+
+        ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
+        │     BRIDGE     │ │      MQTT      │ │     WEBAPI     │
+        │                │ │                │ │                │
+        │ - AEE          │ │ - Home         │ │ - GET / POST   │
+        │ - UDP / JSON   │ │   Assistant    │ │ - Patterns     │
+        │ - Events       │ │ - Zigbee2MQTT  │ │ - Buffer map   │
+        │                │ │ - Shelly        │ │ - Responses    │
+        └────────────────┘ └────────────────┘ └────────────────┘
+
+
+# ============================================================
+# OTHER COMMUNICATION / PROTOCOL SERVICES
+# ============================================================
+
+┌────────────────────────────────────────────────────────────┐
+│                       RS485 ENGINE                          │
+│                                                            │
+│  - Frames                                                  │
+│  - ACK / NACK                                              │
+│  - Retry                                                   │
+│  - State machines                                          │
+│  - Non-blocking communication                              │
+└────────────────────────────────────────────────────────────┘
+
+
+┌────────────────────────────────────────────────────────────┐
+│                    MODBUS TCP / RTU                         │
+│                                                            │
+│  - Modbus TCP                                              │
+│  - Modbus RTU                                              │
+│  - Polling                                                 │
+│  - Reads / Writes                                          │
+│  - Retry / Timeout                                         │
+│  - Connection management                                   │
+└────────────────────────────────────────────────────────────┘
+
+
+# ============================================================
+# HOT STANDBY
+# ============================================================
+
+┌────────────────────────────────────────────────────────────┐
+│                     HOT STANDBY ENGINE                     │
+│                                                            │
+│  - MASTER / SLAVE                                          │
+│  - Heartbeat                                               │
+│  - Failover                                                │
+│  - State replication                                       │
+│  - Process synchronization                                 │
+│  - Ethernet enable / disable                               │
+│                                                            │
+│  MASTER → communication active                             │
+│  SLAVE  → Ethernet / communication disabled               │
+└────────────────────────────────────────────────────────────┘
+
+
+# ============================================================
+# RESOURCE MANAGEMENT
+# ============================================================
+
+┌────────────────────────────────────────────────────────────┐
+│                 COMMUNICATION RESOURCES                    │
+│                                                            │
+│  - Ethernet sockets                                        │
+│  - TCP clients                                              │
+│  - MQTT connections                                        │
+│  - Modbus connections                                      │
+│  - Bridge connections                                      │
+│  - Connection lifecycle                                    │
+│  - Resource contention                                     │
+│                                                            │
+│  Hardware limits are part of the architecture.             │
+└────────────────────────────────────────────────────────────┘
+
+
+# ============================================================
+# DIAGNOSTICS
+# ============================================================
+
+┌────────────────────────────────────────────────────────────┐
+│                    DIAGNOSTIC ENGINE                       │
+│                                                            │
+│  - Automation analysis                                     │
+│  - Buffer analysis                                         │
+│  - Device analysis                                         │
+│  - Task analysis                                           │
+│  - Scheduler analysis                                      │
+│  - Communication analysis                                  │
+│  - Ethernet / socket resources                             │
+│  - RTC analysis                                            │
+│  - Security analysis                                       │
+│  - Power analysis                                          │
+│  - HVAC analysis                                           │
+│  - Hot Standby analysis                                    │
+│  - Watchdog / overload analysis                            │
+│  - Structured reports                                      │
+└────────────────────────────────────────────────────────────┘
+
+
+# ============================================================
+# EXECUTION MODEL
+# ============================================================
+
+                         BACKEND
+                            │
+                            ▼
+                         BUFFER
+                            │
+                            ▼
+                      TASK ENGINE
+                            │
+             ┌──────────────┼──────────────┐
+             ▼              ▼              ▼
+           HVAC          SECURITY       AVERAGES
+             │              │              │
+             └──────────────┼──────────────┘
+                            │
+                            ▼
+                 COMMUNICATION TASK
+                            │
+                            ▼
+              COMMUNICATION SCHEDULER
+                            │
+             ┌──────────────┼──────────────┐
+             ▼              ▼              ▼
+          BRIDGE           MQTT           WEBAPI
+
+
+# ============================================================
+# CORE ARCHITECTURAL PRINCIPLE
+# ============================================================
+
+                    ┌──────────────────────┐
+                    │     DETERMINISTIC    │
+                    │       RUNTIME        │
+                    └──────────┬───────────┘
+                               │
+          ┌────────────────────┼────────────────────┐
+          ▼                    ▼                    ▼
+     APPLICATION           COMMUNICATION         HARDWARE
+       LOGIC                  SERVICES            RESOURCES
+          │                    │                    │
+          └────────────────────┼────────────────────┘
+                               ▼
+                         NON-BLOCKING
+                           EXECUTION
+
+The fundamental principle is:
+
+> No secondary service must be able to block the main
+> application cycle.
+
+Application logic and communication are therefore separated,
+scheduled, monitored and executed according to deterministic
+timing rules.
+
+Hardware resources such as Ethernet sockets are considered
+part of the software architecture and must be explicitly
+managed and diagnosed.
+
+
+# ============================================================
+# DOMOMANAGER
+# THE OPERATING SYSTEM FOR THE HOME
+# ============================================================

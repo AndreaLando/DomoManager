@@ -1,388 +1,804 @@
-\# ============================================================
+# ============================================================
+# DOMOMANAGER – PANORAMICA GENERALE DEL SISTEMA
+# ============================================================
 
-\# PANORAMICA GENERALE DEL SISTEMA
-
-\# ============================================================
-
-
-
-\## Introduzione
+## 1. Introduzione
 
 DomoManager non è un semplice firmware, né un hub, né un gateway.
 
-È un \*\*ecosistema completo\*\*, progettato per governare una casa come
+È un **runtime embedded per l'infrastruttura domestica**, progettato per governare una casa come un sistema unico.
+
+L'obiettivo non è semplicemente permettere a dispositivi diversi di comunicare.
+
+L'obiettivo è costruire un sistema capace di:
+
+- acquisire informazioni
+- rappresentare lo stato della casa
+- elaborare condizioni
+- prendere decisioni
+- comandare dispositivi
+- coordinare automazioni
+- gestire energia e climatizzazione
+- gestire sicurezza
+- comunicare con sistemi esterni
+- diagnosticare il proprio comportamento
+
+Tutto questo all'interno di un'architettura coerente.
+
+La filosofia fondamentale è:
+
+> **la domotica non deve essere un insieme di dispositivi intelligenti, ma un sistema coerente che interpreta, decide e agisce.**
+
+DomoManager è progettato per essere:
+
+- deterministico
+- non-blocking
+- robusto
+- modulare
+- estendibile
+- leggibile
+- diagnosticabile
+- local-first
+- embedded-first
+- consapevole delle risorse hardware
+
+Ogni componente ha una responsabilità precisa.
+
+Ogni informazione ha una rappresentazione coerente.
+
+Ogni decisione deve poter essere ricostruita.
+
+---
+
+# 2. Il modello generale
+
+L'architettura di DomoManager può essere rappresentata attraverso quattro grandi domini:
 
-se fosse un organismo vivente: con un sistema nervoso, organi,
+```text id="3zqf4a"
+                    MONDO FISICO
+                         │
+                         ▼
+                 ┌───────────────┐
+                 │    BACKEND    │
+                 │ Device/Modbus │
+                 │   I/O / RS485 │
+                 └───────┬───────┘
+                         │
+                         ▼
+                 ┌───────────────┐
+                 │     BUFFER    │
+                 │  SYSTEM STATE │
+                 └───────┬───────┘
+                         │
+             ┌───────────┼───────────┐
+             ▼           ▼           ▼
+         TASK ENGINE  AUTOMATION   FRONTEND
+             │         ENGINE       ENGINES
+             │           │           │
+             └───────────┼───────────┘
+                         │
+                         ▼
+              COMMUNICATION SCHEDULER
+                         │
+             ┌───────────┼───────────┐
+             ▼           ▼           ▼
+          BRIDGE       MQTT        WebAPI
+```
 
-riflessi, memoria e capacità di adattamento.
+Attorno a questi domini operano servizi trasversali fondamentali:
 
+- Time Manager
+- Diagnostics
+- Watchdog
+- Hot Standby
+- gestione delle risorse
 
+Il risultato è un sistema nel quale:
 
-Tutto nasce da un’idea: la domotica non deve essere un insieme di
+**Backend → Buffer → Logic → Communication**
 
-dispositivi che comunicano, ma un sistema coerente che interpreta,
+rappresenta il flusso principale delle informazioni.
 
-decide e agisce. DomoManager è questo: un cervello centrale che
+---
 
-coordina sensori, attuatori, automazioni, energia, clima, sicurezza,
+# 3. Il mondo fisico
 
-comunicazioni e diagnostica.
+Il primo livello è costituito dalla realtà fisica della casa.
 
+Comprende:
 
+- sensori
+- ingressi digitali
+- ingressi analogici
+- attuatori
+- pompe
+- valvole
+- fan coil
+- carichi elettrici
+- dispositivi Modbus
+- dispositivi RS485
+- dispositivi Ethernet
+- RTC
+- eventuali dispositivi wireless
 
-La sua architettura è pensata per essere:
+È il punto nel quale il sistema incontra il mondo reale.
 
-\- deterministica
+Le informazioni provenienti dall'impianto vengono acquisite dal Backend.
 
-\- robusta
+Le decisioni elaborate dal sistema vengono successivamente trasformate in comandi verso questo livello.
 
-\- modulare
+---
 
-\- estendibile
+# 4. Backend
 
-\- leggibile
+Il Backend rappresenta il collegamento tra il mondo fisico e il modello software della casa.
 
-\- priva di magia nascosta
+I principali componenti comprendono:
 
+- Device Manager
+- Modbus Engine
+- protocolli RS485
+- I/O locali
+- gestione dei dispositivi
+- gestione degli errori
+- retry
+- timeout
+- priorità
+- cooldown
 
+Il Backend ha una responsabilità precisa:
 
-Ogni componente ha un ruolo preciso, ogni dato ha un luogo unico,
+> **acquisire e aggiornare lo stato del mondo fisico senza incorporare la logica applicativa.**
 
-ogni decisione è tracciabile.
+Questo principio è fondamentale.
 
+Il driver di un dispositivo non deve diventare il luogo nel quale viene implementata la logica della casa.
 
+Il dispositivo fornisce dati.
 
-\---
+Il sistema li interpreta successivamente.
 
+---
 
+# 5. Buffer Engine
 
-\## Una visione d’insieme
+Il Buffer Engine è il **punto centrale dello stato del sistema**.
 
-Per capire DomoManager bisogna immaginarlo come un edificio a più
+Tutti i principali componenti utilizzano il Buffer come rappresentazione comune dello stato.
 
-piani, dove ogni livello ha una responsabilità chiara ma tutti
+Nel Buffer possono essere rappresentati:
 
-collaborano in modo armonico.
+- temperature
+- stati
+- comandi
+- allarmi
+- potenze
+- valori analogici
+- bitmask
+- informazioni di sicurezza
+- dati HVAC
+- dati Weather
+- dati Power
+- stati delle automazioni
+- aree virtuali
 
+Il Buffer fornisce inoltre:
 
+- aree tipizzate
+- timestamp
+- change tracking
+- virtual areas
+- reverse
+- split
+- toggle
+- lookup rapido
+- diagnostica
 
-\### Livello 1 — Hardware e mondo fisico
+Il principio fondamentale è:
 
-Qui vivono:
+> **il Buffer è la fonte di verità del sistema.**
 
-\- sensori cablati
+Questo permette di evitare, dove possibile:
 
-\- ingressi digitali e analogici
+- stati duplicati
+- variabili nascoste
+- sincronizzazioni manuali
+- copie incoerenti
+- dipendenze dirette tra Engine
 
-\- attuatori (pompe, valvole, fan coil, carichi elettrici)
+Il Buffer è quindi molto più di una memoria dati.
 
-\- dispositivi Modbus TCP/RTU
+È il **linguaggio comune di DomoManager**.
 
-\- rete Ethernet
+---
 
-\- RS485
+# 6. Time Manager
 
-\- RTC hardware
+Il tempo è una dimensione fondamentale dell'architettura.
 
+Il Time Manager fornisce il riferimento temporale utilizzato dal sistema per:
 
+- timestamp
+- scheduling
+- timeout
+- retry
+- cooldown
+- automazioni
+- HVAC
+- ACS
+- sicurezza
+- Power
+- eventi
+- diagnostica
 
-È il livello più vicino alla realtà: ciò che accade nella casa
+Il tempo può essere sincronizzato attraverso:
 
-entra da qui, e ciò che la casa deve fare esce da qui.
+- RTC
+- NTP
+- meccanismi di fallback
 
+Il sistema non deve conoscere soltanto:
 
+> **"Qual è lo stato?"**
 
-\---
+ma anche:
 
+> **"Quando è stato rilevato?"**
 
+e:
 
-\### Livello 2 — Buffer: la memoria centrale
+> **"Da quanto tempo è così?"**
 
-Il buffer è il \*\*cuore pulsante\*\* del sistema.
+Il Time Manager è quindi il **metronomo del runtime**.
 
-Tutto ciò che esiste nel mondo fisico viene rappresentato qui dentro:
+---
 
-temperature, stati, comandi, allarmi, potenze, valori analogici,
+# 7. Task Engine
 
-bitmask, scene, automazioni.
+Il Task Engine coordina l'esecuzione delle attività applicative.
 
+I task vengono definiti attraverso:
 
+- responsabilità
+- callback
+- intervallo
+- stato enabled/disabled
 
-Il buffer è:
+Tra le attività gestite rientrano:
 
-\- l’unica fonte di verità
+- Security / Sensors
+- HVAC
+- Averages
+- Communication
 
-\- l’unico punto di lettura/scrittura
+Il Task Engine separa:
 
-\- il linguaggio comune tra tutti i moduli
+```text id="abm6yo"
+COSA FARE
+   │
+   ▼
+TASK
+   │
+   ▼
+QUANDO ESEGUIRLO
+```
 
+dalla logica interna del singolo Engine.
 
+Questo permette di ottenere un runtime più prevedibile e di evitare che ogni modulo debba implementare autonomamente la propria politica di scheduling.
 
-Non esistono variabili sparse, stati duplicati o valori nascosti.
+---
 
-Ogni informazione è tracciata, tipizzata, timestampata.
+# 8. Automation Engine
 
+L'Automation Engine rappresenta il livello comportamentale della casa.
 
+È il componente che trasforma:
 
-\---
+```text
+STATO + CONDIZIONI + TEMPO
+             │
+             ▼
+         DECISIONE
+             │
+             ▼
+           AZIONE
+```
 
+Supporta concetti come:
 
+- scene
+- regole
+- condizioni multiple
+- sequenze
+- regole temporali
+- trend
+- debounce
+- composite rules
+- configurazione JSON
+- validazione
 
-\### Livello 3 — Device Manager e Modbus Engine
+L'Automation Engine non deve conoscere i dettagli dei dispositivi.
 
-Questo livello collega il mondo fisico al buffer.
+Lavora sul modello di stato fornito dal sistema.
 
+Questo permette di separare:
 
+**come un dispositivo funziona**
 
-Il Device Manager:
+da:
 
-\- conosce i dispositivi
+**perché la casa decide di utilizzarlo.**
 
-\- assegna le aree
+---
 
-\- gestisce errori, priorità e routing
+# 9. Frontend Engines
 
+I Frontend Engines rappresentano le principali funzioni applicative della casa.
 
+Ogni Engine ha una responsabilità specifica, ma condivide il modello comune del Buffer.
 
-Il Modbus Engine:
+## HVAC Engine
 
-\- interroga i dispositivi
+Gestisce:
 
-\- legge ingressi
+- pompe di calore
+- zone
+- temperature
+- fan coil
+- ACS
+- anti-legionella
+- defrost
+- finestre
+- protezioni
+- calendari HVAC
 
-\- scrive uscite
+---
 
-\- applica soglie, toggle, split
+## Power Engine
 
-\- aggiorna il buffer in modo deterministico
+Gestisce:
 
+- carichi prioritari
+- limiti di potenza
+- protezione della rete
+- produzione solare
+- forecast
+- gestione dinamica dei carichi
+- auto-tuning
 
+---
 
-È il ponte tra hardware e logica.
+## Weather Engine
 
+Gestisce:
 
+- temperatura
+- pioggia
+- vento
+- luce
+- eventi meteorologici
+- allarmi
+- medie mobili
 
-\---
+---
 
+## Security Engine
 
+Gestisce:
 
-\### Livello 4 — Time Manager
+- sensori
+- zone
+- stati di sicurezza
+- allarmi
+- aggregazione degli stati
+- eventi
+- diagnostica
 
-Il tempo è una dimensione fondamentale del sistema.
+---
 
+## AEE Engine
 
+Gestisce la sincronizzazione delle variabili e degli eventi verso i pannelli e i frontend che utilizzano il protocollo AEE.
 
-Il Time Manager:
+---
 
-\- fornisce epoch affidabile
+# 10. Communication Layer
 
-\- sincronizza con RTC o NTP
+La comunicazione non rappresenta la logica della casa.
 
-\- gestisce callback per secondi, minuti, ore, giorni
+È un **livello di integrazione**.
 
-\- alimenta automazioni, HVAC, ACS, sicurezza, power
+DomoManager può comunicare attraverso:
 
+- MQTT
+- HTTP
+- Modbus TCP
+- Modbus RTU
+- RS485
+- UDP/JSON
+- Bridge AEE
 
+Il principio fondamentale è:
 
-Senza un tempo stabile, la casa non può comportarsi in modo coerente.
+> **la casa deve continuare a ragionare anche quando una comunicazione esterna è lenta o temporaneamente indisponibile.**
 
+Per questo la comunicazione è separata dal percorso principale della logica applicativa.
 
+---
 
-\---
+# 11. Communication Scheduler
 
+I principali servizi di comunicazione vengono coordinati attraverso un Communication Scheduler dedicato.
 
+```text id="5ddt2k"
+             COMMUNICATION SCHEDULER
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+       BRIDGE        MQTT         WebAPI
+```
 
-\### Livello 5 — Automation Engine
+Ogni servizio può essere associato a:
 
-Qui vive il comportamento della casa.
+- intervallo
+- priorità
+- enabled/disabled
+- callback
 
+Il modello di esecuzione è basato su scheduling temporale e round-robin.
 
+L'obiettivo è impedire che un singolo servizio possa monopolizzare il runtime frontend.
 
-L’Automation Engine:
+Questo è particolarmente importante quando più servizi competono per risorse limitate come:
 
-\- valuta condizioni
+- CPU
+- memoria
+- connessioni
+- socket Ethernet
+- banda
+- tempo di esecuzione
 
-\- attiva scene
+Il Communication Scheduler è quindi una componente importante della strategia **non-blocking** di DomoManager.
 
-\- esegue sequenze
+---
 
-\- gestisce regole temporali
+# 12. Separazione tra applicazione e comunicazione
 
-\- esegue automazioni dinamiche
+Uno dei principi più importanti dell'architettura è la separazione tra:
 
+```text id="0r0w8r"
+STATO
+ │
+ ▼
+BUFFER
+ │
+ ▼
+LOGICA APPLICATIVA
+ │
+ ▼
+DECISIONI
+ │
+ ▼
+COMUNICAZIONE
+```
 
+Un Engine applicativo non dovrebbe dipendere direttamente dal funzionamento interno di MQTT, WebAPI o Bridge.
 
-È un motore dichiarativo, leggibile, tracciabile.
+Analogamente, un servizio di comunicazione non deve diventare il proprietario della logica applicativa.
 
-Ogni decisione è motivata, ogni azione è registrata.
+Questo permette di mantenere separati:
 
+- stato
+- elaborazione
+- decisione
+- comunicazione
 
+e rende l'intero sistema più prevedibile.
 
-\---
+---
 
+# 13. Diagnostica
 
+La diagnostica è un componente architetturale, non un'aggiunta successiva.
 
-\### Livello 6 — Frontend Engines
+DomoManager deve essere in grado di osservare il proprio comportamento.
 
-Sono i “grandi organi” della casa.
+La diagnostica può riguardare:
 
+- Buffer
+- task
+- scheduler
+- comunicazioni
+- dispositivi
+- Modbus
+- RS485
+- RTC
+- automazioni
+- sicurezza
+- HVAC
+- Power
+- Weather
+- watchdog
+- aree monitorate
+- risorse di rete
 
+L'obiettivo è poter distinguere tra:
 
-\- \*\*HVAC Engine\*\*: gestisce pompe di calore, fan coil, ACS, anti-legionella
+```text id="2wq3g8"
+ERRORE LOGICO
+ERRORE DISPOSITIVO
+TIMEOUT
+RETRY
+TASK LENTO
+COMUNICAZIONE LENTA
+RISORSA ESAURITA
+PROBLEMA DI SCHEDULING
+```
 
-\- \*\*Power Engine\*\*: controlla carichi, limiti, forecast solare, auto-tuning
+Il principio è:
 
-\- \*\*Weather Engine\*\*: elabora meteo, pioggia, vento, luce, allarmi
+> **un sistema affidabile non deve soltanto funzionare: deve essere in grado di spiegare quando non funziona.**
 
-\- \*\*Security Engine\*\*: gestisce sensori cablati, zone, allarmi
+---
 
-\- \*\*MQTT Engine\*\*: integra Home Assistant, Zigbee2MQTT, Shelly
+# 14. Watchdog e protezione del runtime
 
-\- \*\*WebAPI Engine\*\*: comunica con dispositivi HTTP
+Il watchdog rappresenta una linea di difesa del runtime.
 
-\- \*\*AEE Engine\*\*: sincronizza variabili verso pannelli e frontend
+Il suo compito è rilevare condizioni anomale quali:
 
-\- \*\*Task Engine\*\*: orchestra i cicli frontend
+- blocchi
+- sovraccarichi
+- mancata progressione del sistema
+- condizioni di esecuzione anomale
 
+Il watchdog non sostituisce la diagnostica.
 
+La diagnostica cerca di spiegare il problema.
 
-Ogni motore legge dal buffer, elabora, decide e scrive nel buffer.
+Il watchdog garantisce che una condizione grave non possa lasciare indefinitamente il sistema in uno stato non operativo.
 
+---
 
+# 15. Hot Standby
 
-\---
+DomoManager può utilizzare un'architettura Master/Slave per aumentare la continuità operativa.
 
+```text id="6g0s0x"
+                 CLUSTER
+                    │
+          ┌─────────┴─────────┐
+          ▼                   ▼
+       MASTER               SLAVE
+       ACTIVE                READY
+          │                   │
+          └────── STATE ──────┘
+```
 
+Il nodo Master gestisce normalmente le comunicazioni operative.
 
-\### Livello 7 — Comunicazione e integrazione
+Il nodo Slave rimane pronto al subentro.
 
-DomoManager parla molte lingue:
+La gestione del failover può comprendere:
 
-\- MQTT
+- ruolo Master/Slave
+- stato
+- processo
+- timestamp
+- sincronizzazione
+- attivazione delle comunicazioni
 
-\- HTTP
+L'obiettivo è aumentare la continuità del servizio senza duplicare indiscriminatamente le attività.
 
-\- RS485
+---
 
-\- UDP/JSON (Bridge AEE)
+# 16. Gestione delle risorse
 
-\- Modbus TCP/RTU
+DomoManager è progettato per hardware embedded.
 
+Questo significa che le risorse devono essere considerate parte del modello architetturale.
 
+In particolare:
 
-Ogni protocollo è integrato in modo deterministico, senza blocchi,
+- RAM
+- CPU
+- memoria
+- socket
+- connessioni
+- bus
+- banda
+- tempi di esecuzione
 
-senza thread, senza allocazioni ricorrenti.
+non sono risorse infinite.
 
+La progettazione del runtime deve quindi tenere conto della concorrenza tra servizi.
 
+Il sistema deve evitare, dove possibile:
 
-\---
+- allocazioni ricorrenti inutili
+- retry incontrollati
+- timeout eccessivi
+- connessioni inutilmente simultanee
+- operazioni bloccanti
+- monopolizzazione del ciclo frontend
 
+Il principio è:
 
+> **ogni risorsa limitata deve poter essere controllata e, quando possibile, osservata.**
 
-\### Livello 8 — Diagnostica
+---
 
-La diagnostica è un pilastro del sistema.
+# 17. Un sistema che pensa
 
+La forza di DomoManager non risiede nei singoli Engine.
 
+Risiede nel modo in cui collaborano.
 
-Il Diagnostic Engine:
+Consideriamo un esempio:
 
-\- analizza automazioni
+```text id="k9s0y1"
+Weather
+   │
+   │ rileva pioggia
+   ▼
+Buffer
+   │
+   ├───────────────┐
+   ▼               ▼
+Security        Automation
+   │               │
+   │ finestre      │ decisione
+   │ aperte        │
+   └───────┬───────┘
+           ▼
+        Buffer
+           │
+           ▼
+        HVAC / Power
+           │
+           ▼
+ Communication Scheduler
+           │
+           ▼
+       Attuatori
+```
 
-\- analizza scheduler
+Il Weather Engine non deve conoscere direttamente l'HVAC.
 
-\- analizza split
+Il Security Engine non deve comandare direttamente il Power Engine.
 
-\- analizza buffer
+L'Automation Engine non deve conoscere il protocollo utilizzato dall'attuatore.
 
-\- analizza dispositivi
+Il Buffer e il runtime forniscono il linguaggio comune.
 
-\- analizza RTC
+Questa è la differenza tra un insieme di moduli e un sistema.
 
-\- analizza sicurezza
+---
 
-\- analizza power
+# 18. Un sistema che cresce
 
-\- analizza HVAC
+DomoManager è progettato per poter evolvere senza trasformare ogni nuova funzionalità in una modifica globale dell'architettura.
 
+L'introduzione di un nuovo Engine dovrebbe richiedere principalmente:
 
+1. definizione dello stato necessario
+2. definizione delle relative aree nel Buffer
+3. implementazione della logica
+4. integrazione nel Task Engine quando necessario
+5. integrazione con il Time Manager
+6. integrazione con la diagnostica
+7. eventuale integrazione con il Communication Scheduler
 
-Ogni anomalia è visibile, spiegata, tracciata.
+Il nuovo componente deve utilizzare le regole comuni del sistema.
 
+La modularità non significa quindi che ogni modulo sia un'isola.
 
+Significa che ogni modulo può evolvere mantenendo **lo stesso linguaggio architetturale**.
 
-\---
+---
 
+# 19. Il ciclo completo
 
+Il funzionamento complessivo di DomoManager può essere sintetizzato in questo ciclo:
 
-\## Un sistema che pensa
+```text id="p3h7v9"
+              MONDO FISICO
+                   │
+                   ▼
+                BACKEND
+                   │
+                   ▼
+                BUFFER
+                   │
+          ┌────────┼────────┐
+          ▼        ▼        ▼
+        TASKS   AUTOMATION  ENGINES
+          │        │        │
+          └────────┼────────┘
+                   ▼
+             DECISIONI
+                   │
+                   ▼
+       COMMUNICATION SCHEDULER
+                   │
+          ┌────────┼────────┐
+          ▼        ▼        ▼
+       BRIDGE    MQTT     WebAPI
+                   │
+                   ▼
+              ATTUATORI
+                   │
+                   ▼
+              MONDO FISICO
+```
 
-La forza di DomoManager non è nei singoli moduli, ma nel modo in cui
+Il ciclo non è semplicemente:
 
-collaborano.
+**input → output**.
 
+È un ciclo continuo di:
 
+**acquisizione → rappresentazione → elaborazione → decisione → azione → osservazione**.
 
-Esempio:
+Ed è proprio questa continuità che permette al sistema di comportarsi come un organismo.
 
-\- il Weather Engine rileva pioggia
+---
 
-\- il Security Engine sa quali finestre sono aperte
+# 20. La casa come organismo
 
-\- l’Automation Engine decide di chiuderle
+La visione complessiva può essere descritta attraverso una metafora biologica:
 
-\- il Power Engine valuta se la potenza è sufficiente
+> **La casa non è un insieme di oggetti intelligenti.  
+> È un organismo.  
+> DomoManager è il suo sistema nervoso.**
 
-\- il buffer sincronizza tutto
+In questa metafora:
 
-\- il Time Manager garantisce che accada nel momento giusto
+- i dispositivi sono gli organi
+- il Backend è il sistema sensoriale
+- il Buffer è il sistema circolatorio
+- il Time Manager è il ritmo
+- il Task Engine è il sistema di coordinamento
+- l'Automation Engine rappresenta il comportamento
+- gli Frontend Engines rappresentano gli organi specializzati
+- il Communication Scheduler coordina il sistema nervoso periferico
+- la diagnostica è il sistema immunitario
+- il watchdog è il riflesso di sicurezza
+- Hot Standby rappresenta la ridondanza
 
+La metafora non è soltanto descrittiva.
 
+Rappresenta il modello architetturale del progetto:
 
-È un ecosistema, non un insieme di pezzi.
+**ogni parte ha una responsabilità, ma nessuna parte rappresenta da sola l'intero organismo.**
 
+---
 
+# 21. Il principio architetturale finale
 
-\---
+L'intera architettura DomoManager può essere riassunta in una sola frase:
 
+> **Il mondo fisico produce dati, il Backend li acquisisce, il Buffer rappresenta lo stato, gli Engine lo interpretano, il runtime coordina l'esecuzione, l'Automation Engine prende decisioni e il Communication Layer porta tali decisioni verso il mondo esterno.**
 
+Tutto questo deve avvenire secondo gli stessi principi:
 
-\## Un sistema che cresce
+- determinismo
+- non-blocking
+- modularità
+- tracciabilità
+- diagnostica
+- local-first
+- embedded-first
+- resource-awareness
 
-DomoManager è progettato per evolvere.
+La complessità non deve essere eliminata.
 
+Deve essere **governata dall'architettura**.
 
+---
 
-Aggiungere un nuovo modulo significa:
-
-\- definire le aree nel buffer
-
-\- leggere ciò che serve
-
-\- scrivere ciò che serve
-
-\- collegarsi al Time Manager
-
-\- registrare diagnostica
-
-
-
-Non serve modificare il resto del sistema.
-
-La modularità è reale, non teorica.
-
-
-
-\---
-
-
-
-\# ============================================================
-
-\# FINE PANORAMICA GENERALE
-
-\# ============================================================
-
-
-
+# ============================================================
+# DOMOMANAGER
+# PANORAMICA GENERALE DEL SISTEMA
+# ============================================================
