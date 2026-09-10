@@ -679,9 +679,6 @@ DomoManagerConfig makeDomoConfig() {
     cfg.hmi.pollingMs = 250;   // default
     cfg.hmi.maxClients = 1;
 
-    // --- Modbus ---
-    cfg.modbusRTU.port = 502;
-
     // --- Watchdog ---
     cfg.watchdog = wdConfig;
 
@@ -853,138 +850,319 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
 // MQTT - CONFIGURAZIONE COMPLETA
 // ============================================================================
 
-
 // ============================================================================
-// 1) MAPPING - SMHUB / ZIGBEE2MQTT
+// DEVICE - SMHUB / ZIGBEE2MQTT
 // ============================================================================
-//
-// Device reale:
-//   0xa4c138a6a900c9d6
-//
-// Topic base prodotto da Z2M:
-//   opta_domotica/0xa4c138a6a900c9d6
-//
-// Proprietà disponibili dal log:
-//   state_l1
-//   state_l2
-//   state_l3
-//   state_l4
-//
-// Le aree DM sono PROVVISORIE.
-// ============================================================================
-
-static const FrontendConfig::MQTT::Mapping MQTT_SMHub_Relay_Mappings[] =
+static constexpr FrontendConfig::MQTT::EnumValue
+    EGLO99099_Actions[] =
 {
+    { "on",                           1 },
+    { "off",                          2 },
+
+    { "red",                          3 },
+    { "red_long",                     4 },
+
+    { "refresh",                      5 },
+    { "refresh_long",                 6 },
+
+    { "refresh_colored",              7 },
+    { "refresh_colored_long",         8 },
+
+    { "blue",                         9 },
+    { "blue_long",                   10 },
+
+    { "green",                       11 },
+    { "green_long",                  12 },
+
+    { "brightness_step_up",           13 },
+    { "brightness_step_down",         14 },
+    { "brightness_move_to_level",     15 },
+
+    { "color_temperature_step_up",    16 },
+    { "color_temperature_step_down",  17 },
+    { "color_temperature_move",       18 },
+
+    { "recall_1",                     19 },
+    { "recall_1_long",                20 },
+
+    { "recall_2",                     21 },
+    { "recall_2_long",                22 }
+};
+
+static constexpr FrontendConfig::MQTT::EnumValue
+    IRB4_SystemModes[] =
+{
+    { "off",      0 },
+    { "heat",     1 },
+    { "cool",     2 },
+    { "auto",     3 },
+    { "dry",      4 },
+    { "fan_only", 5 }
+};
+
+static constexpr FrontendConfig::MQTT::EnumValue
+    IRB4_FanModes[] =
+{
+    { "off",    0 },
+    { "low",    1 },
+    { "medium", 2 },
+    { "high",   3 },
+    { "auto",   4 }
+};
+
+static constexpr FrontendConfig::MQTT::EnumValue
+    IRB4_LouverPositions[] =
+{
+    { "fully_open",          0 },
+    { "fully_closed",        1 },
+    { "half_open",           2 },
+    { "quarter_open",        3 },
+    { "three_quarters_open", 4 }
+};
+
+static const FrontendConfig::MQTT::Device
+    MQTT_SMHub_Devices[] =
+{
+    /*
+     * ============================================================
+     * 4DI4DO - Pergola
+     * ============================================================
+     */
+
     {
-        "state_l1",
+        "4DI4DOPergola",
+        "Comando Pergola",
 
-        FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+        {
+            {
+                "state_l1",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::BOOL,
+                127,
+                1.0f
+            },
 
-        FrontendConfig::MQTT::Mapping::DataType::BOOL,
+            {
+                "state_l2",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::BOOL,
+                301,
+                1.0f
+            },
 
-        127,                    // TODO: area DM reale
-        1.0f
+            {
+                "state_l3",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::BOOL,
+                302,
+                1.0f
+            },
+
+            {
+                "state_l4",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::BOOL,
+                303,
+                1.0f
+            }
+        }
     },
 
+
+    /*
+     * ============================================================
+     * EGLO 99099 - Telecomando
+     * ============================================================
+     */
+
     {
-        "state_l2",
+        "Telecomando",
+        "Telecomando EGLO 99099",
 
-        FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+        {
+            {
+                "action",
+                FrontendConfig::MQTT::Mapping::Direction::READ,
+                FrontendConfig::MQTT::Mapping::DataType::ENUM,
+                500,
+                1.0f,
+                EGLO99099_Actions
+            },
 
-        FrontendConfig::MQTT::Mapping::DataType::BOOL,
+            {
+                "action_group",
+                FrontendConfig::MQTT::Mapping::Direction::READ,
+                FrontendConfig::MQTT::Mapping::DataType::INT,
+                501,
+                1.0f
+            },
 
-        301,                    // TODO: area DM reale
-        1.0f
+            {
+                "action_level",
+                FrontendConfig::MQTT::Mapping::Direction::READ,
+                FrontendConfig::MQTT::Mapping::DataType::INT,
+                502,
+                1.0f
+            },
+
+            {
+                "action_color_temperature",
+                FrontendConfig::MQTT::Mapping::Direction::READ,
+                FrontendConfig::MQTT::Mapping::DataType::INT,
+                503,
+                1.0f
+            }
+        }
     },
 
-    {
-        "state_l3",
 
-        FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
-
-        FrontendConfig::MQTT::Mapping::DataType::BOOL,
-
-        302,                    // TODO: area DM reale
-        1.0f
-    },
+    /*
+     * ============================================================
+     * NodOn IRB-4-1-00 - IR Blaster
+     * ============================================================
+     */
 
     {
-        "state_l4",
+        "CmdScaldabagno",
+        "IR Blaster",
 
-        FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+        {
+            /*
+             * ----------------------------------------------------
+             * Temperatura ambiente
+             * ----------------------------------------------------
+             */
 
-        FrontendConfig::MQTT::Mapping::DataType::BOOL,
+            {
+                "local_temperature",
+                FrontendConfig::MQTT::Mapping::Direction::READ,
+                FrontendConfig::MQTT::Mapping::DataType::FLOAT,
+                505,
+                0.1f
+            },
 
-        303,                    // TODO: area DM reale
-        1.0f
+
+            /*
+             * ----------------------------------------------------
+             * Setpoint raffrescamento
+             * ----------------------------------------------------
+             */
+
+            {
+                "occupied_cooling_setpoint",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::FLOAT,
+                506,
+                1.0f
+            },
+
+
+            /*
+             * ----------------------------------------------------
+             * Setpoint riscaldamento
+             * ----------------------------------------------------
+             */
+
+            {
+                "occupied_heating_setpoint",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::FLOAT,
+                507,
+                1.0f
+            },
+
+
+            /*
+             * ----------------------------------------------------
+             * Modalità climatizzazione
+             * ----------------------------------------------------
+             */
+
+            {
+                "system_mode",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::ENUM,
+                508,
+                1.0f,
+                IRB4_SystemModes
+            },
+
+
+            /*
+             * ----------------------------------------------------
+             * Velocità ventola
+             * ----------------------------------------------------
+             */
+
+            {
+                "fan_mode",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::ENUM,
+                509,
+                1.0f,
+                IRB4_FanModes
+            },
+
+
+            /*
+             * ----------------------------------------------------
+             * Posizione aletta
+             * ----------------------------------------------------
+             */
+
+            {
+                "ac_louver_position",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::ENUM,
+                510,
+                1.0f,
+                IRB4_LouverPositions
+            },
+
+
+            /*
+             * ----------------------------------------------------
+             * Umidità
+             * ----------------------------------------------------
+             */
+
+            {
+                "humidity",
+                FrontendConfig::MQTT::Mapping::Direction::READ,
+                FrontendConfig::MQTT::Mapping::DataType::FLOAT,
+                511,
+                0.1f
+            }
+        }
     }
 };
 
-
 // ============================================================================
-// 2) DEVICE - SMHUB / ZIGBEE2MQTT
+// DEVICE - HOME ASSISTANT
 // ============================================================================
 
-static const FrontendConfig::MQTT::Device MQTT_SMHub_Devices[] =
+static const FrontendConfig::MQTT::Device
+    MQTT_HA_Devices[] =
 {
     {
-        0,
-        "0xa4c138a6a900c9d6",
-        "Relay Cucina SMHub",
-        MQTT_SMHub_Relay_Mappings,
-        sizeof(MQTT_SMHub_Relay_Mappings) /
-        sizeof(MQTT_SMHub_Relay_Mappings[0])
-    }
-};
-
-
-// ============================================================================
-// 3) MAPPING - HOME ASSISTANT
-// ============================================================================
-//
-// Esempio di variabile già esistente:
-//   temp_cucina
-//
-// Topic previsto dal backend HA:
-//   homeassistant/state/opta_domotica/temp_cucina
-//
-// Anche qui l'area è quella attuale del tuo sensore.
-// ============================================================================
-
-static const FrontendConfig::MQTT::Mapping MQTT_HA_Cucina_Mappings[] =
-{
-    {
-        "temp_cucina",
-
-        FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
-
-        FrontendConfig::MQTT::Mapping::DataType::FLOAT,
-
-        189,                    // Temperatura cucina
-        0.1f
-    }
-};
-
-
-// ============================================================================
-// 4) DEVICE - HOME ASSISTANT
-// ============================================================================
-
-static const FrontendConfig::MQTT::Device MQTT_HA_Devices[] =
-{
-    {
-        1,
         "opta_domotica",
         "Home Assistant",
-        MQTT_HA_Cucina_Mappings,
-        sizeof(MQTT_HA_Cucina_Mappings) /
-        sizeof(MQTT_HA_Cucina_Mappings[0])
+
+        {
+            {
+                "temp_cucina",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::FLOAT,
+                189,
+                0.1f
+            }
+        }
     }
 };
 
 
 // ============================================================================
-// 5) CLIENT MQTT
+// CLIENT MQTT
 // ============================================================================
 //
 // Per ora entrambi puntano allo stesso broker.
@@ -998,26 +1176,26 @@ static const FrontendConfig::MQTT::Client MQTT_CLIENTS[] =
 {
     {
         true,
-
-        IPAddress(192, 168, 12, 100),
-
+        IPAddress(192, 168, 12, 212),
         1883,
-
         FrontendConfig::MQTT::Client::Backend::ZIGBEE2MQTT,
-
-        "SMHub"
-    }
-    /*{
+        "SMHub",
+        "opta_domotica",
+        MQTT_SMHub_Devices,
+        sizeof(MQTT_SMHub_Devices) /
+        sizeof(MQTT_SMHub_Devices[0])
+    }/*,
+    {
         true,
-
         IPAddress(192, 168, 12, 215),
-
         1883,
-
         FrontendConfig::MQTT::Client::Backend::HOME_ASSISTANT,
-
-        "Home Assistant"
-    },*/
+        "Home Assistant",
+        "opta_domotica",
+        MQTT_HA_Devices,
+        sizeof(MQTT_HA_Devices) /
+        sizeof(MQTT_HA_Devices[0])
+    }*/
 };
 
 

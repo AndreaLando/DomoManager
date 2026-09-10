@@ -469,6 +469,79 @@ public:
     }
 };
 
+class FrontendNetwork
+{
+public:
+
+    static constexpr size_t MAX_MQTT_CLIENTS = 4;
+
+    struct ModbusTCP
+    {
+        EthernetClient client;
+        ModbusTCPClient modbus{client};
+    };
+
+    struct MQTT
+    {
+        EthernetClient client;
+        PubSubClient pubSub;
+
+        MQTT()
+            : client(),
+            pubSub()
+        {
+            pubSub.setClient(client);
+        }
+    };
+
+
+    explicit FrontendNetwork(
+        size_t mqttClientCount
+    )
+    {
+        _mqttClientCount =
+            mqttClientCount;
+
+        if (
+            _mqttClientCount >
+            MAX_MQTT_CLIENTS
+        )
+        {
+            _mqttClientCount =
+                MAX_MQTT_CLIENTS;
+        }
+    }
+
+
+    ModbusTCP& modbusTCP()
+    {
+        return _modbusTCP;
+    }
+
+
+    MQTT& mqtt(size_t index)
+    {
+        return _mqtt[index];
+    }
+
+
+    size_t mqttClientCount() const
+    {
+        return _mqttClientCount;
+    }
+
+
+private:
+
+    ModbusTCP _modbusTCP;
+
+    size_t _mqttClientCount = 0;
+
+    MQTT _mqtt[
+        MAX_MQTT_CLIENTS
+    ];
+};
+
 // ============================================================
 // MQTT FRONTEND ENGINE
 // Integrazione MQTT <-> DomoManager
@@ -532,6 +605,7 @@ public:
     };
 
 private:
+
     // ========================================================
     // STORAGE STATICO COMPATIBILE CON VECCHIO GCC
     // ========================================================
@@ -566,10 +640,11 @@ private:
     static size_t mappingCount;
 
     static unsigned long lastLoop;
-    
+
     static NetworkManager* networkManager;
     static NetworkManager::ProtocolId mqttProtocolId;
     static uint8_t mqttSource;
+
 public:
 
     // ========================================================
@@ -579,33 +654,57 @@ public:
     static void Setup(
         DomoManager& dm,
         NetworkManager& netManager,
-        EthernetClient* mqttClients,
-        PubSubClient* pubSubClients,
+        FrontendNetwork& network,
         size_t mqttClientCount,
         const FrontendConfig::MQTT& cfg,
         NetworkManager::ProtocolId protocol,
         uint8_t eventSource
     )
     {
+        /*
+        * ------------------------------------------------------------
+        * Global runtime state
+        * ------------------------------------------------------------
+        */
+
         manager = &dm;
-        mqttSource = eventSource;
         networkManager = &netManager;
         configuration = &cfg;
+
         mqttProtocolId = protocol;
+        mqttSource = eventSource;
 
         RuntimeClient* clients = getClients();
         RuntimeMapping* mappings = getMappings();
 
+        /*
+        * Reset runtime mappings.
+        */
         memset(
             mappings,
             0,
             sizeof(RuntimeMapping) * MAX_MAPPINGS
         );
 
+        /*
+        * Reset runtime clients.
+        *
+        * Gli elementi sono statici e possono provenire
+        * da una precedente inizializzazione.
+        */
+        for (size_t i = 0; i < MAX_CLIENTS; ++i)
+        {
+            clients[i] = RuntimeClient{};
+        }
+
         clientCount = 0;
         mappingCount = 0;
 
-        BuildRuntimeMappings(cfg);
+        /*
+        * ------------------------------------------------------------
+        * Configuration validation
+        * ------------------------------------------------------------
+        */
 
         if (!cfg.enabled)
         {
@@ -616,101 +715,180 @@ public:
             return;
         }
 
-        if (!networkManager)
+        if (!cfg.clients || cfg.clientCount == 0)
         {
             LOG_IF(
                 "MQTT",
-                "NetworkManager nullo"
+                "Nessun client MQTT configurato"
             );
             return;
         }
 
-        if (!mqttClients)
+        if (mqttClientCount == 0)
         {
             LOG_IF(
                 "MQTT",
-                "Array EthernetClient MQTT nullo"
+                "Nessun slot MQTT disponibile"
             );
             return;
         }
 
-        if (!pubSubClients)
+        /*
+        * ------------------------------------------------------------
+        * Build runtime mappings
+        * ------------------------------------------------------------
+        *
+        * La configurazione ora è:
+        *
+        * MQTT
+        *  └── clients[]
+        *       └── devices[]
+        *            └── mappings[]
+        *
+        * Non esiste più un MQTT::devices[] globale.
+        */
+        BuildRuntimeMappings(cfg);
+
+        /*
+        * ------------------------------------------------------------
+        * SocketManager
+        * ------------------------------------------------------------
+        *
+        * Tutti i client MQTT utilizzano lo stesso SocketManager owner,
+        * ma una resourceId diversa:
+        *
+        *     resourceId = indice del client MQTT
+        */
+
+        const SocketManager::OwnerId mqttSocketOwner =
+            networkManager
+                ->getProtocol(mqttProtocolId)
+                .socketOwner;
+
+        if (mqttSocketOwner < 0)
         {
             LOG_IF(
                 "MQTT",
-                "Array PubSubClient MQTT nullo"
+                "Socket owner MQTT non valido: protocol=%d",
+                (int)mqttProtocolId
             );
             return;
         }
 
-        size_t maxClients = MAX_CLIENTS;
+        /*
+        * ------------------------------------------------------------
+        * Number of clients to initialize
+        * ------------------------------------------------------------
+        */
 
-        if (mqttClientCount < maxClients)
+        size_t maxClients = cfg.clientCount;
+
+        if (maxClients > MAX_CLIENTS)
+            maxClients = MAX_CLIENTS;
+
+        if (maxClients > mqttClientCount)
             maxClients = mqttClientCount;
 
-        if (cfg.clientCount < maxClients)
-            maxClients = cfg.clientCount;
+        /*
+        * ------------------------------------------------------------
+        * Initialize MQTT clients
+        * ------------------------------------------------------------
+        */
 
         for (size_t i = 0; i < maxClients; ++i)
         {
-            const FrontendConfig::MQTT::Client* clientCfg =
-                &cfg.clients[i];
+            const FrontendConfig::MQTT::Client& clientCfg =
+                cfg.clients[i];
 
-            if (!clientCfg->enabled)
+            /*
+            * Client disabilitato:
+            * semplicemente ignorato.
+            */
+            if (!clientCfg.enabled)
                 continue;
 
-            if (clientCount >= MAX_CLIENTS)
-                break;
+            RuntimeClient& rc = clients[clientCount];
 
-            RuntimeClient& rc =
-                clients[clientCount];
-
+            /*
+            * Runtime identity.
+            */
             rc.index = (uint8_t)i;
-            rc.cfg = clientCfg;
+            rc.cfg = &clientCfg;
 
-            rc.eth =
-                &mqttClients[i];
+            /*
+            * Hardware MQTT resources.
+            */
+            rc.eth = &network.mqtt(i).client;
+            rc.pubSub = &network.mqtt(i).pubSub;
 
-            rc.pubSub =
-                &pubSubClients[i];
-
+            /*
+            * Runtime state.
+            */
             rc.mqtt = nullptr;
             rc.lastHeartbeat = 0;
             rc.initialized = false;
 
+            /*
+            * --------------------------------------------------------
+            * MQTT engine
+            * --------------------------------------------------------
+            *
+            * IMPORTANTE:
+            * ogni MQTT instance riceve solamente i device
+            * appartenenti al proprio Client.
+            */
             rc.mqtt = new MQTT(
                 *rc.eth,
                 *rc.pubSub,
-                cfg.nodeId,
                 (uint8_t)i,
-                clientCfg,
-                cfg.devices,
-                cfg.deviceCount
-            );
-
-            rc.socket.setup(
-                networkManager,
-                "MQTT",
-                (int)rc.index
+                &clientCfg,
+                clientCfg.devices,
+                clientCfg.deviceCount
             );
 
             if (!rc.mqtt)
             {
-                LOG_IF(
+                LOG_EF(
                     "MQTT",
                     "Client[%u] allocazione MQTT fallita",
                     (unsigned)i
                 );
+
                 continue;
             }
+
+            /*
+            * --------------------------------------------------------
+            * Socket
+            * --------------------------------------------------------
+            */
+
+            rc.socket.setup(
+                networkManager,
+                mqttSocketOwner,
+                (int)rc.index,
+                SocketManager::SocketKind::TCP_CLIENT
+            );
+
+            /*
+            * --------------------------------------------------------
+            * MQTT callbacks / backend
+            * --------------------------------------------------------
+            */
 
             rc.mqtt->setCommandCallback(
                 MQTTCommandCallback
             );
 
             rc.mqtt->setBackend(
-                clientCfg->backend
+                clientCfg.backend
             );
+
+            /*
+            * --------------------------------------------------------
+            * MQTT begin
+            * --------------------------------------------------------
+            */
 
             if (!rc.mqtt->begin())
             {
@@ -718,8 +896,8 @@ public:
                     "MQTT",
                     "Client[%u] begin fallito: %s",
                     (unsigned)i,
-                    clientCfg->name
-                        ? clientCfg->name
+                    clientCfg.name
+                        ? clientCfg.name
                         : "unnamed"
                 );
 
@@ -729,28 +907,46 @@ public:
                 continue;
             }
 
+            /*
+            * Client completamente inizializzato.
+            */
             rc.initialized = true;
 
             LOG_IF(
                 "MQTT",
-                "Client[%u] inizializzato: %s backend=%u broker=%s:%u",
+                "Client[%u] inizializzato: %s "
+                "backend=%u broker=%s:%u devices=%u",
                 (unsigned)i,
-                clientCfg->name
-                    ? clientCfg->name
+                clientCfg.name
+                    ? clientCfg.name
                     : "unnamed",
-                (unsigned)clientCfg->backend,
-                clientCfg->broker.toString().c_str(),
-                (unsigned)clientCfg->port
+                (unsigned)clientCfg.backend,
+                clientCfg.broker.toString().c_str(),
+                (unsigned)clientCfg.port,
+                (unsigned)clientCfg.deviceCount
             );
 
             ++clientCount;
         }
 
+        /*
+        * ------------------------------------------------------------
+        * Runtime initial values
+        * ------------------------------------------------------------
+        */
+
         InitializeRuntimeValues();
+
+        /*
+        * ------------------------------------------------------------
+        * Setup completed
+        * ------------------------------------------------------------
+        */
 
         LOG_IF(
             "MQTT",
-            "MQTT Setup completato: clients=%u mappings=%u protocol=%d",
+            "MQTT Setup completato: "
+            "clients=%u mappings=%u protocol=%d",
             (unsigned)clientCount,
             (unsigned)mappingCount,
             (int)mqttProtocolId
@@ -774,9 +970,6 @@ public:
         if (!networkManager)
             return;
 
-        /*
-        * Lasciamo partire HMI e Modbus prima di MQTT.
-        */
         static bool mqttStartupReady = false;
 
         if (!mqttStartupReady)
@@ -789,6 +982,18 @@ public:
 
         RuntimeClient* clients =
             getClients();
+
+        if (!networkManager->tryAcquire(
+                mqttProtocolId,
+                now))
+        {
+            LOG_WF(
+                "MQTT",
+                "tryAcquire NEGATO"
+            );
+
+            return;
+        }
 
         for (size_t i = 0;
             i < clientCount;
@@ -803,46 +1008,28 @@ public:
             if (!rc.mqtt)
                 continue;
 
-            /*
-            * MQTT accede alla rete solo se
-            * NetworkManager concede il canale.
-            */
-            if (!networkManager->tryAcquire(
-                    mqttProtocolId,
-                    now))
-            {
-                LOG_EF(
-                    "MQTT",
-                    "Client[%u] NetworkManager NEGATO",
-                    (unsigned)i
-                );
-
-                continue;
-            }
-
-            /*
-            * ========================================================
-            * CONNECT / RECONNECT
-            * ========================================================
-            *
-            * Il timer di retry è gestito interamente da MQTT.
-            * Non acquisiamo il socket se il tentativo non è dovuto.
-            */
-            const bool mqttConnectedBefore =
-                rc.mqtt->connected();
-
-            if (!mqttConnectedBefore)
+            // ----------------------------------------------------
+            // SOCKET / RECONNECT
+            // ----------------------------------------------------
+            const bool isConnected = rc.mqtt->connected();
+            
+            if (!isConnected)
             {
                 if (rc.mqtt->reconnectDue())
                 {
                     if (rc.socket.acquire())
                     {
-                        /*
-                        * Se la connessione fallisce,
-                        * il socket viene immediatamente liberato.
-                        */
-                        if (!rc.mqtt->reconnect())
+                        const bool ok =
+                            rc.mqtt->reconnect();
+
+                        if (!ok)
                         {
+                            LOG_WF(
+                                "MQTT",
+                                "CLIENT[%u] release socket",
+                                (unsigned)i
+                            );
+
                             rc.socket.release();
                         }
                     }
@@ -850,54 +1037,34 @@ public:
                     {
                         LOG_WF(
                             "MQTT",
-                            "Client[%u] socket non disponibile",
+                            "CLIENT[%u] socket acquire FAILED",
                             (unsigned)i
                         );
                     }
                 }
             }
 
+            // ----------------------------------------------------
+            // MQTT LOOP
+            // ----------------------------------------------------
 
-            /*
-            * ========================================================
-            * MQTT LOOP
-            * ========================================================
-            */
             if (rc.mqtt->connected())
             {
-                rc.mqtt->loop();
+                MQTT* testMqtt = rc.mqtt;
+                testMqtt->loop();
             }
             else
             {
-                LOG_EF(
-                    "MQTT",
-                    "Client[%u] NOT CONNECTED BEFORE mqtt.loop state=%d eth=%d socket=%d",
-                    (unsigned)i,
-                    rc.pubSub->state(),
-                    rc.eth->connected() ? 1 : 0,
-                    rc.socket.valid() ? 1 : 0
-                );
-
                 rc.socket.release();
             }
-            
-            /*
-            * ========================================================
-            * RELEASE DEL TURNO PROTOCOLLO
-            * ========================================================
-            *
-            * Non è il rilascio del socket fisico.
-            */
-            networkManager->release(
-                mqttProtocolId,
-                now
-            );
         }
 
-        /*
-        * Publish dei mapping dirty.
-        */
         PublishDirty();
+
+        networkManager->release(
+            mqttProtocolId,
+            now
+        );
 
         lastLoop = now;
     }
@@ -937,12 +1104,21 @@ public:
             if (rm.mapping->area != area)
                 continue;
 
-            LOG_EF(
+            /*
+             * Questo log può diventare molto rumoroso.
+             * Manteniamo solo il log di debug/evento già previsto
+             * dal tuo motore.
+             */
+            LOG_IF(
                 "MQTT",
                 "PublishEvent MATCH client=%u device=%s field=%s area=%d value=%ld",
                 (unsigned)rm.clientIndex,
-                rm.device && rm.device->id ? rm.device->id : "?",
-                rm.mapping && rm.mapping->field ? rm.mapping->field : "?",
+                rm.device && rm.device->id
+                    ? rm.device->id
+                    : "?",
+                rm.mapping && rm.mapping->field
+                    ? rm.mapping->field
+                    : "?",
                 rm.mapping->area,
                 value
             );
@@ -979,7 +1155,7 @@ public:
          * MQTT -> sistema domotico.
          *
          * IMPORTANTE:
-         * qui DMMQTTEngine finisce.
+         * qui MQTTEngine finisce.
          *
          * DomoManager viene usato esclusivamente
          * dal FrontendEngine.
@@ -1054,58 +1230,96 @@ private:
 
         mappingCount = 0;
 
-        if (!cfg.devices)
+        if (!cfg.clients)
             return;
 
-        for (size_t d = 0;
-             d < cfg.deviceCount;
-             ++d)
+        /*
+        * ============================================================
+        * CLIENT
+        * ============================================================
+        *
+        * Ogni Client possiede direttamente il proprio array di Device.
+        */
+        for (size_t c = 0;
+            c < cfg.clientCount;
+            ++c)
         {
-            const FrontendConfig::MQTT::Device& device =
-                cfg.devices[d];
-
-            if (!cfg.clients)
-                continue;
-
-            if (device.client >= cfg.clientCount)
-                continue;
-
             const FrontendConfig::MQTT::Client& client =
-                cfg.clients[device.client];
+                cfg.clients[c];
 
             if (!client.enabled)
                 continue;
 
-            if (!device.mappings)
+            if (!client.devices)
                 continue;
 
-            for (size_t m = 0;
-                 m < device.mappingCount;
-                 ++m)
+            /*
+            * ========================================================
+            * DEVICE
+            * ========================================================
+            */
+            for (size_t d = 0;
+                d < client.deviceCount;
+                ++d)
             {
-                if (mappingCount >= MAX_MAPPINGS)
-                    return;
+                const FrontendConfig::MQTT::Device& device =
+                    client.devices[d];
 
-                RuntimeMapping& rm =
-                    mappings[mappingCount];
+                /*
+                * ====================================================
+                * MAPPING
+                * ====================================================
+                */
+                for (size_t m = 0;
+                    m < FrontendConfig::MQTT::Device::MAX_MAPPINGS;
+                    ++m)
+                {
+                    const FrontendConfig::MQTT::Mapping& mapping =
+                        device.mappings[m];
 
-                rm.clientIndex =
-                    device.client;
+                    /*
+                    * Mapping non configurato.
+                    *
+                    * Il campo è nullptr quando lo slot non viene usato.
+                    */
+                    if (!mapping.field)
+                        continue;
 
-                rm.client =
-                    &client;
+                    /*
+                    * Limite storage runtime.
+                    */
+                    if (mappingCount >= MAX_MAPPINGS)
+                    {
+                        LOG_IF(
+                            "MQTT",
+                            "MAX_MAPPINGS raggiunto: %u",
+                            (unsigned)MAX_MAPPINGS
+                        );
 
-                rm.device =
-                    &device;
+                        return;
+                    }
 
-                rm.mapping =
-                    &device.mappings[m];
+                    RuntimeMapping& rm =
+                        mappings[mappingCount];
 
-                rm.lastRaw = 0;
-                rm.dirty = false;
-                rm.initialized = false;
+                    rm.clientIndex =
+                        (uint8_t)c;
 
-                ++mappingCount;
+                    rm.client =
+                        &client;
+
+                    rm.device =
+                        &device;
+
+                    rm.mapping =
+                        &mapping;
+
+                    rm.lastRaw = 0;
+                    rm.dirty = false;
+                    rm.initialized = false;
+
+                    ++mappingCount;
+                }
             }
         }
     }
@@ -1176,7 +1390,17 @@ private:
                 if (!rc.mqtt)
                     break;
 
-                if (!rc.mqtt->connected())
+                /*
+                 * PublishDirty() non deve tentare connessioni.
+                 *
+                 * Se il client è offline,
+                 * il mapping resta dirty e verrà riprovato
+                 * quando MQTT tornerà connesso.
+                 */
+                //if (!rc.mqtt->connected())
+                //    break;
+                // Se si usa connected, con 2 client si pianta
+                if (rc.mqtt->state() != 0)
                     break;
 
                 if (
@@ -1230,7 +1454,6 @@ private:
                 FrontendConfig::MQTT::Mapping::Direction::READ_WRITE;
     }
 };
-
 
 // ============================================================
 // STATIC MEMBERS
@@ -1350,6 +1573,7 @@ public:
 class HMIEngine
 {
 public:
+
     // ========================================================
     // CONFIG
     // ========================================================
@@ -1366,11 +1590,23 @@ public:
         }
     };
 
-    void PushEvent(const EventManager::Event& event)
+
+    // ========================================================
+    // EVENT -> HMI
+    // ========================================================
+
+    void PushEvent(
+        const EventManager::Event& event)
     {
+        if (!_config.enabled)
+            return;
+
+        if (!_running)
+            return;
+
         for (uint8_t client = 0;
-            client < _maxClients;
-            ++client)
+             client < _maxClients;
+             ++client)
         {
             if (!_context.clients[client] ||
                 !_context.clients[client].connected())
@@ -1383,9 +1619,11 @@ public:
             }
 
             const uint16_t value =
-                static_cast<uint16_t>(event.value);
+                static_cast<uint16_t>(
+                    event.value
+                );
 
-            bool ok =
+            const bool ok =
                 _context.modbusServers[client]
                     .holdingRegisterWrite(
                         event.area,
@@ -1406,9 +1644,12 @@ public:
             }
 
             // Allinea la shadow al valore scritto internamente.
-            _registerShadow[client][event.area] = value;
+            _registerShadow[client][event.area] =
+                value;
         }
     }
+
+
 private:
 
     // ========================================================
@@ -1423,28 +1664,72 @@ private:
 
     bool _loopEnabled = false;
 
+    bool _running = false;
+
+
     struct PendingHMIUpdate
     {
         int area;
         long value;
         uint8_t client;
     };
-    std::vector<PendingHMIUpdate> pendingUpdates;
 
-    // Stato ultimo valore noto dei Holding Register per ogni client.
-    // Serve per distinguere una WRITE reale del client da una
-    // scrittura effettuata internamente da PushEvent().
+
+    std::vector<PendingHMIUpdate>
+        pendingUpdates;
+
+
+    // Stato ultimo valore noto dei Holding Register
+    // per ogni client.
     uint16_t _registerCount = 0;
-    std::vector<std::vector<uint16_t>> _registerShadow;
+
+    std::vector<
+        std::vector<uint16_t>
+    > _registerShadow;
+
 
     uint8_t _eventSource = 0;
+
+
+    // ========================================================
+    // NETWORK MANAGER
+    // ========================================================
+
+    NetworkManager* _networkManager = nullptr;
+
+
+    // ========================================================
+    // SOCKET OWNER
+    //
+    // UN SOLO owner per tutto HMI.
+    //
+    // Viene creato esternamente da NetworkManager::
+    // registerProtocol().
+    // ========================================================
+
+    SocketManager::OwnerId _socketOwner = -1;
+
+
+    // ========================================================
+    // SOCKET RESOURCE IDS
+    //
+    // Gli owner non sono stringhe.
+    //
+    // Le differenti risorse HMI vengono distinte tramite
+    // resourceId.
+    // ========================================================
+
+    static constexpr int SOCKET_RESOURCE_SERVER = 0;
+
+    static constexpr int SOCKET_RESOURCE_MODBUS_BASE = 1000;
+
+    static constexpr int SOCKET_RESOURCE_CLIENT_BASE = 2000;
+
 
     // ========================================================
     // NETWORK CONTEXT
     //
-    // Questo è il contesto PRIVATO dell'HMI.
-    //
-    // Non appartiene a NetworkContext.
+    // Contesto PRIVATO HMI.
     // ========================================================
 
     struct Context
@@ -1461,16 +1746,251 @@ private:
 
 
     // ========================================================
+    // SOCKET RESOURCE ID
+    // ========================================================
+
+    static int modbusResourceId(
+        uint8_t index)
+    {
+        return
+            SOCKET_RESOURCE_MODBUS_BASE +
+            static_cast<int>(index);
+    }
+
+
+    static int clientResourceId(
+        uint8_t index)
+    {
+        return
+            SOCKET_RESOURCE_CLIENT_BASE +
+            static_cast<int>(index);
+    }
+
+
+    // ========================================================
+    // SOCKET ACQUIRE
+    // ========================================================
+
+    bool acquireServerSocket()
+    {
+        if (!_networkManager)
+        {
+            LOG_EF(
+                "HMIEngine",
+                "NetworkManager unavailable"
+            );
+
+            return false;
+        }
+
+        if (_socketOwner < 0)
+        {
+            LOG_EF(
+                "HMIEngine",
+                "HMI socket owner unavailable"
+            );
+
+            return false;
+        }
+
+        const int slot =
+            _networkManager->sockets().acquire(
+                _socketOwner,
+                SOCKET_RESOURCE_SERVER,
+                SocketManager::SocketKind::TCP_SERVER
+            );
+
+        if (slot < 0)
+        {
+            LOG_WF(
+                "HMIEngine",
+                "HMI TCP listener socket unavailable"
+            );
+
+            return false;
+        }
+
+        return true;
+    }
+
+
+    bool acquireModbusSocket(
+        uint8_t index)
+    {
+        if (!_networkManager)
+        {
+            LOG_EF(
+                "HMIEngine",
+                "NetworkManager unavailable"
+            );
+
+            return false;
+        }
+
+        if (_socketOwner < 0)
+        {
+            LOG_EF(
+                "HMIEngine",
+                "HMI socket owner unavailable"
+            );
+
+            return false;
+        }
+
+        const int resourceId =
+            modbusResourceId(index);
+
+        const int slot =
+            _networkManager->sockets().acquire(
+                _socketOwner,
+                resourceId,
+                SocketManager::SocketKind::TCP_SERVER
+            );
+
+        if (slot < 0)
+        {
+            LOG_WF(
+                "HMIEngine",
+                "HMI Modbus server socket unavailable: index=%u",
+                index
+            );
+
+            return false;
+        }
+
+        return true;
+    }
+
+
+    bool acquireClientSocket(
+        uint8_t index)
+    {
+        if (!_networkManager)
+        {
+            LOG_EF(
+                "HMIEngine",
+                "NetworkManager unavailable"
+            );
+
+            return false;
+        }
+
+        if (_socketOwner < 0)
+        {
+            LOG_EF(
+                "HMIEngine",
+                "HMI socket owner unavailable"
+            );
+
+            return false;
+        }
+
+        const int resourceId =
+            clientResourceId(index);
+
+        const int slot =
+            _networkManager->sockets().acquire(
+                _socketOwner,
+                resourceId,
+                SocketManager::SocketKind::TCP_CLIENT
+            );
+
+        if (slot < 0)
+        {
+            LOG_WF(
+                "HMIEngine",
+                "HMI client socket unavailable: client=%u",
+                index
+            );
+
+            return false;
+        }
+
+        return true;
+    }
+
+
+    // ========================================================
+    // SOCKET RELEASE
+    // ========================================================
+
+    void releaseServerSocket()
+    {
+        if (!_networkManager)
+            return;
+
+        if (_socketOwner < 0)
+            return;
+
+        _networkManager->sockets().release(
+            _socketOwner,
+            SOCKET_RESOURCE_SERVER,
+            SocketManager::SocketKind::TCP_SERVER
+        );
+    }
+
+
+    void releaseModbusSocket(
+        uint8_t index)
+    {
+        if (!_networkManager)
+            return;
+
+        if (_socketOwner < 0)
+            return;
+
+        _networkManager->sockets().release(
+            _socketOwner,
+            modbusResourceId(index),
+            SocketManager::SocketKind::TCP_SERVER
+        );
+    }
+
+
+    void releaseClientSocket(
+        uint8_t index)
+    {
+        if (!_networkManager)
+            return;
+
+        if (_socketOwner < 0)
+            return;
+
+        _networkManager->sockets().release(
+            _socketOwner,
+            clientResourceId(index),
+            SocketManager::SocketKind::TCP_CLIENT
+        );
+    }
+
+
+    // ========================================================
+    // RELEASE ALL HMI SOCKETS
+    // ========================================================
+
+    void releaseAllSockets()
+    {
+        if (!_networkManager)
+            return;
+
+        if (_socketOwner < 0)
+            return;
+
+        _networkManager->sockets().releaseOwner(
+            _socketOwner
+        );
+    }
+
+
+    // ========================================================
     // SETUP SERVER
     // ========================================================
 
-    void SetupServer()
+    bool SetupServer()
     {
         _activeClients = 0;
 
-
         _context.clients.clear();
-
         _context.modbusServers.clear();
 
 
@@ -1488,8 +2008,19 @@ private:
 
 
         // ----------------------------------------------------
-        // TCP SERVER
+        // HMI TCP LISTENER
         // ----------------------------------------------------
+
+        if (!acquireServerSocket())
+        {
+            LOG_WF(
+                "HMIEngine",
+                "Unable to reserve HMI TCP listener socket"
+            );
+
+            return false;
+        }
+
 
         _context.server.begin(
             _config.port
@@ -1497,13 +2028,50 @@ private:
 
 
         // ----------------------------------------------------
-        // MODBUS TCP SERVER
+        // MODBUS TCP SERVERS
         // ----------------------------------------------------
+
+        uint8_t initializedServers = 0;
 
         for (uint8_t i = 0;
              i < _maxClients;
              ++i)
         {
+            // -----------------------------------------------
+            // Reserve socket
+            // -----------------------------------------------
+
+            if (!acquireModbusSocket(i))
+            {
+                LOG_WF(
+                    "HMIEngine",
+                    "Unable to reserve Modbus server socket: index=%u",
+                    i
+                );
+
+                // cleanup già inizializzati
+                for (uint8_t j = 0;
+                     j < initializedServers;
+                     ++j)
+                {
+                    _context.modbusServers[j].end();
+
+                    releaseModbusSocket(j);
+                }
+
+
+                _context.server.end();
+
+                releaseServerSocket();
+
+                return false;
+            }
+
+
+            // -----------------------------------------------
+            // Start Modbus server
+            // -----------------------------------------------
+
             if (!_context.modbusServers[i].begin())
             {
                 LOG_EF(
@@ -1512,8 +2080,26 @@ private:
                     i
                 );
 
-                while (true)
-                    delay(100);
+
+                releaseModbusSocket(i);
+
+
+                // cleanup server precedenti
+                for (uint8_t j = 0;
+                     j < initializedServers;
+                     ++j)
+                {
+                    _context.modbusServers[j].end();
+
+                    releaseModbusSocket(j);
+                }
+
+
+                _context.server.end();
+
+                releaseServerSocket();
+
+                return false;
             }
 
 
@@ -1522,6 +2108,9 @@ private:
                     0x00,
                     _registerCount
                 );
+
+
+            ++initializedServers;
         }
 
 
@@ -1531,6 +2120,15 @@ private:
             _config.port,
             _maxClients
         );
+
+
+        if (_networkManager)
+        {
+            _networkManager->sockets().dump();
+        }
+
+
+        return true;
     }
 
 
@@ -1545,8 +2143,8 @@ private:
         // ====================================================
 
         for (uint8_t i = 0;
-             i < _maxClients;
-             ++i)
+            i < _maxClients;
+            ++i)
         {
             if (_context.clients[i] &&
                 !_context.clients[i].connected())
@@ -1557,9 +2155,14 @@ private:
                     i
                 );
 
-
                 _context.clients[i].stop();
 
+                // ------------------------------------------------
+                // Il SocketManager gestisce internamente il fatto
+                // che la risorsa possa essere/non essere tracciata.
+                // ------------------------------------------------
+
+                releaseClientSocket(i);
 
                 if (_activeClients > 0)
                     --_activeClients;
@@ -1574,19 +2177,32 @@ private:
         EthernetClient newClient =
             _context.server.accept();
 
-
         if (!newClient)
             return;
 
 
+        // ====================================================
+        // 3. FIND FREE LOGICAL SLOT
+        // ====================================================
+
         for (uint8_t i = 0;
-             i < _maxClients;
-             ++i)
+            i < _maxClients;
+            ++i)
         {
             if (!_context.clients[i] ||
                 !_context.clients[i].connected())
             {
-                _context.clients[i] = newClient;
+                // ------------------------------------------------
+                // Il client TCP è già stato accettato.
+                //
+                // Il SocketManager è solo tracking/diagnostica:
+                // se siamo a 4/4 NON chiudiamo il client.
+                // ------------------------------------------------
+
+                acquireClientSocket(i);
+
+                _context.clients[i] =
+                    newClient;
 
 
                 _context.modbusServers[i].accept(
@@ -1611,7 +2227,7 @@ private:
 
 
         // ====================================================
-        // 3. NO SLOT
+        // 4. NO LOGICAL SLOT
         // ====================================================
 
         LOG_WF(
@@ -1619,10 +2235,8 @@ private:
             "HMI connection rejected: slots full"
         );
 
-
         newClient.stop();
     }
-
 
     // ========================================================
     // POLL
@@ -1642,31 +2256,26 @@ private:
         }
     }
 
+
     // ========================================================
     // HMI -> BUFFER
-    //
-    // Holding Register
-    //       ↓
-    // FromPanel
-    //       ↓
-    // Field
-    //       ↓
-    // ToPanel
     // ========================================================
+
     bool consumePendingUpdate(
         uint8_t client,
         int area,
         long value)
     {
         for (auto it = pendingUpdates.begin();
-            it != pendingUpdates.end();
-            ++it)
+             it != pendingUpdates.end();
+             ++it)
         {
             if (it->client == client &&
                 it->area == area &&
                 it->value == value)
             {
                 pendingUpdates.erase(it);
+
                 return true;
             }
         }
@@ -1674,66 +2283,68 @@ private:
         return false;
     }
 
+
     void SyncHMIToBuffer(
         DomoManager& manager,
         unsigned long now)
     {
         (void)now;
 
-        // ============================================================
-        // HMI -> EVENT MANAGER
-        //
-        // Holding Register
-        //      ↓
-        // confronto con shadow
-        //      ↓
-        // modifica reale HMI
-        //      ↓
-        // EventManager.push()
-        // ============================================================
 
         if (!manager.getEventManager().size())
             return;
 
+
         for (uint8_t client = 0;
-            client < _maxClients;
-            ++client)
+             client < _maxClients;
+             ++client)
         {
             if (!_context.clients[client] ||
                 !_context.clients[client].connected())
                 continue;
 
+
             auto& server =
                 _context.modbusServers[client];
 
+
             for (int area = 0;
-                area < _registerCount;
-                ++area)
+                 area < _registerCount;
+                 ++area)
             {
                 const uint16_t value =
-                    server.holdingRegisterRead(area);
+                    server.holdingRegisterRead(
+                        area
+                    );
 
-                // ----------------------------------------------------
-                // Nessuna variazione rispetto all'ultimo stato noto
-                // ----------------------------------------------------
 
-                if (_registerShadow[client][area] == value)
+                // ------------------------------------------------
+                // Nessuna variazione
+                // ------------------------------------------------
+
+                if (_registerShadow[client][area] ==
+                    value)
+                {
                     continue;
+                }
 
-                // ----------------------------------------------------
-                // Il client HMI ha realmente modificato il registro
-                // ----------------------------------------------------
 
-                _registerShadow[client][area] = value;
+                // ------------------------------------------------
+                // Modifica reale dal pannello HMI
+                // ------------------------------------------------
 
-                // ----------------------------------------------------
+                _registerShadow[client][area] =
+                    value;
+
+
+                // ------------------------------------------------
                 // HMI -> EventManager
-                // ----------------------------------------------------
+                // ------------------------------------------------
 
                 manager.getEventManager().push(
                     area,
                     value,
-                    _eventSource 
+                    _eventSource
                 );
             }
         }
@@ -1751,6 +2362,11 @@ public:
           _maxClients(0),
           _activeClients(0),
           _loopEnabled(false),
+          _running(false),
+          _registerCount(0),
+          _eventSource(0),
+          _networkManager(nullptr),
+          _socketOwner(-1),
           _context()
     {
     }
@@ -1759,24 +2375,32 @@ public:
     // ========================================================
     // SETUP
     //
-    // cfg:
-    //     cfg.domoManager.hmi
+    // networkManager:
+    //     NetworkManager proprietario del SocketManager.
     //
-    // protocol:
-    //     identificativo protocollo.
-    //
-    // maxClients:
-    //     numero dinamico di client HMI.
+    // socketOwner:
+    //     OwnerId creato da NetworkManager::registerProtocol().
     // ========================================================
 
     void Setup(
         const DomoManagerConfig::HMI& cfg,
+        NetworkManager& networkManager,
+        SocketManager::OwnerId socketOwner,
         NetworkManager::ProtocolId protocol,
         uint8_t maxClients,
         uint16_t registerCount,
         uint8_t eventSource)
     {
+        _networkManager =
+            &networkManager;
+
+
+        _socketOwner =
+            socketOwner;
+
+
         (void)protocol;
+
 
         // ----------------------------------------------------
         // Configuration
@@ -1790,20 +2414,17 @@ public:
             cfg.port;
 
 
-        _maxClients = maxClients;
-        _registerCount = registerCount;
-        _eventSource   = eventSource;
+        _maxClients =
+            maxClients;
 
-        _registerShadow.clear();
-        _registerShadow.resize(_maxClients);
 
-        for (uint8_t client = 0; client < _maxClients; ++client)
-        {
-            _registerShadow[client].assign(
-                _registerCount,
-                0
-            );
-        }
+        _registerCount =
+            registerCount;
+
+
+        _eventSource =
+            eventSource;
+
 
         _activeClients =
             0;
@@ -1811,6 +2432,32 @@ public:
 
         _loopEnabled =
             false;
+
+
+        _running =
+            false;
+
+
+        // ----------------------------------------------------
+        // Shadow
+        // ----------------------------------------------------
+
+        _registerShadow.clear();
+
+        _registerShadow.resize(
+            _maxClients
+        );
+
+
+        for (uint8_t client = 0;
+             client < _maxClients;
+             ++client)
+        {
+            _registerShadow[client].assign(
+                _registerCount,
+                0
+            );
+        }
 
 
         // ----------------------------------------------------
@@ -1834,6 +2481,26 @@ public:
 
         if (_maxClients == 0)
         {
+            LOG_WF(
+                "HMIEngine",
+                "HMI enabled but maxClients=0"
+            );
+
+            return;
+        }
+
+
+        // ----------------------------------------------------
+        // Validate socket owner
+        // ----------------------------------------------------
+
+        if (_socketOwner < 0)
+        {
+            LOG_EF(
+                "HMIEngine",
+                "HMI socket owner is invalid"
+            );
+
             return;
         }
 
@@ -1842,27 +2509,34 @@ public:
         // Start server
         // ----------------------------------------------------
 
-        SetupServer();
+        _running =
+            SetupServer();
+
+
+        if (!_running)
+        {
+            LOG_WF(
+                "HMIEngine",
+                "HMI network resources unavailable - engine remains disabled"
+            );
+
+            return;
+        }
     }
 
 
     // ========================================================
     // LOOP ENABLE
-    //
-    // Il networking HMI rimane fermo fino a quando
-    // il frontend decide di abilitarlo.
-    //
-    // Esempio:
-    //
-    // HMIEngine::SetLoopEnabled(
-    //     Manager->getPowerOnCycleCompleted()
-    // );
     // ========================================================
 
     void SetLoopEnabled(
         bool enabled)
     {
         if (!_config.enabled)
+            return;
+
+
+        if (!_running)
             return;
 
 
@@ -1886,13 +2560,6 @@ public:
 
     // ========================================================
     // NETWORK LOOP
-    //
-    // Solo:
-    //   cleanup
-    //   accept
-    //   poll
-    //
-    // Nessuna logica Buffer.
     // ========================================================
 
     void ProcessNetwork(
@@ -1904,6 +2571,10 @@ public:
 
 
         if (!_config.enabled)
+            return;
+
+
+        if (!_running)
             return;
 
 
@@ -1919,20 +2590,28 @@ public:
 
     // ========================================================
     // SYNC
-    //
-    // HMI -> Buffer
-    // Buffer -> HMI
     // ========================================================
 
-    void Sync(DomoManager& manager, unsigned long now)
+    void Sync(
+        DomoManager& manager,
+        unsigned long now)
     {
         if (!_config.enabled)
             return;
 
+
+        if (!_running)
+            return;
+
+
         if (!_loopEnabled)
             return;
 
-        SyncHMIToBuffer(manager, now);
+
+        SyncHMIToBuffer(
+            manager,
+            now
+        );
     }
 
 
@@ -1943,6 +2622,12 @@ public:
     bool enabled() const
     {
         return _config.enabled;
+    }
+
+
+    bool running() const
+    {
+        return _running;
     }
 
 
@@ -1968,7 +2653,14 @@ public:
     {
         return _maxClients;
     }
+
+
+    SocketManager::OwnerId socketOwner() const
+    {
+        return _socketOwner;
+    }
 };
+
 
 class SecuritySensorEngine {
 private:
@@ -2088,66 +2780,6 @@ public:
             SecurityOrchestrator::Diagnostic::FullReport();
         }
     };
-};
-
-class FrontendNetwork
-{
-public:
-
-    struct ModbusTCP
-    {
-        EthernetClient client;
-        ModbusTCPClient modbus{client};
-    };
-
-    struct MQTT
-    {
-        EthernetClient client;
-        PubSubClient pubSub{client};
-    };
-
-
-    explicit FrontendNetwork(size_t mqttClientCount)
-        : _mqttClientCount(mqttClientCount),
-          _mqtt(new MQTT[mqttClientCount])
-    {
-    }
-
-
-    ~FrontendNetwork()
-    {
-        delete[] _mqtt;
-    }
-
-
-    FrontendNetwork(const FrontendNetwork&) = delete;
-    FrontendNetwork& operator=(const FrontendNetwork&) = delete;
-
-
-    ModbusTCP& modbusTCP()
-    {
-        return _modbusTCP;
-    }
-
-
-    MQTT& mqtt(size_t index)
-    {
-        return _mqtt[index];
-    }
-
-
-    size_t mqttClientCount() const
-    {
-        return _mqttClientCount;
-    }
-
-
-private:
-
-    ModbusTCP _modbusTCP;
-
-    size_t _mqttClientCount;
-    MQTT* _mqtt;
 };
 
 class TaskEngineBase
@@ -2404,15 +3036,18 @@ private:
         // --------------------------------------------------------
         // WRITE SECURITY STATUS
         // --------------------------------------------------------
+        const auto& cfg =
+            TaskEngineOrchestrator::getCfg();
+        if(cfg.security.statusArea!=-1) {
+            auto& sys =
+                SecurityOrchestrator::getSystem();
 
-        auto& sys =
-            SecurityOrchestrator::getSystem();
 
-
-        manager.forceInternalEvent(
-            AREA_SECURITY_STATUS,
-            sys.getBitmask()
-        );
+            manager.forceInternalEvent(
+                cfg.security.statusArea,
+                sys.getBitmask()
+            );
+        }
     }
 
     // ============================================================

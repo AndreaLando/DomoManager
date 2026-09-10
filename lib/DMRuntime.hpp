@@ -24,6 +24,7 @@
 
 #include "DMAutomationBuilder.hpp"
 #include "DMHStandby.hpp"
+
 #include "DMDeclares.h"
 
 #define LOG_LEVEL LogLevel::INFO
@@ -740,6 +741,7 @@ public:
         logic.getModbus().setFieldChangedCallback(OnModbusFieldChanged);
 
         automation.attachScheduler(&scheduler, &buffer, &averages, &timeManager);
+
         return true;
     }
 

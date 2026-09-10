@@ -24,9 +24,979 @@
 #include "DMSetup.hpp"
 #include "DMDeclares.h"
 #include "DMWiredSensors.hpp"
+#include "DMIntrospection.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
+
+// ============================================================
+// DOMO MQTT CONFIG BUILDER
+// ============================================================
+//
+// Costruisce la struttura runtime utilizzata esclusivamente
+// dal frontend Home Assistant.
+//
+// NON costruisce:
+//     FrontendConfig::MQTT
+//     Client
+//     Device
+//     Mapping
+//
+// Il client MQTT resta quello definito staticamente in:
+//     FrontendConfig::MQTT::Client
+//
+// Il Builder produce invece un registry di entity HA Discovery.
+//
+// Viene eseguito una sola volta durante il setup, dopo:
+//     DomoIntrospection
+//     DomoSemanticResolver
+//
+// Non usa:
+//     std::vector
+//     new
+//     delete
+//
+// Tutto lo storage è statico.
+//
+// ============================================================
+
+class DomoMQTTConfigBuilder
+{
+public:
+
+    // ========================================================
+    // LIMITI
+    // ========================================================
+
+    static constexpr size_t MAX_ENTITIES = 128;
+
+
+    // ========================================================
+    // DISCOVERY ENTITY
+    // ========================================================
+
+    struct HADiscovery
+    {
+        // ----------------------------------------------------
+        // DOMO
+        // ----------------------------------------------------
+
+        int area = -1;
+
+        DomoIntrospection::EntityKind kind =
+            DomoIntrospection::EntityKind::UNKNOWN;
+
+
+        // ----------------------------------------------------
+        // DEVICE
+        // ----------------------------------------------------
+
+        const char* deviceId = nullptr;
+
+        const char* deviceName = nullptr;
+
+
+        // ----------------------------------------------------
+        // ENTITY
+        // ----------------------------------------------------
+
+        const char* name = nullptr;
+
+        const char* uniqueId = nullptr;
+
+        const char* field = nullptr;
+
+
+        // ----------------------------------------------------
+        // HOME ASSISTANT
+        // ----------------------------------------------------
+
+        const char* component = nullptr;
+
+        const char* unit = nullptr;
+
+        const char* deviceClass = nullptr;
+
+        const char* stateClass = nullptr;
+
+
+        // ----------------------------------------------------
+        // ACCESS
+        // ----------------------------------------------------
+
+        bool readable = false;
+
+        bool writable = false;
+
+
+        // ----------------------------------------------------
+        // SCALE
+        // ----------------------------------------------------
+
+        float scale = 1.0f;
+
+
+        // ----------------------------------------------------
+        // VALID
+        // ----------------------------------------------------
+
+        bool valid = false;
+    };
+
+
+private:
+
+    // ========================================================
+    // STORAGE
+    // ========================================================
+
+    struct Storage
+    {
+        HADiscovery entities[
+            MAX_ENTITIES
+        ];
+
+        char deviceIds[
+            MAX_ENTITIES
+        ][
+            32
+        ];
+
+        char deviceNames[
+            MAX_ENTITIES
+        ][
+            64
+        ];
+
+        char names[
+            MAX_ENTITIES
+        ][
+            64
+        ];
+
+        char uniqueIds[
+            MAX_ENTITIES
+        ][
+            96
+        ];
+
+        char fields[
+            MAX_ENTITIES
+        ][
+            64
+        ];
+
+        size_t count = 0;
+
+        bool initialized = false;
+    };
+
+
+    // ========================================================
+    // STATIC STORAGE
+    // ========================================================
+
+    static Storage& getStorage()
+    {
+        static Storage storage{};
+        return storage;
+    }
+
+
+public:
+
+    // ========================================================
+    // BUILD
+    // ========================================================
+
+    static bool Build(
+        const DomoIntrospection& info
+    )
+    {
+        Storage& s =
+            getStorage();
+
+
+        // ====================================================
+        // RESET
+        // ====================================================
+
+        Reset();
+
+
+        // ====================================================
+        // ENTITY SCAN
+        // ====================================================
+
+        for (
+            size_t i = 0;
+            i < info.entityCount();
+            ++i
+        )
+        {
+            const DomoIntrospection::Entity* entity =
+                info.getEntity(i);
+
+
+            if (!entity)
+                continue;
+
+
+            // ------------------------------------------------
+            // IMPLEMENTATION ONLY
+            // ------------------------------------------------
+
+            if (entity->implementationOnly)
+                continue;
+
+
+            // ------------------------------------------------
+            // UNKNOWN
+            // ------------------------------------------------
+
+            if (
+                entity->kind ==
+                DomoIntrospection::EntityKind::UNKNOWN
+            )
+            {
+                continue;
+            }
+
+
+            // ------------------------------------------------
+            // CAPACITY
+            // ------------------------------------------------
+
+            if (
+                s.count >= MAX_ENTITIES
+            )
+            {
+                LOG_WF(
+                    "MQTT",
+                    "HA Builder: "
+                    "MAX_ENTITIES=%u raggiunto",
+                    (unsigned)MAX_ENTITIES
+                );
+
+                break;
+            }
+
+
+            // ------------------------------------------------
+            // ADD
+            // ------------------------------------------------
+
+            AddEntity(
+                *entity,
+                info
+            );
+        }
+
+
+        s.initialized =
+            true;
+
+
+        // ====================================================
+        // DIAGNOSTICS
+        // ====================================================
+
+        LOG_IF(
+            "MQTT",
+            "HA Discovery Builder completato: "
+            "entities=%u",
+            (unsigned)s.count
+        );
+
+
+        Dump();
+
+
+        return true;
+    }
+
+
+    // ========================================================
+    // RESET
+    // ========================================================
+
+    static void Reset()
+    {
+        Storage& s =
+            getStorage();
+
+
+        s.count =
+            0;
+
+        s.initialized =
+            false;
+
+
+        for (
+            size_t i = 0;
+            i < MAX_ENTITIES;
+            ++i
+        )
+        {
+            s.entities[i] =
+                HADiscovery{};
+
+
+            s.deviceIds[i][0] =
+                '\0';
+
+            s.deviceNames[i][0] =
+                '\0';
+
+            s.names[i][0] =
+                '\0';
+
+            s.uniqueIds[i][0] =
+                '\0';
+
+            s.fields[i][0] =
+                '\0';
+        }
+    }
+
+
+    // ========================================================
+    // STATUS
+    // ========================================================
+
+    static bool IsInitialized()
+    {
+        return getStorage().initialized;
+    }
+
+
+    // ========================================================
+    // COUNT
+    // ========================================================
+
+    static size_t getCount()
+    {
+        return getStorage().count;
+    }
+
+
+    // ========================================================
+    // ENTITY
+    // ========================================================
+
+    static const HADiscovery* get(
+        size_t index
+    )
+    {
+        const Storage& s =
+            getStorage();
+
+
+        if (index >= s.count)
+            return nullptr;
+
+
+        return &s.entities[index];
+    }
+
+
+private:
+
+    // ========================================================
+    // ADD ENTITY
+    // ========================================================
+
+    static void AddEntity(
+        const DomoIntrospection::Entity& entity,
+        const DomoIntrospection& info
+    )
+    {
+        Storage& s =
+            getStorage();
+
+
+        const size_t index =
+            s.count;
+
+
+        HADiscovery& out =
+            s.entities[index];
+
+
+        // ====================================================
+        // AREA
+        // ====================================================
+
+        out.area =
+            entity.area;
+
+
+        // ====================================================
+        // KIND
+        // ====================================================
+
+        out.kind =
+            entity.kind;
+
+
+        // ====================================================
+        // ACCESS
+        // ====================================================
+
+        out.readable =
+            entity.readable;
+
+        out.writable =
+            entity.writable;
+
+
+        // ====================================================
+        // SCALE
+        // ====================================================
+
+        out.scale =
+            entity.scale;
+
+
+        // ====================================================
+        // DEVICE
+        // ====================================================
+
+        BuildDevice(
+            index,
+            entity,
+            info
+        );
+
+
+        out.deviceId =
+            s.deviceIds[index];
+
+        out.deviceName =
+            s.deviceNames[index];
+
+
+        // ====================================================
+        // FIELD
+        // ====================================================
+
+        BuildField(
+            index,
+            entity,
+            info
+        );
+
+
+        out.field =
+            s.fields[index];
+
+
+        // ====================================================
+        // NAME
+        // ====================================================
+
+        BuildName(
+            index,
+            entity,
+            info
+        );
+
+
+        out.name =
+            s.names[index];
+
+
+        // ====================================================
+        // UNIQUE ID
+        // ====================================================
+
+        snprintf(
+            s.uniqueIds[index],
+            sizeof(
+                s.uniqueIds[index]
+            ),
+            "domo_%d_%s",
+            entity.area,
+            s.fields[index]
+        );
+
+
+        out.uniqueId =
+            s.uniqueIds[index];
+
+
+        // ====================================================
+        // HA COMPONENT
+        // ====================================================
+
+        out.component =
+            GetComponent(
+                entity.kind
+            );
+
+
+        // ====================================================
+        // METADATA
+        // ====================================================
+
+        out.unit =
+            entity.unit;
+
+        out.deviceClass =
+            entity.deviceClass;
+
+        out.stateClass =
+            entity.stateClass;
+
+
+        // ====================================================
+        // VALID
+        // ====================================================
+
+        out.valid =
+            (
+                out.component != nullptr &&
+                out.field != nullptr &&
+                out.field[0] != '\0'
+            );
+
+
+        if (!out.valid)
+        {
+            LOG_WF(
+                "MQTT",
+                "HA Builder: "
+                "entity area=%d non valida",
+                entity.area
+            );
+
+            return;
+        }
+
+
+        ++s.count;
+    }
+
+
+    // ========================================================
+    // DEVICE
+    // ========================================================
+
+    static void BuildDevice(
+        size_t index,
+        const DomoIntrospection::Entity& entity,
+        const DomoIntrospection& info
+    )
+    {
+        Storage& s =
+            getStorage();
+
+
+        // ----------------------------------------------------
+        // DEVICE ID
+        // ----------------------------------------------------
+
+        if (entity.deviceIndex >= 0)
+        {
+            snprintf(
+                s.deviceIds[index],
+                sizeof(
+                    s.deviceIds[index]
+                ),
+                "device_%d",
+                entity.deviceIndex
+            );
+        }
+        else
+        {
+            snprintf(
+                s.deviceIds[index],
+                sizeof(
+                    s.deviceIds[index]
+                ),
+                "domo"
+            );
+        }
+
+
+        // ----------------------------------------------------
+        // DEVICE NAME
+        // ----------------------------------------------------
+
+        const char* areaName =
+            info.getAreaName(
+                entity.area
+            );
+
+
+        if (areaName &&
+            *areaName)
+        {
+            snprintf(
+                s.deviceNames[index],
+                sizeof(
+                    s.deviceNames[index]
+                ),
+                "%s",
+                areaName
+            );
+        }
+        else if (
+            entity.deviceIndex >= 0
+        )
+        {
+            snprintf(
+                s.deviceNames[index],
+                sizeof(
+                    s.deviceNames[index]
+                ),
+                "Device %d",
+                entity.deviceIndex
+            );
+        }
+        else
+        {
+            snprintf(
+                s.deviceNames[index],
+                sizeof(
+                    s.deviceNames[index]
+                ),
+                "Domo"
+            );
+        }
+    }
+
+
+    // ========================================================
+    // FIELD
+    // ========================================================
+
+    static void BuildField(
+        size_t index,
+        const DomoIntrospection::Entity& entity,
+        const DomoIntrospection& info
+    )
+    {
+        Storage& s =
+            getStorage();
+
+
+        const char* areaName =
+            info.getAreaName(
+                entity.area
+            );
+
+
+        if (
+            areaName &&
+            *areaName
+        )
+        {
+            MakeSlug(
+                areaName,
+                s.fields[index],
+                sizeof(
+                    s.fields[index]
+                )
+            );
+        }
+
+
+        if (!s.fields[index][0])
+        {
+            snprintf(
+                s.fields[index],
+                sizeof(
+                    s.fields[index]
+                ),
+                "area_%d",
+                entity.area
+            );
+        }
+    }
+
+
+    // ========================================================
+    // NAME
+    // ========================================================
+
+    static void BuildName(
+        size_t index,
+        const DomoIntrospection::Entity& entity,
+        const DomoIntrospection& info
+    )
+    {
+        Storage& s =
+            getStorage();
+
+
+        const char* areaName =
+            info.getAreaName(
+                entity.area
+            );
+
+
+        if (
+            areaName &&
+            *areaName
+        )
+        {
+            snprintf(
+                s.names[index],
+                sizeof(
+                    s.names[index]
+                ),
+                "%s",
+                areaName
+            );
+
+            return;
+        }
+
+
+        snprintf(
+            s.names[index],
+            sizeof(
+                s.names[index]
+            ),
+            "Area %d",
+            entity.area
+        );
+    }
+
+
+    // ========================================================
+    // HA COMPONENT
+    // ========================================================
+
+    static const char* GetComponent(
+        DomoIntrospection::EntityKind kind
+    )
+    {
+        using EK =
+            DomoIntrospection::EntityKind;
+
+
+        switch (kind)
+        {
+            case EK::SENSOR:
+                return "sensor";
+
+
+            case EK::BINARY_SENSOR:
+                return "binary_sensor";
+
+
+            case EK::SWITCH:
+                return "switch";
+
+
+            case EK::LIGHT:
+                return "light";
+
+
+            case EK::COVER:
+                return "cover";
+
+
+            case EK::CLIMATE:
+                return "climate";
+
+
+            case EK::BUTTON:
+                return "button";
+
+
+            case EK::NUMBER:
+                return "number";
+
+
+            case EK::STATUS:
+                return "sensor";
+
+
+            default:
+                return nullptr;
+        }
+    }
+
+
+    // ========================================================
+    // SLUG
+    // ========================================================
+
+    static void MakeSlug(
+        const char* input,
+        char* output,
+        size_t outputSize
+    )
+    {
+        if (!output ||
+            outputSize == 0)
+        {
+            return;
+        }
+
+
+        output[0] =
+            '\0';
+
+
+        if (!input)
+            return;
+
+
+        size_t pos =
+            0;
+
+
+        bool lastUnderscore =
+            false;
+
+
+        while (
+            *input &&
+            pos + 1 < outputSize
+        )
+        {
+            unsigned char c =
+                (unsigned char)*input++;
+
+
+            if (
+                (c >= 'a' && c <= 'z') ||
+                (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9')
+            )
+            {
+                if (
+                    c >= 'A' &&
+                    c <= 'Z'
+                )
+                {
+                    c =
+                        (unsigned char)(
+                            c -
+                            'A' +
+                            'a'
+                        );
+                }
+
+
+                output[pos++] =
+                    (char)c;
+
+
+                lastUnderscore =
+                    false;
+            }
+            else
+            {
+                if (
+                    pos > 0 &&
+                    !lastUnderscore
+                )
+                {
+                    output[pos++] =
+                        '_';
+
+                    lastUnderscore =
+                        true;
+                }
+            }
+        }
+
+
+        while (
+            pos > 0 &&
+            output[pos - 1] == '_'
+        )
+        {
+            --pos;
+        }
+
+
+        output[pos] =
+            '\0';
+    }
+
+
+    // ========================================================
+    // DUMP
+    // ========================================================
+
+    static void Dump()
+    {
+        const Storage& s =
+            getStorage();
+
+
+        for (
+            size_t i = 0;
+            i < s.count;
+            ++i
+        )
+        {
+            const HADiscovery& e =
+                s.entities[i];
+
+
+            LOG_IF(
+                "MQTT",
+                "HA DISCOVERY[%u] "
+                "area=%d "
+                "kind=%u "
+                "component=%s "
+                "device=%s "
+                "name=%s "
+                "field=%s "
+                "unique_id=%s "
+                "readable=%u "
+                "writable=%u "
+                "unit=%s",
+
+                (unsigned)i,
+
+                e.area,
+
+                (unsigned)e.kind,
+
+                e.component
+                    ? e.component
+                    : "?",
+
+                e.deviceId
+                    ? e.deviceId
+                    : "?",
+
+                e.name
+                    ? e.name
+                    : "?",
+
+                e.field
+                    ? e.field
+                    : "?",
+
+                e.uniqueId
+                    ? e.uniqueId
+                    : "?",
+
+                e.readable
+                    ? 1
+                    : 0,
+
+                e.writable
+                    ? 1
+                    : 0,
+
+                e.unit
+                    ? e.unit
+                    : ""
+            );
+        }
+    }
+};
 
 
 class PowerSupervisorOrchestrator {
@@ -261,8 +1231,6 @@ static void Setup(const FrontendConfig::Power& cfg,
 
     LOG_IF("POWER", "PowerOrchestrator initialized (modular PowerManager)");
 }
-
-
 
     // ============================================================
     // LOOP (motore puro, backend modulare)

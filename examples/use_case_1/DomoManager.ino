@@ -89,35 +89,11 @@ static FrontendConfig mainConfig = [](){
     // CONFIG MQTT NEL FRONTEND
     // ============================================================================
 
-    c.mqtt.enabled = false;
-    c.mqtt.nodeId = "opta_domotica";
+    c.mqtt.enabled = true;
     c.mqtt.clients = MQTT_CLIENTS;
     c.mqtt.clientCount =
         sizeof(MQTT_CLIENTS) /
         sizeof(MQTT_CLIENTS[0]);
-
-    // ----------------------------------------------------------------------------
-    // Devices
-    // ----------------------------------------------------------------------------
-    //
-    // IMPORTANTE:
-    // al momento la struttura FrontendConfig proposta usa un unico array
-    // devices[]. Se manteniamo questa struttura, il passo successivo è aggiungere
-    // al Device il riferimento al client MQTT di appartenenza.
-    //
-    // Per ora mettiamo tutti i device in un unico array.
-    // ----------------------------------------------------------------------------
-
-    static const FrontendConfig::MQTT::Device MQTT_DEVICES[] =
-    {
-        MQTT_HA_Devices[0],
-        MQTT_SMHub_Devices[0]
-    };
-
-    c.mqtt.devices = MQTT_DEVICES;
-    c.mqtt.deviceCount =
-        sizeof(MQTT_DEVICES) /
-        sizeof(MQTT_DEVICES[0]);
 
     // --- DomoManager ---
     c.domoManager=domoConfig;
@@ -167,6 +143,7 @@ static FrontendConfig mainConfig = [](){
     c.security.enabled    = true;
     c.security.intervalMs = 1500;
     c.security.startupInhibitMs = 10000;
+    c.security.statusArea= AREA_SECURITY_STATUS;
     c.security.sensors = WIRED_SENSOR_CONFIG;
     c.security.count   = sizeof(WIRED_SENSOR_CONFIG) / sizeof(WIRED_SENSOR_CONFIG[0]);
 

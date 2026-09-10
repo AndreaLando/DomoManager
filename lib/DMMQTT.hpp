@@ -31,6 +31,48 @@
 
 class MQTT {
 public:
+    struct HADiscoveryEntity
+    {
+        int area = -1;
+
+        const char* deviceId = nullptr;
+        const char* deviceName = nullptr;
+
+        const char* name = nullptr;
+        const char* uniqueId = nullptr;
+        const char* field = nullptr;
+
+        const char* component = nullptr;
+
+        const char* unit = nullptr;
+        const char* deviceClass = nullptr;
+        const char* stateClass = nullptr;
+
+        bool readable = false;
+        bool writable = false;
+
+        float scale = 1.0f;
+
+        bool valid = false;
+    };
+
+    static size_t getMappingCount(
+        const FrontendConfig::MQTT::Device* device
+    )
+    {
+        if (!device)
+            return 0;
+
+        for (size_t i = 0;
+            i < FrontendConfig::MQTT::Device::MAX_MAPPINGS;
+            ++i)
+        {
+            if (!device->mappings[i].field)
+                return i;
+        }
+
+        return FrontendConfig::MQTT::Device::MAX_MAPPINGS;
+    }
 
     typedef void (*CommandCallback)(
         uint8_t clientIndex,
@@ -145,18 +187,11 @@ public:
                 if (!device)
                     continue;
 
-                /*
-                * Questo client gestisce solo i device
-                * assegnati a lui.
-                */
-                if (device->client != mqttInstance->getClientIndex())
-                    continue;
-
                 if (!device->mappings)
                     continue;
 
                 for (size_t m = 0;
-                    m < device->mappingCount;
+                    m < MQTT::getMappingCount(device);
                     ++m)
                 {
                     const FrontendConfig::MQTT::Mapping* mapping =
@@ -203,18 +238,11 @@ public:
                 if (!dev)
                     continue;
 
-                /*
-                * Ignora i device appartenenti ad altri
-                * client MQTT.
-                */
-                if (dev->client != mqttInstance->getClientIndex())
-                    continue;
-
                 if (!dev->mappings)
                     continue;
 
                 for (size_t m = 0;
-                    m < dev->mappingCount;
+                    m < MQTT::getMappingCount(dev);
                     ++m)
                 {
                     const FrontendConfig::MQTT::Mapping* map =
@@ -272,7 +300,7 @@ public:
                 out,
                 outSize,
                 "homeassistant/state/%s/%s",
-                mqttInstance->getNodeId(),
+                mqttInstance->getTopicPrefix(),
                 mapping->field
             );
         }
@@ -288,7 +316,7 @@ public:
                 out,
                 outSize,
                 "homeassistant/cmd/%s/%s",
-                mqttInstance->getNodeId(),
+                mqttInstance->getTopicPrefix(),
                 mapping->field
             );
         }
@@ -424,78 +452,108 @@ public:
             MQTT* mqttInstance
         )
         {
-            for (size_t d = 0;
-                d < mqttInstance->getDeviceCount();
-                ++d)
-            {
-                const FrontendConfig::MQTT::Device* device =
-                    mqttInstance->getDevice(d);
+            if (!mqttInstance)
+                return;
 
-                if (!device)
+            const size_t count =
+                mqttInstance->getHADiscoveryCount();
+
+            for (size_t i = 0;
+                i < count;
+                ++i)
+            {
+                const MQTT::HADiscoveryEntity* entity =
+                    mqttInstance->getHADiscovery(i);
+
+                if (!entity)
                     continue;
+
+                if (!entity->valid)
+                    continue;
+
+                char topic[180];
+                char payload[768];
+
+                const char* component =
+                    entity->component
+                        ? entity->component
+                        : "sensor";
+
+                const char* field =
+                    entity->field
+                        ? entity->field
+                        : "";
+
+                const char* uniqueId =
+                    entity->uniqueId
+                        ? entity->uniqueId
+                        : field;
+
+                const char* name =
+                    entity->name
+                        ? entity->name
+                        : field;
+
+                const char* prefix =
+                    mqttInstance->getTopicPrefix();
 
                 /*
-                * Discovery solo per i device assegnati
-                * a questo client MQTT.
+                * ====================================================
+                * DISCOVERY TOPIC
+                * ====================================================
                 */
-                if (device->client != mqttInstance->getClientIndex())
-                    continue;
 
-                if (!device->mappings)
-                    continue;
+                snprintf(
+                    topic,
+                    sizeof(topic),
+                    "homeassistant/%s/%s/config",
+                    component,
+                    uniqueId
+                );
 
-                for (size_t m = 0;
-                    m < device->mappingCount;
-                    ++m)
-                {
-                    const FrontendConfig::MQTT::Mapping* mapping =
-                        &device->mappings[m];
+                /*
+                * ====================================================
+                * BASE JSON
+                * ====================================================
+                */
 
-                    if (!mqttInstance->canWrite(mapping))
-                        continue;
+                snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{"
+                    "\"name\":\"%s\","
+                    "\"unique_id\":\"%s\","
+                    "\"state_topic\":\"homeassistant/state/%s/%s\""
+                    "}",
+                    name,
+                    uniqueId,
+                    prefix,
+                    field
+                );
 
-                    char topic[180];
-                    char payload[512];
+                /*
+                * ====================================================
+                * PUBLISH
+                * ====================================================
+                */
 
-                    const char* component = "sensor";
-
-                    if (
-                        mapping->type ==
-                        FrontendConfig::MQTT::Mapping::DataType::BOOL
-                    )
-                    {
-                        component = "binary_sensor";
-                    }
-
-                    snprintf(
-                        topic,
-                        sizeof(topic),
-                        "homeassistant/%s/%s_%s/config",
-                        component,
-                        mqttInstance->getNodeId(),
-                        mapping->field
-                    );
-
-                    snprintf(
-                        payload,
-                        sizeof(payload),
-                        "{\"name\":\"%s\",\"unique_id\":\"%s_%s\",\"state_topic\":\"homeassistant/state/%s/%s\",\"command_topic\":\"homeassistant/cmd/%s/%s\",\"value_template\":\"{{ value_json.%s }}\"}",
-                        mapping->field,
-                        mqttInstance->getNodeId(),
-                        mapping->field,
-                        mqttInstance->getNodeId(),
-                        mapping->field,
-                        mqttInstance->getNodeId(),
-                        mapping->field,
-                        mapping->field
-                    );
-
+                const bool ok =
                     mqttInstance->publishRaw(
                         topic,
                         payload,
                         true
                     );
-                }
+
+                LOG_IF(
+                    "MQTT",
+                    "HA DISCOVERY TX "
+                    "ok=%d "
+                    "topic=%s "
+                    "payload=%s",
+                    ok ? 1 : 0,
+                    topic,
+                    payload
+                );
             }
         }
     };
@@ -536,7 +594,7 @@ public:
                 topic,
                 sizeof(topic),
                 "%s/%s/set",
-                mqttInstance->getNodeId(),
+                mqttInstance->getTopicPrefix(),
                 device->id
             );
 
@@ -574,14 +632,11 @@ public:
                 if (!device)
                     continue;
 
-                if (device->client != mqttInstance->getClientIndex())
-                        continue;
-
                 bool needState = false;
                 bool needCommand = false;
 
                 for (size_t m = 0;
-                     m < device->mappingCount;
+                     m < MQTT::getMappingCount(device);
                      ++m)
                 {
                     const FrontendConfig::MQTT::Mapping* mapping =
@@ -602,7 +657,7 @@ public:
                         topic,
                         sizeof(topic),
                         "%s/%s",
-                        mqttInstance->getNodeId(),
+                        mqttInstance->getTopicPrefix(),
                         device->id
                     );
 
@@ -642,20 +697,13 @@ public:
                 if (!dev)
                     continue;
 
-                /*
-                * Questo client MQTT deve gestire
-                * solamente i device assegnati a lui.
-                */
-                if (dev->client != mqttInstance->getClientIndex())
-                    continue;
-
                 char stateTopic[180];
 
                 snprintf(
                     stateTopic,
                     sizeof(stateTopic),
                     "%s/%s",
-                    mqttInstance->getNodeId(),
+                    mqttInstance->getTopicPrefix(),
                     dev->id
                 );
 
@@ -663,7 +711,7 @@ public:
                     continue;
 
                 for (size_t m = 0;
-                     m < dev->mappingCount;
+                     m < MQTT::getMappingCount(dev);
                      ++m)
                 {
                     const FrontendConfig::MQTT::Mapping* map =
@@ -742,6 +790,7 @@ public:
             }
         }
 
+
         static bool extractJsonValue(
             const char* payload,
             size_t len,
@@ -750,6 +799,9 @@ public:
             long& value
         )
         {
+            if (!payload || !field || !mapping)
+                return false;
+
             char key[96];
 
             snprintf(
@@ -792,6 +844,13 @@ public:
 
             buf[n] = '\0';
 
+
+            /*
+            * ------------------------------------------------------------
+            * BOOL
+            * ------------------------------------------------------------
+            */
+
             if (mapping->type ==
                 FrontendConfig::MQTT::Mapping::DataType::BOOL)
             {
@@ -818,6 +877,13 @@ public:
                 return false;
             }
 
+
+            /*
+            * ------------------------------------------------------------
+            * FLOAT
+            * ------------------------------------------------------------
+            */
+
             if (mapping->type ==
                 FrontendConfig::MQTT::Mapping::DataType::FLOAT)
             {
@@ -831,7 +897,117 @@ public:
                 return true;
             }
 
+
+            /*
+            * ------------------------------------------------------------
+            * ENUM
+            * ------------------------------------------------------------
+            *
+            * Z2M invia una stringa:
+            *
+            *     {"action":"red"}
+            *
+            * Il Buffer riceve il valore numerico definito
+            * nella tabella mapping->enums.
+            */
+
+            if (mapping->type ==
+                FrontendConfig::MQTT::Mapping::DataType::ENUM)
+            {
+                if (mapping->enums.empty())
+                    return false;
+
+                /*
+                * Il valore JSON è normalmente:
+                *
+                *     "red"
+                *
+                * Rimuoviamo le virgolette.
+                */
+                const char* text = buf;
+
+                if (text[0] == '"')
+                    ++text;
+
+                char enumText[64];
+                size_t textLen = strlen(text);
+
+                if (
+                    textLen > 0 &&
+                    text[textLen - 1] == '"'
+                )
+                {
+                    --textLen;
+                }
+
+                if (textLen >= sizeof(enumText))
+                    textLen = sizeof(enumText) - 1;
+
+                memcpy(
+                    enumText,
+                    text,
+                    textLen
+                );
+
+                enumText[textLen] = '\0';
+
+
+                /*
+                * Cerca il testo nella tabella ENUM
+                * associata a questa Mapping.
+                */
+                for (
+                    size_t i = 0;
+                    i < mapping->enums.count;
+                    ++i
+                )
+                {
+                    const FrontendConfig::MQTT::EnumValue& enumValue =
+                        mapping->enums.data[i];
+
+                    if (!enumValue.text)
+                        continue;
+
+                    if (
+                        strcmp(
+                            enumValue.text,
+                            enumText
+                        ) == 0
+                    )
+                    {
+                        value = enumValue.value;
+
+                        LOG_IF(
+                            "MQTT",
+                            "Z2M ENUM field=%s text=%s value=%ld",
+                            mapping->field,
+                            enumText,
+                            value
+                        );
+
+                        return true;
+                    }
+                }
+
+                LOG_WF(
+                    "MQTT",
+                    "Z2M ENUM non riconosciuto field=%s text=%s",
+                    mapping->field,
+                    enumText
+                );
+
+                return false;
+            }
+
+
+            /*
+            * ------------------------------------------------------------
+            * STRING / INT
+            * ------------------------------------------------------------
+            */
+
             value = atol(buf);
+
             return true;
         }
     };
@@ -872,7 +1048,7 @@ public:
                 topic,
                 sizeof(topic),
                 "%s/%s/set",
-                mqttInstance->getNodeId(),
+                mqttInstance->getTopicPrefix(),
                 device->id
             );
 
@@ -914,7 +1090,7 @@ public:
                     continue;
 
                 for (size_t m = 0;
-                     m < device->mappingCount;
+                     m < MQTT::getMappingCount(device);
                      ++m)
                 {
                     const FrontendConfig::MQTT::Mapping* mapping =
@@ -929,7 +1105,7 @@ public:
                         topic,
                         sizeof(topic),
                         "%s/%s",
-                        mqttInstance->getNodeId(),
+                        mqttInstance->getTopicPrefix(),
                         device->id
                     );
 
@@ -965,7 +1141,7 @@ public:
                     continue;
 
                 for (size_t m = 0;
-                     m < dev->mappingCount;
+                     m < MQTT::getMappingCount(dev);
                      ++m)
                 {
                     const FrontendConfig::MQTT::Mapping* map =
@@ -980,7 +1156,7 @@ public:
                         expected,
                         sizeof(expected),
                         "%s/%s",
-                        mqttInstance->getNodeId(),
+                        mqttInstance->getTopicPrefix(),
                         dev->id
                     );
 
@@ -1010,7 +1186,6 @@ private:
     EthernetClient& eth;
     PubSubClient& mqtt;
 
-    const char* nodeId;
     uint8_t clientIndex;
 
     const FrontendConfig::MQTT::Client* clientCfg;
@@ -1025,12 +1200,14 @@ private:
 
     unsigned long lastReconnectAttempt;
 
+    const HADiscoveryEntity* haDiscovery;
+    size_t haDiscoveryCount;
+
 public:
 
     MQTT(
         EthernetClient& ethClient,
         PubSubClient& mqttClient,
-        const char* node,
         uint8_t mqttClientIndex,
         const FrontendConfig::MQTT::Client* client,
         const FrontendConfig::MQTT::Device* deviceList,
@@ -1038,15 +1215,27 @@ public:
     )
         : eth(ethClient),
           mqtt(mqttClient),
-          nodeId(node),
           clientIndex(mqttClientIndex),
           clientCfg(client),
           devices(deviceList),
           deviceCount(deviceCount_),
           backendImpl(nullptr),
-          commandCallback(nullptr)
+          commandCallback(nullptr),
+          haDiscovery(nullptr),
+        haDiscoveryCount(0)
     {
+        
         lastReconnectAttempt = 0;
+    }
+
+    int state() const
+    {
+        return mqtt.state();
+    }
+
+    bool ethernetConnected() const
+    {
+        return eth.connected();
     }
 
     void setCommandCallback(
@@ -1118,14 +1307,9 @@ public:
 
             return false;
         }
-
+        
         if (mqtt.connected())
         {
-            LOG_IF(
-                "MQTT",
-                "reconnect: gia' connected"
-            );
-
             return true;
         }
 
@@ -1144,16 +1328,14 @@ public:
             clientName,
             sizeof(clientName),
             "%s_mqtt_%u",
-            nodeId ? nodeId : "node",
+            (
+                clientCfg &&
+                clientCfg->name &&
+                clientCfg->name[0]
+            )
+                ? clientCfg->name
+                : "mqtt",
             (unsigned)clientIndex
-        );
-
-        LOG_IF(
-            "MQTT",
-            "reconnect: CONNECT -> %s:%u clientId=%s",
-            clientCfg->broker.toString().c_str(),
-            (unsigned)clientCfg->port,
-            clientName
         );
 
         const bool ok = mqtt.connect(clientName);
@@ -1203,17 +1385,17 @@ public:
 
         activeCallbackInstance = this;
 
-        const int available =
-            eth.available();
-
-        const bool ok = mqtt.loop();
+        mqtt.loop();
 
         activeCallbackInstance = nullptr;
     }
 
     bool connected() const
     {
-        return mqtt.connected();
+        const bool result =
+            mqtt.connected();
+
+        return result;
     }
 
     bool publishMapping(
@@ -1307,9 +1489,14 @@ public:
                 FrontendConfig::MQTT::Mapping::Direction::READ_WRITE;
     }
 
-    const char* getNodeId() const
+    const char* getTopicPrefix() const
     {
-        return nodeId ? nodeId : "";
+        if (!clientCfg)
+            return "";
+
+        return clientCfg->topicPrefix
+            ? clientCfg->topicPrefix
+            : "";
     }
 
     uint8_t getClientIndex() const
@@ -1335,6 +1522,21 @@ public:
             return nullptr;
 
         return &devices[index];
+    }
+
+    const HADiscoveryEntity* getHADiscovery(
+        size_t index
+    ) const
+    {
+        if (index >= haDiscoveryCount)
+            return nullptr;
+
+        return &haDiscovery[index];
+    }
+
+    size_t getHADiscoveryCount() const
+    {
+        return haDiscoveryCount;
     }
 
 private:

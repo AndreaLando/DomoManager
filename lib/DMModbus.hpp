@@ -68,9 +68,21 @@ private:
         ModbusTCPClient& cli;
 
         IPAddress lastIp;
+
         bool hasConnection;
 
         unsigned long lastActivity;
+
+        // ========================================================
+        // SOCKET MANAGER
+        // ========================================================
+
+        NetworkManager* net = nullptr;
+
+        SocketManager::OwnerId socketOwner = -1;
+
+        bool socketAcquired = false;
+
 
     public:
 
@@ -86,18 +98,139 @@ private:
         explicit PersistentModbusConnection(
             ModbusTCPClient& client)
             : cli(client),
-              lastIp(0, 0, 0, 0),
-              hasConnection(false),
-              lastActivity(0)
+            lastIp(0, 0, 0, 0),
+            hasConnection(false),
+            lastActivity(0),
+            net(nullptr),
+            socketOwner(-1),
+            socketAcquired(false)
         {
         }
 
 
-        inline void touch(unsigned long now)
+        // ========================================================
+        // SOCKET CONTEXT
+        // ========================================================
+
+        void setSocketContext(
+            NetworkManager& networkManager,
+            SocketManager::OwnerId owner)
+        {
+            net = &networkManager;
+            socketOwner = owner;
+        }
+
+
+        // ========================================================
+        // RELEASE SOCKET
+        // ========================================================
+
+        void releaseSocket()
+        {
+            if (!net)
+            {
+                socketAcquired = false;
+                return;
+            }
+
+            if (socketOwner < 0)
+            {
+                socketAcquired = false;
+                return;
+            }
+
+            if (!socketAcquired)
+                return;
+
+            net->sockets().release(
+                socketOwner,
+                0,
+                SocketManager::SocketKind::TCP_CLIENT
+            );
+
+            socketAcquired = false;
+        }
+
+
+        // ========================================================
+        // ACQUIRE SOCKET
+        // ========================================================
+
+        bool acquireSocket()
+        {
+            if (!net)
+            {
+                LOG_EF(
+                    "MDB::Socket",
+                    "NetworkManager unavailable"
+                );
+
+                return false;
+            }
+
+
+            if (socketOwner < 0)
+            {
+                LOG_EF(
+                    "MDB::Socket",
+                    "Modbus socket owner invalid"
+                );
+
+                return false;
+            }
+
+
+            // ----------------------------------------------------
+            // Già acquisita
+            // ----------------------------------------------------
+
+            if (socketAcquired)
+                return true;
+
+
+            // ----------------------------------------------------
+            // Acquire
+            // ----------------------------------------------------
+
+            const int slot =
+                net->sockets().acquire(
+                    socketOwner,
+                    0,
+                    SocketManager::SocketKind::TCP_CLIENT
+                );
+
+
+            if (slot < 0)
+            {
+                LOG_WF(
+                    "MDB::Socket",
+                    "Modbus TCP socket unavailable"
+                );
+
+                return false;
+            }
+
+
+            socketAcquired = true;
+
+            return true;
+        }
+
+
+        // ========================================================
+        // TOUCH
+        // ========================================================
+
+        inline void touch(
+            unsigned long now)
         {
             lastActivity = now;
         }
 
+
+        // ========================================================
+        // RECONNECT REASON
+        // ========================================================
 
         inline ReconnectReason getReconnectReason(
             const IPAddress& ip,
@@ -106,15 +239,22 @@ private:
             if (!cli.connected())
                 return ReconnectReason::NOT_CONNECTED;
 
+
             if (lastIp != ip)
                 return ReconnectReason::IP_CHANGED;
+
 
             if (now - lastActivity > INACTIVITY)
                 return ReconnectReason::INACTIVITY;
 
+
             return ReconnectReason::NONE;
         }
 
+
+        // ========================================================
+        // ENSURE CONNECTION
+        // ========================================================
 
         bool ensure(
             int ipIndex,
@@ -122,7 +262,13 @@ private:
             int port,
             unsigned long now)
         {
-            auto& ips = ipManager.GetIps();
+            auto& ips =
+                ipManager.GetIps();
+
+
+            // ----------------------------------------------------
+            // VALID IP INDEX
+            // ----------------------------------------------------
 
             if (ipIndex < 0 ||
                 static_cast<size_t>(ipIndex) >= ips.size())
@@ -136,85 +282,173 @@ private:
                 return false;
             }
 
-            auto& ipStruct = ips[ipIndex];
-            const IPAddress ip = ipStruct.IP;
 
-            // --------------------------------------------------------
+            auto& ipStruct =
+                ips[ipIndex];
+
+
+            const IPAddress ip =
+                ipStruct.IP;
+
+
+            // ----------------------------------------------------
             // SHOULD QUERY
-            // --------------------------------------------------------
+            // ----------------------------------------------------
 
-            if (!ipManager.ShouldQuery(ipIndex, now))
+            if (!ipManager.ShouldQuery(
+                    ipIndex,
+                    now))
             {
                 hasConnection = false;
+
                 return false;
             }
 
 
-            // --------------------------------------------------------
+            // ----------------------------------------------------
             // RECONNECT REASON
-            // --------------------------------------------------------
+            // ----------------------------------------------------
 
             const ReconnectReason reason =
-                getReconnectReason(ip, now);
+                getReconnectReason(
+                    ip,
+                    now
+                );
 
 
-            // --------------------------------------------------------
+            // ----------------------------------------------------
             // CONNESSIONE ANCORA VALIDA
-            // --------------------------------------------------------
+            // ----------------------------------------------------
 
             if (reason == ReconnectReason::NONE)
             {
                 hasConnection = true;
 
-                if (ipStruct.state != IpManager::IpState::OK)
-                    ipManager.ReportSuccess(ipIndex);
+                // In teoria socketAcquired deve essere true.
+                // Se per qualunque motivo non lo fosse,
+                // riallineiamo il tracker.
+                if (!socketAcquired)
+                {
+                    if (!acquireSocket())
+                    {
+                        hasConnection = false;
+
+                        return false;
+                    }
+                }
+
+
+                if (ipStruct.state !=
+                    IpManager::IpState::OK)
+                {
+                    ipManager.ReportSuccess(
+                        ipIndex
+                    );
+                }
+
 
                 return true;
             }
 
 
-            // --------------------------------------------------------
-            // IP CAMBIATO
-            // --------------------------------------------------------
+            // ====================================================
+            // CONNESSIONE DA CHIUDERE
+            // ====================================================
 
-            if (reason == ReconnectReason::IP_CHANGED)
+            if (reason == ReconnectReason::IP_CHANGED ||
+                reason == ReconnectReason::INACTIVITY)
             {
-                cli.stop();
+                if (cli.connected())
+                {
+                    cli.stop();
+                }
+
                 hasConnection = false;
+
+                releaseSocket();
             }
 
 
-            // --------------------------------------------------------
+            // ====================================================
+            // NOT CONNECTED
+            // ====================================================
+
+            if (reason == ReconnectReason::NOT_CONNECTED)
+            {
+                hasConnection = false;
+
+                // Nel caso la socket sia caduta esternamente,
+                // allineiamo il SocketManager.
+                releaseSocket();
+            }
+
+
+            // ====================================================
+            // ACQUIRE PRIMA DEL CONNECT
+            // ====================================================
+
+            if (!acquireSocket())
+            {
+                hasConnection = false;
+
+                return false;
+            }
+
+
+            // ====================================================
             // CONNECT
-            // --------------------------------------------------------
+            // ====================================================
 
             const bool connected =
-                cli.begin(ip, port);
+                cli.begin(
+                    ip,
+                    port
+                );
+
 
             if (!connected)
             {
                 hasConnection = false;
+
+                // Il connect non è riuscito:
+                // la reservation non deve rimanere occupata.
+                releaseSocket();
+
 
                 ipManager.ReportError(
                     ipIndex,
                     now
                 );
 
+
                 return false;
             }
 
 
-            // --------------------------------------------------------
+            // ====================================================
             // CONNECT SUCCESS
-            // --------------------------------------------------------
+            // ====================================================
 
-            lastIp        = ip;
-            lastActivity  = now;
-            hasConnection = true;
+            lastIp =
+                ip;
 
-            if (ipStruct.state != IpManager::IpState::OK)
-                ipManager.ReportSuccess(ipIndex);
 
+            lastActivity =
+                now;
+
+
+            hasConnection =
+                true;
+
+
+            if (ipStruct.state !=
+                IpManager::IpState::OK)
+            {
+                ipManager.ReportSuccess(
+                    ipIndex
+                );
+            }
+            
             return true;
         }
     };
@@ -704,9 +938,26 @@ public:
             clientState.lastReadTime;
 
 
-        // Una sola connessione TCP condivisa,
-        // necessaria perché il client Modbus è unico.
+         // --------------------------------------------------------
+        // CONNESSIONE MODBUS PERSISTENTE
+        // --------------------------------------------------------
+
         static PersistentModbusConnection conn(cli);
+
+
+        // --------------------------------------------------------
+        // SOCKET MANAGER CONTEXT
+        // --------------------------------------------------------
+
+        if (net)
+        {
+            conn.setSocketContext(
+                *net,
+                net->getProtocol(
+                    modbusProtocolId
+                ).socketOwner
+            );
+        }
 
 
         auto& ip =
@@ -1811,23 +2062,23 @@ private:
             }
 
 
-        #ifdef DEBUG_VIEW
+            #ifdef DEBUG_VIEW
 
-                    LOG_IF(
-                        "MDB::READ",
-                        "Device %d: %s IP=%d.%d.%d.%d PRIOR=%d",
-                        deviceIndex,
-                        dev.GetName(),
-                        dev.GetIp()[0],
-                        dev.GetIp()[1],
-                        dev.GetIp()[2],
-                        dev.GetIp()[3],
-                        (int)dev.GetPriority()
-                    );
+                        LOG_IF(
+                            "MDB::READ",
+                            "Device %d: %s IP=%d.%d.%d.%d PRIOR=%d",
+                            deviceIndex,
+                            dev.GetName(),
+                            dev.GetIp()[0],
+                            dev.GetIp()[1],
+                            dev.GetIp()[2],
+                            dev.GetIp()[3],
+                            (int)dev.GetPriority()
+                        );
 
-                    delay(500);
+                        delay(500);
 
-        #endif
+            #endif
 
 
             // ----------------------------------------------------

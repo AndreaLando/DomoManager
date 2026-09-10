@@ -39,7 +39,8 @@ static const DiagnosticConfig diagnosticParams = {
         .reportNeverInitialized     = false,
         .reportMultipleInitialized  = true,
         .reportAutomationConfig     = false,
-        .reportLogBuffer            = true
+        .reportLogBuffer            = true,
+        .reportModbusTiming         = true
     };
 
 // Watch areas: indices of diagnostic bits to monitor, this stops debugging on SerialMonitor Arduino IDE
@@ -52,6 +53,7 @@ static const int watchAreas[] = {
 // - This lambda constructs the FrontendConfig instance used at startup.
 // - Many network and subsystem flags are disabled by default (bridge, mqtt, weather, ps).
 // ------------------------------------------------------------
+
 static FrontendConfig mainConfig = [](){
     FrontendConfig c;
 
@@ -59,7 +61,7 @@ static FrontendConfig mainConfig = [](){
     c.pins.leds = LedController::LedPins(
         LED_D0, //RS485 Read
         LED_D1, //RS485 Write
-        LED_D2, // HMI Read/Write   
+        LED_D2, // HMI, MQTT Read/Write   
         LED_D3  // Devices in error
     );
 
@@ -69,25 +71,29 @@ static FrontendConfig mainConfig = [](){
     c.net.gateway = IPAddress(192, 168, 12, 1);
     c.net.subnet  = IPAddress(255, 255, 255, 0);
 
-    // --- IOT ---
+    // --- BRIDGE ---
     c.bridge.enabled    = false;
-    c.bridge.ip         = IPAddress(192,168,12,201);
+    c.bridge.ip         = IPAddress(192,168,12,201); //Indirizzo del PEER
     c.bridge.localPort  = 8888;
     c.bridge.remotePort = 8888;
-    //c.bridge.aee.vars  = AEE_VARS;
-    //c.bridge.aee.count = sizeof(AEE_VARS) / sizeof(AEEVarDef);
+    c.bridge.aee.vars  = AEE_VARS;
+    c.bridge.aee.count = sizeof(AEE_VARS) / sizeof(AEEVarDef);
 
 
     // --- MODBUS TCP to RTU ---
-    c.modbus.timeoutMs = 250; //200ms non scendere mai sotto questo valore 15.05.2026, valore ok=250 cautelativo
+    c.modbus.enabled = true;
+    c.modbus.timeoutMs = 200; //200ms non scendere mai sotto questo valore 15.05.2026
     
-    // --- MQTT ---
+    
+    // ============================================================================
+    // CONFIG MQTT NEL FRONTEND
+    // ============================================================================
+
     c.mqtt.enabled = false;
-    c.mqtt.broker = IPAddress(192,168,1,10);
-    c.mqtt.port = 1883;
-    c.mqtt.nodeId = "opta_domotica";
-    //c.mqtt.vars      = MQTT_VARS;
-    //c.mqtt.varCount  = sizeof(MQTT_VARS) / sizeof(MQTT_VARS[0]);
+    c.mqtt.clients = MQTT_CLIENTS;
+    c.mqtt.clientCount =
+        sizeof(MQTT_CLIENTS) /
+        sizeof(MQTT_CLIENTS[0]);
 
     // --- DomoManager ---
     c.domoManager=domoConfig;
@@ -95,11 +101,11 @@ static FrontendConfig mainConfig = [](){
     // --- HVAC ---
     c.hvac.enabled    = false;
     c.hvac.intervalMs = 10000;
-    //c.hvac.zones = HVAC_ZONES;
-    //c.hvac.zoneCount = sizeof(HVAC_ZONES) / sizeof(HVAC_ZONES[0]);;
+    c.hvac.zones = HVAC_ZONES;
+    c.hvac.zoneCount = sizeof(HVAC_ZONES) / sizeof(HVAC_ZONES[0]);;
     c.hvac.initialSetpoint = 20.0;
     c.hvac.initialMode = HeatPumpController::Mode::OFF;
-    //c.hvac.hpConfig=HEAT_PUMP_PARAMS;
+    c.hvac.hpConfig=HEAT_PUMP_PARAMS;
 
     // External/internal temperature readers using DomoManager instance
     c.hvac.readOutdoorTemp  = [&](){
@@ -120,12 +126,12 @@ static FrontendConfig mainConfig = [](){
     // --- WEATHER ---
     c.weather.enabled    = false;
     c.weather.intervalMs=5000;
-    //c.weather = WEATHER_PARAMS;
+    c.weather = WEATHER_PARAMS;
 
     // --- POWER SUPERVISOR ---
     c.ps.enabled    = false;
     c.ps.intervalMs = 5000;
-    //c.ps.mainPower = { GenericSensor::Config::Type::BUFFER, AREA_PMETER_VOLTAGE, 0.01f };
+    c.ps.mainPower = { GenericSensor::Config::Type::BUFFER, 12, 0.01f };
     c.ps.i24vOk    = { GenericSensor::Config::Type::DIGITAL, I1 };
     c.ps.fault     = { GenericSensor::Config::Type::DIGITAL, I2 };
     c.ps.battery   = { GenericSensor::Config::Type::DIGITAL, I3 };
@@ -135,25 +141,26 @@ static FrontendConfig mainConfig = [](){
 
     // --- SECURITY ---
     c.security.enabled    = false;
-    c.security.intervalMs = 2000;
+    c.security.intervalMs = 1500;
     c.security.startupInhibitMs = 10000;
-    //c.security.sensors = WIRED_SENSOR_CONFIG;
-    //c.security.count   = sizeof(WIRED_SENSOR_CONFIG) / sizeof(WIRED_SENSOR_CONFIG[0]);
+    // c.security.statusArea=AREA_SECURITY_STATUS; Da battezzare
+    c.security.sensors = WIRED_SENSOR_CONFIG;
+    c.security.count   = sizeof(WIRED_SENSOR_CONFIG) / sizeof(WIRED_SENSOR_CONFIG[0]);
 
     // --- POWER LIMITS ---
-    //c.power = POWER_PARAMS;
+    c.power = POWER_PARAMS;
 
     // --- Averages ---
     c.averages.enabled = false;
     c.averages.intervalMs = 15000;   // intervallo task
-    //c.averages.gruppi = MEAN_GROUPS;
-    //c.averages.gruppiCount = sizeof(MEAN_GROUPS) / sizeof(MEAN_GROUPS[0]);
+    c.averages.gruppi = MEAN_GROUPS;
+    c.averages.gruppiCount = sizeof(MEAN_GROUPS) / sizeof(MEAN_GROUPS[0]);
 
     // --- DIAGNOSTICS  ---
     c.diagnostic=diagnosticParams;
 
     // --- WATCH ---
-    c.watch.enabled = true;
+    c.watch.enabled = false;
     c.watch.aree = watchAreas;
     c.watch.count = sizeof(watchAreas) / sizeof(watchAreas[0]);
 
@@ -166,7 +173,7 @@ static FrontendConfig mainConfig = [](){
     c.webApi.timeoutMs = 3000;
 
     // --- JOBS ---
-    c.jobs.enabled = true;
+    c.jobs.enabled = false;
     c.jobs.intervalMs=5500;
 
     return c;

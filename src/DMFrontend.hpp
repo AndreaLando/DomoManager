@@ -18,33 +18,23 @@
 
    ============================================================================ */
 
-#include "DMFrontendOrchestrators.hpp"
+#include "DMFrontendEngines.hpp"
 #include "DMAdapters.hpp"
+#include "DMAdapterUDP.hpp"
+#include "DMIntrospection.hpp"
+#include "DMSemanticResolver.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
 
+
 //Callbacks
 static void OnAEEVarChanged(AEEVariableBase* v, unsigned long now) {
-    if (strcmp(v->def.name, "epoch") == 0) {
-        int e = as<int>(v)->get();
-        LOG_IF("AEE", "Epoch ricevuto dallo SLAVE: %d → applico al RTC", e);
-
-        DomoManager::instance
-            ->getTimeManager()
-            .getRTC()
-            .applyEpoch(e);
-        
-        v->clearChanged();
-
-        return;
-    }
-
-    // Qui puoi gestire altre variabili M2F o BIDIR
+    AEEEngine::instance().applyReceived(
+        v,
+        now
+    );
 }
-
-class TaskEngine;
-
 
 class PowerSupervisorEngine {
 private:
@@ -302,129 +292,6 @@ public:
     }
 };
 
-
-
-class SecuritySensorEngine {
-private:
-
-    // ------------------------------------------------------------
-    // CALLBACKS
-    // ------------------------------------------------------------
-    static void onAnyAlarm(const std::string& zone,
-                           SensorChannelType type,
-                           const std::vector<Sensor*>& sensors)
-    {
-        LOG_IF("SecurityFrontend",
-               "[GLOBAL] Alarm zone=%s type=%d sensors=%u",
-               zone.c_str(), (int)type, (unsigned)sensors.size());
-    }
-
-    static void onZoneAlarm(const std::string& zone,
-                            SensorChannelType type,
-                            const std::vector<Sensor*>& sensors)
-    {
-        LOG_IF("SecurityFrontend",
-               "[ZONE] Alarm in zone=%s type=%d sensors=%u",
-               zone.c_str(), (int)type, (unsigned)sensors.size());
-    }
-
-    static void onTypeAlarm(const std::string& zone,
-                            SensorChannelType type,
-                            const std::vector<Sensor*>& sensors)
-    {
-        LOG_IF("SecurityFrontend",
-               "[TYPE] Alarm type=%d in zone=%s sensors=%u",
-               (int)type, zone.c_str(), (unsigned)sensors.size());
-    }
-
-    static void onZoneTypeAlarm(const std::string& zone,
-                                SensorChannelType type,
-                                const std::vector<Sensor*>& sensors)
-    {
-        LOG_IF("SecurityFrontend",
-               "[ZONE+TYPE] Alarm zone=%s type=%d sensors=%u",
-               zone.c_str(), (int)type, (unsigned)sensors.size());
-    }
-
-    // ------------------------------------------------------------
-    // DYNAMIC CALLBACK REGISTRATION
-    // ------------------------------------------------------------
-    static void registerSecurityCallbacks() {
-
-        auto& wired = SecurityOrchestrator::getWiredSensors();
-
-        // Global
-        SecurityOrchestrator::RegisterCallbackAny(onAnyAlarm);
-
-        // Types
-        static const SensorChannelType allTypes[] = {
-            SensorChannelType::RT,
-            SensorChannelType::H24,
-            SensorChannelType::MASK,
-            SensorChannelType::LEN
-        };
-
-        for (auto t : allTypes)
-            SecurityOrchestrator::RegisterCallbackType(t, onTypeAlarm);
-
-        // Dynamic zones
-        for (const auto& entry : wired.GetZoneMap()) {
-            const std::string& zoneName = entry.first;
-
-            SecurityOrchestrator::RegisterCallbackZone(zoneName, onZoneAlarm);
-
-            for (auto t : allTypes)
-                SecurityOrchestrator::RegisterCallbackZoneType(zoneName, t, onZoneTypeAlarm);
-        }
-
-        LOG_DF("SecurityFrontend", "Dynamic security callbacks registered");
-    }
-
-public:
-
-    // ------------------------------------------------------------
-    // SETUP
-    // ------------------------------------------------------------
-    static void Setup(const FrontendConfig::Security& cfg) {
-        SecurityOrchestrator::Setup(&cfg);
-
-        registerSecurityCallbacks();
-
-        LOG_DF("SecurityFrontend", "Security frontend setup completed");
-    }
-
-    // ------------------------------------------------------------
-    // LOOP
-    // ------------------------------------------------------------
-    static bool Loop(unsigned long now) {
-        return SecurityOrchestrator::Loop(now);
-    }
-
-    // ============================================================
-    // ACCESSORS
-    // ============================================================
-    static SecurityOrchestrator::SystemManager& getSystem() { return SecurityOrchestrator::getSystem(); }
-    static WiredSensorsManager& getWiredSensors() { return SecurityOrchestrator::getWiredSensors(); }
-
-    // ============================================================
-    // COMMANDS
-    // ============================================================
-    static void ApplySecurityCommands(int area) {
-        SecurityOrchestrator::ApplySecurityCommands(area);
-    }
-
-    // ============================================================
-    // DIAGNOSTICA
-    // ============================================================
-    class Diagnostic {
-    public:
-        static void FullReport() {
-            SecurityOrchestrator::Diagnostic::FullReport();
-        }
-    };
-};
-
-
 class JobsEngine {
 private:
     static inline AsyncScheduler scheduler;
@@ -480,7 +347,7 @@ private:
         auto& buf = DomoManager::instance->getBuffer();
 
         BufferSourceInfo info;
-        if (buf.GetData(33, Field, info))
+        if (buf.GetData(33, info))
             return info.value > 35;
 
         return analogRead(A0) > 600;
@@ -558,147 +425,632 @@ public:
     }
 };
 
-class TaskEngine {
-private:
-    static AEERegistry* aee() { return &AEEEngine::getAEE(); }
-    static AEEManagement* aeeMgr() { return &AEEEngine::getMgr(); }
+class TaskEngine
+{
+public:
 
-private:
-    
-    // ------------------------------------------------------------------------
-    //  TASK: Jobs
-    // ------------------------------------------------------------------------
-    static void Task_Jobs(DomoManager& manager, unsigned long now) {
-        JobsEngine::Loop(now);
-    }
-    
-    // ------------------------------------------------------------------------
-    //  TASK: HVAC
-    // ------------------------------------------------------------------------
-    static void Task_HVAC(DomoManager& manager, unsigned long now)
+    using TaskFn =
+        void (*)(DomoManager&, unsigned long);
+
+
+    // ============================================================
+    // SETUP
+    // ============================================================
+
+    static void Setup(
+        const FrontendConfig& cfg)
     {
-        const auto& cfg = TaskEngineOrchestrator::getCfg().hvac;
-        
-        // 2) Costruisci HVACTime usando TimeManager (NON getRTC!)
-        struct tm t;
-        manager.getTimeManager().getDateTime(t);
+        TaskEngineBase::Setup(cfg);
+    }
 
-        HeatPumpController::HVACTime ht;
-        ht.dayOfWeek = t.tm_wday;
-        ht.hour      = t.tm_hour;
-        ht.minute    = t.tm_min;
 
-        // 3) Temperature per zona dal buffer del DomoManager
-        auto& buf = manager.getBuffer();
+    // ============================================================
+    // CUSTOM TASK
+    // ============================================================
 
-        // dimensione massima ragionevole; se hai un limite noto, mettilo qui
-        static float zoneTemps[16];
-
-        for (size_t i = 0; i < cfg.zoneCount && i < 16; ++i) {
-            int area = cfg.zones[i].temperatureArea;
-            zoneTemps[i] = buf.getValueFast(area) / 10.0f;   // scaling tipico /10
-        }
-
-        // 4) Temperature globali e finestra
-        float tInterna      = cfg.readIndoorTemp  ? cfg.readIndoorTemp()  : 0.0f;
-        float tEsterna      = cfg.readOutdoorTemp ? cfg.readOutdoorTemp() : 0.0f;
-        bool finestraAperta = cfg.readWindowOpen  ? cfg.readWindowOpen()  : false;
-
-        // 5) Chiamata al motore HVAC (wrapper DMHVAC)
-        HVACEngine::Loop(
-            now,
-            zoneTemps,
-            tInterna,
-            tEsterna,
-            finestraAperta,
-            ht
+    static void AddTask(
+        TaskFn fn,
+        uint32_t intervalMs,
+        bool enabled = true)
+    {
+        TaskEngineBase::AddTask(
+            fn,
+            intervalMs,
+            enabled
         );
     }
 
 
-    // ------------------------------------------------------------------------
-    //  TASK: Averages
-    // ------------------------------------------------------------------------
-    static void Task_Averages(DomoManager& manager, unsigned long now) {
-        const auto& cfg = TaskEngineOrchestrator::getCfg();
+    // ============================================================
+    // LOOP
+    // ============================================================
 
-        auto& buffer = manager.getBuffer();
-        auto& averages  = manager.getAverages();
+    static void Loop(
+        DomoManager& manager,
+        unsigned long now)
+    {
+        TaskEngineBase::Loop(
+            manager,
+            now
+        );
+    }
 
-        // ============================================================
-        // 1. Per ogni gruppo configurato
-        // ============================================================
-        for (size_t g = 0; g < cfg.averages.gruppiCount; g++) {
-            const auto& gruppo = cfg.averages.gruppi[g];
 
-            // 2. Aggiungi tutte le misure dei sensori del gruppo
-            for (size_t i = 0; i < gruppo.count; i++) {
-                const auto& s = gruppo.sensori[i];
+    // ============================================================
+    // FRONTEND CYCLE
+    // ============================================================
 
-                float raw = buffer.getValueFast(s.area);
-                float value = raw * s.factor;
+    static bool hasFrontendCycleCompleted()
+    {
+        return
+            TaskEngineBase::
+                hasFrontendCycleCompleted();
+    }
 
-                averages.addMeasurement(gruppo.nome, value);
-            }
 
-            // 3. Calcola la media del gruppo
-            float average = averages.groupAverage(gruppo.nome);
+    static void resetFrontendCycleFlag()
+    {
+        TaskEngineBase::
+            resetFrontendCycleFlag();
+    }
+};
 
-            // 4. Scrivi nell’area configurata (se presente)
-            if (gruppo.areaOut >= 0) {
-                buffer.WriteElement(
-                    gruppo.areaOut,
-                    ToPanel,
-                    average * gruppo.outScale,
-                    now
-                );
-            }
 
-            LOG_DF("AVERAGES", "%s = %.2f", gruppo.nome, average);
+class DomoManagerFrontendEngine
+    : public FrontendRuntime
+{
+private:
+    
+
+    // ============================================================
+    //  INSTANCE
+    // ============================================================
+
+    static inline DomoManagerFrontendEngine* instance = nullptr;
+
+
+    // ============================================================
+    //  NETWORK
+    // ============================================================
+
+    static inline FrontendNetwork* network = nullptr;
+
+
+    // ============================================================
+    //  AEE
+    // ============================================================
+
+    static inline AEERegistry* aee = nullptr;
+
+
+    // ============================================================
+    //  CALLBACKS / CONFIG
+    // ============================================================
+
+    static inline void (*fullCycleCallback)(DomoManager&) = nullptr;
+
+    static inline FrontendConfig config;
+
+    static inline DomoManager* Manager = nullptr;
+
+    static HMIEngine hmiEngine;
+
+
+    // ============================================================
+    //  FULL CYCLE
+    // ============================================================
+
+    static void CheckFullCycle()
+    {
+        auto* dm = DomoManager::instance;
+
+        if (!dm)
+            return;
+
+        bool backend =
+            dm->hasBackendCycleCompleted();
+
+        bool frontend =
+            TaskEngine::hasFrontendCycleCompleted();
+
+        if (backend && frontend)
+        {
+            dm->resetBackendCycleFlag();
+
+            TaskEngine::resetFrontendCycleFlag();
+
+            if (fullCycleCallback)
+                fullCycleCallback(*DomoManager::instance);
         }
     }
 
-    // ------------------------------------------------------------------------
-    //  TASK: METEO
-    // ------------------------------------------------------------------------
-    static void Task_Meteo(DomoManager& manager, unsigned long now) {
-        WeatherEngine::Loop(now);
+
+    // ============================================================
+    //  SOMETHING CHANGED
+    // ============================================================
+
+    static void SomethingChanged()
+    {
+        auto& manager =
+            *DomoManager::instance;
+
+        auto& buffer =
+            manager.getBuffer();
+
+
+        // --------------------------------------------------------
+        // Modifiche provenienti dal pannello HMI
+        // --------------------------------------------------------
+
+        auto changedFromPanel =
+            buffer.getChangedMap();
+
+        if (!changedFromPanel.empty())
+        {
+            for (const auto& area :
+                 changedFromPanel)
+            {
+                SecurityOrchestrator::
+                    ApplySecurityCommands(area);
+            }
+        }
     }
-    
 
-    // ------------------------------------------------------------------------
-    //  TASK: POWER
-    // ------------------------------------------------------------------------
-    static void Task_Power(DomoManager& manager, unsigned long now) {
-        auto& buffer   = manager.getBuffer();
-        auto& averages = manager.getAverages();
 
-        // --- LETTURE ---
-        int   gridPower        = buffer.getValueFast(13, 100);
-        float lux              = 800;   // TODO: sensore reale
-        float tempExt          = 7;     // TODO: sensore reale
-        float actualProduction = 0;     // TODO: lettura inverter
+    // ============================================================
+    //  WATCHDOG
+    // ============================================================
+
+    static void watchdogHandler(
+        const Watchdog::WatchdogStatus& st)
+    {
+        LOG_WF(
+            "Main",
+            "===== WATCHDOG EVENT ====="
+        );
+
+        LOG_WF(
+            "Main",
+            "Reason: %s",
+            st.reason
+        );
+
+        LOG_WF(
+            "Main",
+            "Value: %ld",
+            st.value
+        );
+
+
+        if (st.blocked)
+            LOG_WF(
+                "Main",
+                "Type: BLOCKED"
+            );
+
+
+        if (st.overload)
+            LOG_WF(
+                "Main",
+                "Type: OVERLOAD"
+            );
+
+
+        if (st.unstable)
+            LOG_WF(
+                "Main",
+                "Type: UNSTABLE"
+            );
+
+
+        if (st.inactive)
+            LOG_WF(
+                "Main",
+                "Type: INACTIVE"
+            );
+
+
+        if (st.blocked)
+        {
+            LOG_EF(
+                "Main",
+                "<<<<<<<<+>>>>>>>>"
+            );
+
+            LOG_EF(
+                "Main",
+                "Action: System reset due to BLOCKED callback"
+            );
+
+            NVIC_SystemReset();
+        }
+
+
+        if (st.overload && st.value > 200)
+        {
+            LOG_WF(
+                "Main",
+                "Action: Severe overload detected"
+            );
+        }
+
+
+        if (st.unstable)
+        {
+            LOG_WF(
+                "Main",
+                "Action: System unstable, logging event"
+            );
+        }
+
+
+        LOG_WF(
+            "Main",
+            "=========================="
+        );
+    }
+
+
+    // ============================================================
+    //  ETHERNET SETUP
+    // ============================================================
+
+    static void SetupEthernet(
+        const FrontendConfig& cfg)
+    {
+        uint8_t mac[6];
+
+        for (uint8_t i = 0; i < 6; ++i)
+            mac[i] = cfg.net.mac[i];
+
+
+        Ethernet.begin(
+            mac,
+            cfg.net.ip,
+            cfg.net.gateway,
+            cfg.net.subnet
+        );
+
+
+        if (Ethernet.hardwareStatus() ==
+            EthernetNoHardware)
+        {
+            LOG_EF(
+                "DomoManagerFrontendEngine",
+                "Ethernet shield not found"
+            );
+
+            while (true)
+            {
+                delay(100);
+            }
+        }
+
+
+        if (Ethernet.linkStatus() == LinkOFF)
+        {
+            LOG_EF(
+                "DomoManagerFrontendEngine",
+                "Ethernet cable is not connected"
+            );
+
+            digitalWrite(
+                LED_USER,
+                true
+            );
+        }
+        else
+        {
+            LOG_IF(
+                "DomoManagerFrontendEngine",
+                "Ethernet interface started"
+            );
+
+            LOG_IF(
+                "DomoManagerFrontendEngine",
+                "My IP address: %d.%d.%d.%d",
+                Ethernet.localIP()[0],
+                Ethernet.localIP()[1],
+                Ethernet.localIP()[2],
+                Ethernet.localIP()[3]
+            );
+        }
+    }
+
+    // ============================================================
+    //  INIT ENGINES
+    // ============================================================
+
+    static void InitEngines(
+        DomoManager& manager)
+    {
+        if (config.security.enabled)
+            SecuritySensorEngine::Setup(
+                config.security
+            );
+
+
+        if (config.hvac.enabled)
+            HVACEngine::Setup(
+                config.hvac
+            );
+
+
+        if (config.weather.enabled)
+            WeatherEngine::Setup(
+                config.weather
+            );
+
+
+        if (config.power.enabled)
+            PowerEngine::Setup(
+                config.power
+            );
+
+
+        if (config.ps.enabled)
+            PowerSupervisorEngine::Setup(
+                config.ps
+            );
+
+
+        JobsEngine::Setup();
+
+
+        if (config.domoManager.automation.json)
+        {
+            manager.loadAutomationJson(
+                config.domoManager.automation.json
+            );
+        }
+
+
+        WebAPIEngine::Setup(
+            config.webApi
+        );
+
+
+        if (config.watch.enabled)
+        {
+            WatchEngine::attach(
+                manager,
+                config.watch
+            );
+        }
+
+
+        instance->RegisterFrontendDiagnostics();
+    }
+
+
+    // ============================================================
+    //  FULL CYCLE CALLBACK
+    // ============================================================
+
+    static void SetFullCycleCallback(
+        void (*fn)(DomoManager&))
+    {
+        fullCycleCallback = fn;
+    }
+
+
+    // ============================================================
+    //  AEE EVENT
+    // ============================================================
+
+    static void AEEEventCallback(
+        const EventManager::Event& event)
+    {
+        if (!Manager)
+            return;
+
+
+        std::vector<DMAEE::Update> updates;
+
+
+        if (!DMAEE::BuildUpdatesFromBufferArea(
+                AEEEngine::getMgr(),
+                event.area,
+                event.value,
+                updates))
+        {
+            return;
+        }
+
+
+        if (updates.empty())
+            return;
+
+
+        const unsigned long now =
+            Manager->getTimeManager().nowMs();
+
+
+        DMAEE::ApplyUpdates(
+            updates,
+            now
+        );
+    }
+
+
+    // ============================================================
+    //  MQTT EVENT
+    // ============================================================
+
+    static void MQTTEventCallback(
+        const EventManager::Event& event)
+    {
+        if (!config.mqtt.enabled)
+            return;
+
+
+        MQTTEngine::PublishEvent(
+            event
+        );
+
+
+        if (Manager->getLeds().hasChannel(
+                LedController::THREE))
+        {
+            static bool ledState = false;
+
+            ledState = !ledState;
+
+            Manager->getLeds().set(
+                LedController::THREE,
+                ledState
+            );
+        }
+    }
+
+
+    // ============================================================
+    //  HMI EVENT
+    // ============================================================
+
+    static void HMIEventCallback(
+        const EventManager::Event& event)
+    {
+        if (!hmiEngine.enabled())
+            return;
+
+
+        hmiEngine.PushEvent(
+            event
+        );
+
+
+        if (Manager->getLeds().hasChannel(
+                LedController::THREE))
+        {
+            static bool ledState = false;
+
+            ledState = !ledState;
+
+            Manager->getLeds().set(
+                LedController::THREE,
+                ledState
+            );
+        }
+    }
+
+
+    // ============================================================
+    //  CUSTOM TASK
+    // ============================================================
+
+    static void Task_Jobs(
+        DomoManager& manager,
+        unsigned long now)
+    {
+        (void)manager;
+
+        JobsEngine::Loop(
+            now
+        );
+    }
+
+
+    static void Task_Meteo(
+        DomoManager& manager,
+        unsigned long now)
+    {
+        (void)manager;
+
+        WeatherEngine::Loop(
+            now
+        );
+    }
+
+
+    static void Task_PowerSupervisor(
+        DomoManager& manager,
+        unsigned long now)
+    {
+        (void)manager;
+
+        PowerSupervisorEngine::Loop(
+            now
+        );
+    }
+
+
+    static void Task_Power(
+        DomoManager& manager,
+        unsigned long now)
+    {
+        auto& buffer =
+            manager.getBuffer();
+
+
+        auto& averages =
+            manager.getAverages();
+
+
+        // --------------------------------------------------------
+        // INPUTS
+        // --------------------------------------------------------
+
+        const int gridPower =
+            buffer.getValueFast(
+                13,
+                100
+            );
+
+
+        const float lux =
+            800.0f;
+
+
+        const float tempExt =
+            7.0f;
+
+
+        const float actualProduction =
+            0.0f;
+
+
+        // --------------------------------------------------------
+        // TIME
+        // --------------------------------------------------------
 
         struct tm t;
-        manager.getTimeManager().getDateTime(t);
 
-        // --- CICLO POWER COMPLETO ---
+
+        manager
+            .getTimeManager()
+            .getDateTime(t);
+
+
+        // --------------------------------------------------------
+        // POWER ENGINE
+        // --------------------------------------------------------
+
         PowerEngine::Loop(
             now,
             gridPower,
             lux,
             tempExt,
             actualProduction,
-            averages.groupAverage("Temperature"),
+            averages.groupAverage(
+                "Temperature"
+            ),
             t.tm_mon + 1,
             t.tm_hour,
             t.tm_min
         );
 
-        // --- DIAGNOSTICA ---
-        auto& pm = PowerEngine::Get();
 
-        LOG_DF("Power",
+        // --------------------------------------------------------
+        // DIAGNOSTICS
+        // --------------------------------------------------------
+
+        auto& pm =
+            PowerEngine::Get();
+
+
+        LOG_DF(
+            "Power",
             "grid=%0.2f solar=%0.2f tempExt=%0.2f lux=%0.2f",
             pm.getGridPower(),
             pm.getSolarPower(),
@@ -708,540 +1060,795 @@ private:
     }
 
 
-    // ------------------------------------------------------------------------
-    //  TASK: SENSORS
-    // ------------------------------------------------------------------------
-    static void Task_Sensors(DomoManager& manager, unsigned long now) {
-        // esegui solo dopo il ciclo di power-on
-        if (!manager.getPowerOnCycleCompleted())
-            return;
+    // ============================================================
+    //  FRONTEND RUNTIME HOOKS
+    // ============================================================
 
-        // --- 1) ESECUZIONE SECURITY ENGINE ---
-        bool changed = SecuritySensorEngine::Loop(now);
+protected:
 
-        if (!changed)
-            return;   // nessun cambiamento → nessun update
-
-        auto& sys = SecurityOrchestrator::getSystem();
-        
-        // --- 3) SCRITTURA BITMASK NEL BUFFER ---
-        auto& buffer = manager.getBuffer();
-        
-        /* scrive la bitmask dello stato dell'antifurto nell area prescelta del buffer
-        buffer.WriteElement(
-            AREA_SECURITY_STATUS,
-            BufferFlagType::Field,
-            sys.getBitmask(),
-            now
-        ); */
-    }
-
-    static void Task_PowerSupervisor(DomoManager& manager, unsigned long now) {
-        PowerSupervisorEngine::Loop(now);
-    }
-
-    static void Task_AEE_Dump(DomoManager& manager, unsigned long now) {
-        if (!TaskEngine::aee)
-            return;
-
-        StaticJsonDocument<1024> doc;
-
-        TaskEngine::aee()->forEach([&](AEEVariableBase* v){
-            v->toJson(doc);
-        });
-
-        String out;
-        serializeJson(doc, out);
-
-        LOG_IF("AEE-DUMP", "%s", out.c_str());
-    }
-
-    static void Task_Communication(DomoManager& manager, unsigned long now) 
+    void onFrontendDiagnostics() override
     {
-        #if HOTSTANDBY_ENABLED
-            // Se non sei MASTER → NON devi fare comunicazione
-            if (!manager.isClusterMaster())
-                return;
-        #endif
-
-        // Il nodo MASTER deve comunque attendere il primo ciclo completo
-        if (!manager.getPowerOnCycleCompleted())
-            return;
-
-        const auto& cfg = TaskEngineOrchestrator::getCfg();
-        // Round‑robin index
-        static uint8_t rr = 0;
-
-        switch (rr)
+        // HMI
+        if (hmiEngine.enabled())
         {
-            case 0:
-                if (cfg.webApi.enabled)
-                    WebAPIEngine::Loop(now);
-                break;
+            Serial.print("HMI enabled: ");
+            Serial.println(
+                hmiEngine.enabled()
+                    ? "YES"
+                    : "NO"
+            );
 
-            case 1:
-                if (cfg.bridge.enabled)
-                    BridgeEngine::get().loop(now);
+            Serial.print("HMI running: ");
+            Serial.println(
+                hmiEngine.running()
+                    ? "YES"
+                    : "NO"
+            );
 
-                break;
+            Serial.print("HMI loop enabled: ");
+            Serial.println(
+                hmiEngine.loopEnabled()
+                    ? "YES"
+                    : "NO"
+            );
 
-            case 2:
-                if (cfg.mqtt.enabled)
-                    MQTTEngine::Loop(manager, now);
-                break;
+            Serial.print("HMI port: ");
+            Serial.println(
+                hmiEngine.port()
+            );
+
+            Serial.print("HMI active clients: ");
+            Serial.println(
+                hmiEngine.activeClients()
+            );
+
+            Serial.print("HMI max clients: ");
+            Serial.println(
+                hmiEngine.maxClients()
+            );
         }
 
-        rr++;
-        if (rr > 2) rr = 0;
+        if (config.weather.enabled)
+        {
+            WeatherStation::Diagnostic::Report(
+                WeatherEngine::Get()
+            );
+        }
+        
+        if (config.power.enabled)
+        {
+            PowerManager::Diagnostic::FullReport(
+                PowerEngine::Get()
+            );
+        }
+
+        // eventuale diagnostica specifica del frontend
+        // ...
+
+        // eventuale diagnostica utente
+        // ...
+    }
+
+    // ------------------------------------------------------------
+    // USER BUTTON
+    // ------------------------------------------------------------
+
+    void onStartupButton(
+        unsigned long now) override
+    {
+        (void)now;
+
+        /*
+         * Per ora nessuna logica aggiuntiva.
+         *
+         * La gestione generica del pulsante viene già eseguita
+         * da FrontendRuntime.
+         */
+    }
+
+
+    void onButtonPressed(
+        unsigned long now) override
+    {
+        (void)now;
+
+        /*
+         * Punto di estensione per eventuale logica frontend
+         * personalizzata sul pulsante.
+         */
+    }
+
+
+    // ------------------------------------------------------------
+    // DEVELOPER MODE
+    // ------------------------------------------------------------
+
+    void onDeveloperMode() override
+    {
+        /*
+         * Punto di estensione.
+         *
+         * FrontendRuntime ha già eseguito:
+         *
+         * manager.getOwner().setDeveloper(
+         *     OwnerManager::SYSTEM_REBOOT
+         * );
+         */
+    }
+
+
+    #if HOTSTANDBY_ENABLED
+
+        // ------------------------------------------------------------
+        // MASTER
+        // ------------------------------------------------------------
+
+        void onBecomeMaster() override
+        {
+            LOG_I(
+                "Main",
+                "Passo a MASTER -> abilito Ethernet"
+            );
+
+
+            SetupEthernet(
+                config
+            );
+        }
+
+
+        // ------------------------------------------------------------
+        // SLAVE
+        // ------------------------------------------------------------
+
+        void onBecomeSlave() override
+        {
+            LOG_I(
+                "Main",
+                "Passo a SLAVE -> disabilito Ethernet"
+            );
+
+
+            Ethernet.end();
+        }
+
+    #endif
+
+
+private:
+
+    // ============================================================
+    //  CONSTRUCTOR
+    // ============================================================
+
+    DomoManagerFrontendEngine(
+        DomoManager& dm,
+        const FrontendConfig& cfg)
+        : FrontendRuntime(
+            dm,
+            cfg
+        )
+    {
+    }
+
+
+    static inline DomoIntrospection introspection;
+
+    static void BuildIntrospection()
+    {
+        if (!Manager)
+            return;
+
+        DomoIntrospection::Context ctx;
+
+        // --------------------------------------------------------
+        // DOMO MANAGER
+        // --------------------------------------------------------
+
+        ctx.domo =
+            &config.domoManager;
+
+
+        // --------------------------------------------------------
+        // RUNTIME
+        // --------------------------------------------------------
+
+        ctx.buffer =
+            &Manager->getBuffer();
+
+        ctx.averages =
+            &Manager->getAverages();
+
+        ctx.time =
+            &Manager->getTimeManager();
+
+
+        // --------------------------------------------------------
+        // AUTOMATION ENGINE
+        // --------------------------------------------------------
+
+        ctx.automationEngine =
+            &Manager->getAutomation();
+
+
+        // --------------------------------------------------------
+        // AEE
+        // --------------------------------------------------------
+
+        ctx.aeeRegistry =
+            &AEEEngine::getAEE();
+
+
+        // --------------------------------------------------------
+        // MQTT
+        // --------------------------------------------------------
+
+        ctx.mqtt =
+            &config.mqtt;
+
+
+        // --------------------------------------------------------
+        // WEB API
+        // --------------------------------------------------------
+
+        ctx.webApi =
+            &config.webApi;
+
+
+        // --------------------------------------------------------
+        // BUILD
+        // --------------------------------------------------------
+
+        introspection.build(ctx);
     }
 
 public:
-    // ------------------------------------------------------------
-    //  SETUP: registra i task standard
-    // ------------------------------------------------------------
-    static void Setup(const FrontendConfig& cfg) {
 
-        TaskEngineOrchestrator::Setup(cfg);
-
-        // Task standard del frontend
-        TaskEngineOrchestrator::AddTask(Task_Sensors,         cfg.security.intervalMs, cfg.security.enabled );
-        TaskEngineOrchestrator::AddTask(Task_HVAC,            cfg.hvac.intervalMs, cfg.hvac.enabled);
-        TaskEngineOrchestrator::AddTask(Task_Meteo,           cfg.weather.intervalMs, cfg.weather.enabled);
-        TaskEngineOrchestrator::AddTask(Task_Power,           cfg.power.intervalMs, cfg.power.enabled);
-        TaskEngineOrchestrator::AddTask(Task_PowerSupervisor, cfg.ps.intervalMs, cfg.ps.enabled);
-        TaskEngineOrchestrator::AddTask(Task_Averages,        cfg.averages.intervalMs, cfg.averages.enabled);
-        TaskEngineOrchestrator::AddTask(Task_Communication,   100, true); // round robin interno
-        TaskEngineOrchestrator::AddTask(Task_Jobs,            cfg.jobs.intervalMs, cfg.jobs.enabled);
-    }
-
-    // ------------------------------------------------------------
-    //  AGGIUNTA TASK CUSTOM DAL FRONTEND
-    // ------------------------------------------------------------
-    static void AddCustomTask(TaskEngineOrchestrator::TaskFn fn, uint32_t intervalMs, bool enabled) {
-        TaskEngineOrchestrator::AddTask(fn, intervalMs, enabled);
-    }
-
-    // ------------------------------------------------------------
-    //  LOOP FRONTEND
-    // ------------------------------------------------------------
-    static void Loop(DomoManager& manager, unsigned long now) {
-        TaskEngineOrchestrator::Loop(manager, now);
-    }
-
-    static bool hasFrontendCycleCompleted() {
-        return TaskEngineOrchestrator::hasFrontendCycleCompleted();
-    }
-
-    static void resetFrontendCycleFlag() {
-        TaskEngineOrchestrator::resetFrontendCycleFlag();
-    }
-
-};
-
-
-class DomoManagerFrontendEngine {
-private:
-    // ------------------------------------------------------------
-    //  ETHERNET + MODBUS
-    // ------------------------------------------------------------
-    static EthernetServer& ethServer() {
-        static EthernetServer server; 
-        return server;
-    }
-
-    static EthernetClient& ethClient() {
-        static EthernetClient client;
-        return client;
-    }
-
-    static ModbusTCPClient& modbusTCPClient() {
-        static ModbusTCPClient client(ethClient());
-        return client;
-    }
-
-    // --- istanza del pulsante ---
-    static inline ButtonManager* btnUSER;
-
-    static inline AEERegistry* aee = nullptr;
-    static inline AEEManagement* aeeMgr = nullptr;
-        
-    static inline bool backendDone;
-    static inline bool frontendDone;
-    static inline void (*fullCycleCallback)(DomoManager&) = nullptr;
-    static inline FrontendConfig config;
-    static inline DomoManager* Manager;
-
-    static void OnOwnerModeChanged(
-        OwnerManager::Mode oldMode,
-        OwnerManager::Mode newMode,
-        OwnerManager::Reason reason)
-    {
-        auto& dm = *DomoManager::instance;
-        auto& owner = dm.getOwner();
-
-        // Attiva/disattiva log
-        if (newMode == OwnerManager::DEVELOPER)
-            LogManager::enable();
-        else
-            LogManager::disable();
-
-        const char* newModeStr =
-            (newMode == OwnerManager::DEVELOPER) ? "DEVELOPER" :
-            (newMode == OwnerManager::GUEST)     ? "GUEST" :
-                                                "OWNER";
-
-        LOG_IF("FrontendEngine",
-            "Callback OwnerModeChanged: %s → %s",
-            owner.getModeName(),
-            newModeStr);
-    }
-
-    static void CheckFullCycle(unsigned long now) {
-        auto dm = DomoManager::instance;
-
-        bool backend = dm->hasBackendCycleCompleted();
-        bool frontend = TaskEngine::hasFrontendCycleCompleted();
-
-        if (backend && frontend) {
-            dm->resetBackendCycleFlag();
-            TaskEngine::resetFrontendCycleFlag();
-
-            if (fullCycleCallback)
-                fullCycleCallback(*DomoManager::instance);
-        }
-    }
-
-    static void SomethingChanged() {
-        auto& manager = *DomoManager::instance;
-        auto& buffer  = manager.getBuffer();
-        
-        // 1) Logiche interne
-        auto changedFromPanel = buffer.getChangedMapByType(FromPanel);
-        if (!changedFromPanel.empty()) {
-            LOG_WF("Main", "SomethingChanged PANEL: %d elementi modificati", changedFromPanel.size());
-
-            for (const auto &kv : changedFromPanel) {
-                int key = kv.first;
-                int area = key / BufferFlagType_Count;
-
-                SecurityOrchestrator::ApplySecurityCommands(area);
-                
-                switch (area) {
-                    // Nessun case definito nel codice originale
-                }
-            }
-        }
-    }
-
-    static void watchdogHandler(const Watchdog::WatchdogStatus& st) {
-        LOG_WF("Main", "===== WATCHDOG EVENT =====");
-        LOG_WF("Main", "Reason: %s", st.reason);
-        LOG_WF("Main", "Value: %ld", st.value);
-
-        if (st.blocked)   LOG_WF("Main", "Type: BLOCKED");
-        if (st.overload)  LOG_WF("Main", "Type: OVERLOAD");
-        if (st.unstable)  LOG_WF("Main", "Type: UNSTABLE");
-        if (st.inactive)  LOG_WF("Main", "Type: INACTIVE");
-
-        if (st.blocked) {
-            LOG_EF("Main", "<<<<<<<<+>>>>>>>>");
-            LOG_EF("Main", "Action: System reset due to BLOCKED callback");
-            NVIC_SystemReset();
-        }
-
-        if (st.overload && st.value > 200) {
-            LOG_WF("Main", "Action: Severe overload detected");
-        }
-
-        if (st.unstable) {
-            LOG_WF("Main", "Action: System unstable, logging event");
-        }
-
-        LOG_WF("Main", "==========================");
-    }
-
-
-    // ------------------------------------------------------------
-    //  ETHERNET SETUP
-    // ------------------------------------------------------------
-    static void SetupEthernet(const FrontendConfig& cfg) {
-        uint8_t mac[6];
-        for (int i = 0; i < 6; ++i)
-            mac[i] = cfg.net.mac[i];
-
-        Ethernet.begin(mac, cfg.net.ip, cfg.net.gateway, cfg.net.subnet);
-
-        if (Ethernet.hardwareStatus() == EthernetNoHardware) {
-            LOG_EF("DomoManagerFrontendEngine", "Ethernet shield not found");
-            while (true) { delay(100); }
-        }
-
-        if (Ethernet.linkStatus() == LinkOFF) {
-            LOG_EF("DomoManagerFrontendEngine", "Ethernet cable is not connected");
-            digitalWrite(LED_USER, true);
-        } else {
-            LOG_IF("DomoManagerFrontendEngine", "Ethernet interface started");
-            LOG_IF("DomoManagerFrontendEngine", "My IP address: %d.%d.%d.%d",
-                Ethernet.localIP()[0],
-                Ethernet.localIP()[1],
-                Ethernet.localIP()[2],
-                Ethernet.localIP()[3]);
-        }
-
-        if(cfg.domoManager.hmi.enabled )
-            ethServer().begin(cfg.domoManager.hmi.port);
-    }
-
-    // ------------------------------------------------------------
-    //  REGISTRAZIONE DIAGNOSTICA FRONTEND
-    // ------------------------------------------------------------
-    static void RegisterFrontendDiagnostics(const FrontendConfig& cfg) {
-        Diagnostic::frontendDiagnosticCallback() = [cfg]() {
-            Serial.println("\n===== FRONTEND DIAGNOSTIC =====");
-
-            if (cfg.ps.enabled)
-                PowerSupervisor::Diagnostic::Report(PowerSupervisorOrchestrator::Get());
-            
-            if (cfg.power.enabled)
-                PowerManager::Diagnostic::FullReport(PowerEngine::Get());
-            
-            if (cfg.hvac.enabled)
-                HeatPumpController ::Diagnostic::Report(HVACEngine::GetHP());
-            
-            if (cfg.weather.enabled)
-                WeatherStation::Diagnostic::Report(WeatherEngine::Get());
-            
-            if (cfg.security.enabled) {
-                SecurityOrchestrator::Diagnostic::FullReport();
-                SecuritySensorEngine::getSystem().DiagnosticReport();
-
-            }
-            Serial.println("===== END FRONTEND DIAGNOSTIC =====\n");
-        };
-    }
-
-    // ------------------------------------------------------------
-    //  INIT (solo Engine)
-    // ------------------------------------------------------------
-    static void InitEngines(DomoManager& manager) {
-        if(config.security.enabled)
-            SecuritySensorEngine::Setup(config.security);
-
-        if(config.hvac.enabled)
-            HVACEngine::Setup(config.hvac);
-        
-        if(config.weather.enabled)
-            WeatherEngine::Setup(config.weather);
-        
-        if(config.power.enabled)
-            PowerEngine::Setup(config.power);
-
-        if(config.ps.enabled)
-            PowerSupervisorEngine::Setup(config.ps);   
-
-        JobsEngine::Setup();
-        
-        if (config.domoManager.automation.json)
-            manager.loadAutomationJson(config.domoManager.automation.json);
-
-        WebAPIEngine::Setup(config.webApi);
-
-        if(config.watch.enabled)
-            WatchEngine::attach(manager, config.watch);
-        
-        RegisterFrontendDiagnostics(config);    
-    }
-
-    static void SetFullCycleCallback(void (*fn)(DomoManager&)) {
-        fullCycleCallback = fn;
-    }
-
-public:  
-
-    // ------------------------------------------------------------
+    // ============================================================
     //  SETUP COMPLETO
-    // ------------------------------------------------------------
-    static void Setup(const FrontendConfig& cfg)
+    // ============================================================
+
+    static void Setup(
+        const FrontendConfig& cfg)
     {
-        // 🔥 Salva la configurazione globale
+        // --------------------------------------------------------
+        // Config globale
+        // --------------------------------------------------------
+
         config = cfg;
 
-        // --- USER BUTTON ---
-        btnUSER = new ButtonManager(cfg.pins.userButton);
-        btnUSER->begin();
 
-        LOG_I("DomoManagerFrontendEngine", "DomoManager is starting...");
+        // --------------------------------------------------------
+        // AEE
+        // --------------------------------------------------------
 
-        AEEEngine::instance().Setup(cfg.bridge.aee);
-        TaskEngine::Setup(cfg);
-
-        Manager = new DomoManager(
-            cfg.pins.leds
+        AEEEngine::instance().Setup(
+            cfg.bridge.aee
         );
 
-        // --- ETHERNET ---
-        SetupEthernet(cfg);
 
-        // --- MODBUS TCP ---
-        modbusTCPClient().setTimeout(cfg.modbus.timeoutMs);
-        LOG_IF("DomoManagerFrontendEngine", "Modbus TCP to RTU timeout set %d mSec.", cfg.modbus.timeoutMs);
+        // --------------------------------------------------------
+        // DOMO MANAGER
+        // --------------------------------------------------------
+
+        Manager =
+            new DomoManager(
+                cfg.pins.leds
+            );
+
+
+        // --------------------------------------------------------
+        // FRONTEND RUNTIME
+        // --------------------------------------------------------
+
+        instance =
+            new DomoManagerFrontendEngine(
+                *Manager,
+                cfg
+            );
+
+
+        // --------------------------------------------------------
+        // NETWORK
+        // --------------------------------------------------------
+
+        network =
+            new FrontendNetwork(
+                cfg.mqtt.clientCount
+            );
+
+
+        LOG_I(
+            "DomoManagerFrontendEngine",
+            "DomoManager is starting..."
+        );
+
+
+        // --------------------------------------------------------
+        // ETHERNET + HMI
+        // --------------------------------------------------------
+
+        SetupEthernet(
+            cfg
+        );
+
+
+        // --------------------------------------------------------
+        // MODBUS TCP CLIENT
+        // --------------------------------------------------------
+
+        network
+            ->modbusTCP()
+            .modbus
+            .setTimeout(
+                cfg.modbus.timeoutMs
+            );
+
+
+        LOG_IF(
+            "DomoManagerFrontendEngine",
+            "Modbus TCP to RTU timeout set %d mSec.",
+            cfg.modbus.timeoutMs
+        );
+
+
         delay(2000);
 
-        // --- TASK ENGINE ---
-        TaskEngine::Setup(cfg);
 
-        // --- WATCHDOG CALLBACK ---
-        Manager->SetWatchdogCallback(watchdogHandler);
-        
-        // --- OPERAZIONI DI BOOT (spostate dal main) ---
-        auto& dm = *DomoManager::instance;
+        // --------------------------------------------------------
+        // TASK ENGINE
+        // --------------------------------------------------------
 
-        // --- DOMO MANAGER CORE ---
-        if(!Manager->setup(SomethingChanged, TaskEngine::Loop, config.domoManager )) {
-            while(1);
-        };
-        
-        dm.getOwner().setCallback(DomoManagerFrontendEngine::OnOwnerModeChanged);
-                
-        // --- INIZIALIZZA TUTTI GLI ENGINE ---
-        InitEngines(*Manager);   
+        TaskEngine::Setup(
+            cfg
+        );
 
-        //Collego callback agli eventi di modifica Aee dallo slave vs. master
-        BridgeEngine::get().onFrontendAEEChange = OnAEEVarChanged;
-        
-        LOG_IF("AEE", "AEE initialized with %d variables", cfg.bridge.aee.count);
 
-        // --- HOTSTANDBY / MQTT / Bridge ---
+        TaskEngine::AddTask(
+            [](DomoManager& dm, unsigned long now)
+            {
+                (void)dm;
+
+                JobsEngine::Loop(
+                    now
+                );
+            },
+            cfg.jobs.intervalMs,
+            cfg.jobs.enabled
+        );
+
+
+        TaskEngine::AddTask(
+            [](DomoManager& dm, unsigned long now)
+            {
+                hmiEngine.Sync(
+                    dm,
+                    now
+                );
+            },
+            10,
+            cfg.domoManager.hmi.enabled
+        );
+
+
+        TaskEngine::AddTask(
+            [](DomoManager& dm, unsigned long now)
+            {
+                (void)dm;
+
+                WeatherEngine::Loop(
+                    now
+                );
+            },
+            cfg.weather.intervalMs,
+            cfg.weather.enabled
+        );
+
+
+        TaskEngine::AddTask(
+            Task_PowerSupervisor,
+            cfg.ps.intervalMs,
+            cfg.ps.enabled
+        );
+
+
+        TaskEngine::AddTask(
+            Task_Power,
+            cfg.power.intervalMs,
+            cfg.power.enabled
+        );
+
+
+        // --------------------------------------------------------
+        // WATCHDOG CALLBACK
+        // --------------------------------------------------------
+
+        Manager->SetWatchdogCallback(
+            watchdogHandler
+        );
+
+
+        // ========================================================
+        // EVENT SOURCES
+        // ========================================================
+
+        static int hmiSource =
+            Manager->getEventManager().add(
+                HMIEventCallback,
+                "HMI"
+            );
+
+
+        static int aeeSource =
+            Manager->getEventManager().add(
+                AEEEventCallback,
+                "AEE"
+            );
+
+
+        AEEEngine::instance()
+            .attachReceiveContext(
+                Manager->getBuffer(),
+                Manager->getEventManager(),
+                aeeSource
+            );
+
+
+        // --------------------------------------------------------
+        // DOMO MANAGER CORE
+        // --------------------------------------------------------
+
+        NetworkManager::ProtocolId modbusRTUProtocol = -1;
+
+
+        if (cfg.modbus.enabled)
+        {
+            modbusRTUProtocol =
+                Manager->net.registerProtocol(
+                    "Mbus-RTU",
+                    200,
+                    550,
+                    1
+                );
+
+
+            Manager->net.setPacingEnabled(
+                modbusRTUProtocol,
+                false
+            );
+        }
+
+
+        if (cfg.domoManager.hmi.enabled)
+        {
+            const uint8_t hmiSocketDemand =
+                static_cast<uint8_t>(
+                    1 + cfg.domoManager.hmi.maxClients * 2
+                );
+
+            auto hmiProtocolId =
+                Manager->net.registerProtocol(
+                    "HMI",
+                    cfg.domoManager.hmi.pollingMs,
+                    60,
+                    hmiSocketDemand
+                );
+
+
+            hmiEngine.Setup( config.domoManager.hmi, 
+                Manager->net, 
+                Manager->net.getProtocol(hmiProtocolId).socketOwner, 
+                hmiProtocolId, 
+                cfg.domoManager.hmi.maxClients, 
+                300, 
+                hmiSource );
+        }
+
+
+        if (!Manager->setup(
+                SomethingChanged,
+                TaskEngine::Loop,
+                config.domoManager,
+                modbusRTUProtocol))
+        {
+            while (true)
+            {
+                delay(100);
+            }
+        }
+
+
+        Manager->getOwner().setCallback(
+            FrontendOwnerMode::OnChanged
+        );
+
+
+        // --------------------------------------------------------
+        // ENGINES
+        // --------------------------------------------------------
+
+        InitEngines(
+            *Manager
+        );
+
+
+        // --------------------------------------------------------
+        // AEE FRONTEND CALLBACK
+        // --------------------------------------------------------
+
+        BridgeEngine::get()
+            .onFrontendAEEChange =
+                OnAEEVarChanged;
+
+
+        LOG_IF(
+            "AEE",
+            "AEE initialized with %d variables",
+            cfg.bridge.aee.count
+        );
+
+
+        // --------------------------------------------------------
+        // HOTSTANDBY / MQTT / BRIDGE
+        // --------------------------------------------------------
+
         #if HOTSTANDBY_ENABLED
-            Manager.enableHotStandby(false);
-        #else
-            if (cfg.mqtt.enabled)
-                MQTTEngine::Setup(*Manager, ethClient(), cfg.mqtt);
 
-            if (cfg.bridge.enabled)  {
+            Manager->enableHotStandby(
+                false
+            );
+
+        #else
+            if (cfg.bridge.enabled)
+            {
+                int bridgeProtocolId =
+                    Manager->net.registerProtocol(
+                        "Bridge",
+                        50,
+                        300,
+                        1
+                    );
+
                 static UdpAdapter transport(
                     cfg.bridge.ip,
                     cfg.bridge.localPort,
                     cfg.bridge.remotePort
                 );
 
-                //Partenza come MASTER
-                BridgeEngine::get().init(&transport, AEEEngine::getAEE(), true);
+                transport.setSocketContext( Manager->net, 
+                    Manager->net.getProtocol(bridgeProtocolId).socketOwner );
+
+                BridgeEngine::get().init(
+                    &transport,
+                    AEEEngine::getAEE(),
+                    true
+                );
+
+                BridgeEngine::instance()
+                    .setupPacer(
+                        Manager->net,
+                        bridgeProtocolId
+                    );
             }
 
+            // --------------------------------------------------------
+            // DOMO INTROSPECTION
+            // --------------------------------------------------------
+
+            BuildIntrospection();
+            DomoSemanticResolver semanticResolver;
+
+            auto semanticResult =
+                semanticResolver.resolve(
+                    introspection
+                );
+
+            semanticResolver.report(
+                introspection
+            );
+       
+            if (cfg.mqtt.enabled)
+            {
+                int mqttProtocolId =
+                    Manager->net.registerProtocol(
+                        "MQTT",
+                        50,
+                        20,
+                        (uint8_t)
+                            cfg.mqtt.clientCount
+                    );
+
+
+                static int mqttSource =
+                    Manager->getEventManager().add(
+                        MQTTEventCallback,
+                        "MQTT"
+                    );
+
+
+                MQTTEngine::Setup(
+                    *Manager,
+                    Manager->net,
+                    *network,
+                    network->mqttClientCount(),
+                    cfg.mqtt,
+                    mqttProtocolId,
+                    (uint8_t)mqttSource
+                );
+            }
         #endif
 
-        DomoManagerFrontendEngine::SetFullCycleCallback([](DomoManager& dm) {
-            auto& buffer  = dm.getBuffer();
-            auto& changed = buffer.getChangedMap();
 
-            if (changed.empty())
-                return;
+        // --------------------------------------------------------
+        // FULL CYCLE
+        // --------------------------------------------------------
 
-            std::vector<DMAEE::Update> updates;
-            updates.reserve(32);
+        DomoManagerFrontendEngine::
+            SetFullCycleCallback(
+                [](DomoManager& dm)
+                {
+                    const int OLDER = 5000;
 
-            bool hasUpdates = DMAEE::BuildUpdatesFromBuffer(
-                AEEEngine::getMgr(),
-                buffer,
-                changed,
-                updates
+
+                    auto& buffer =
+                        dm.getBuffer();
+
+
+                    std::vector<DMAEE::Update>
+                        updates;
+
+
+                    updates.reserve(
+                        16
+                    );
+
+
+                    const unsigned long now =
+                        dm.getTimeManager()
+                            .nowMs();
+
+
+                    // ------------------------------------------------
+                    // POLLING AEE
+                    // ------------------------------------------------
+
+                    const bool hasUpdates =
+                        DMAEE::
+                        BuildUpdatesFromPolledSources(
+                            AEEEngine::getMgr(),
+                            buffer,
+                            updates
+                        );
+
+
+                    if (hasUpdates)
+                    {
+                        DMAEE::ApplyUpdates(
+                            updates,
+                            now
+                        );
+                    }
+
+
+                    // ------------------------------------------------
+                    // Pulizia variazioni Buffer
+                    // ------------------------------------------------
+
+                    buffer.ResetAll(
+                        now,
+                        OLDER
+                    );
+                }
             );
 
-            if (!hasUpdates) {
-                buffer.ResetAll(5000);
-                return;
-            }
 
-            DMAEE::ApplyUpdates(
-                updates,
-                millis()
-            );
+        // --------------------------------------------------------
+        // WATCHDOG
+        // --------------------------------------------------------
 
-            buffer.ResetAll(5000);
-        });
-
-        // --- WATCHDOG ---
         Manager->enableWatchdog();
-        LOG_IF("DOMO MANAGER", "DOMO-MANAGER IS STARTING...");
-        LOG_IF("DOMO MANAGER", "********************* 06.2027 build 01");
+
+
+        LOG_IF(
+            "DOMO MANAGER",
+            "********************* 08.2026 build 02"
+        );
+
+        Manager->net.sockets().dump();
     }
 
-    // ------------------------------------------------------------
+
+    // ============================================================
     //  LOOP COMPLETO
-    // ------------------------------------------------------------
-    static void loop() {
-        unsigned long now = Manager->getTimeManager().nowMs();
-        
-        auto st = btnUSER->update(now);
-        if (st.pressedAtStartup) {
-            LOG_IF("BUTTON", "Pulsante tenuto premuto allo startup");
-            Manager->getWatchDiag().onButtonPressed(*Manager, 0, config.diagnostic );
-        } else  if (st.pressedNow) {
-            LOG_IF("BUTTON", "Pulsante premuto durante il loop");
-            
-            auto& wd = Manager->getWatchDiag();
-            if (wd.isPaused()) {
-                // 🔥 Siamo in modalità WATCH → riattiva log e chiudi diagnostica Watch
-                wd.onButtonPressed(*Manager, 1, config.diagnostic);
-            } else {
-                // 🔥 Modalità normale → diagnostica estesa OwnerManager
-                Manager->getWatchDiag().onButtonPressed(*Manager, 1, config.diagnostic);
-            }
-        }
-        
-        // 🔥 Attiva DEVELOPER dopo il primo ciclo
-        static bool devModeApplied = false;
-        if (!devModeApplied) {
-            Manager->getOwner().setDeveloper(OwnerManager::SYSTEM_REBOOT);
-            devModeApplied = true;
-        }
+    // ============================================================
+
+    static void loop()
+    {
+        if (!instance)
+            return;
+
+
+        // ========================================================
+        // FRONTEND RUNTIME
+        //
+        // Qui vengono eseguiti:
+        //
+        //   - acquisizione now
+        //   - ButtonManager
+        //   - Developer Mode
+        //   - HotStandby
+        //
+        // ========================================================
+
+        const unsigned long now =
+            instance->updateRuntime();
+
+
+        // ========================================================
+        // APPLICATION LOOP
+        // ========================================================
 
         #if HOTSTANDBY_ENABLED
-            static bool lastMaster = false;
-            bool isMaster = Manager->isClusterMaster();
 
-            // Transizione di ruolo → gestisco Ethernet SOLO QUI
-            if (isMaster != lastMaster) {
-                if (isMaster) {
-                    LOG_I("Main", "Passo a MASTER → abilito Ethernet");
-                    SetupEthernet(config);
-                } else {
-                    LOG_I("Main", "Passo a SLAVE → disabilito Ethernet");
-                    ethServer().end();
-                    Ethernet.end();
-                }
-                lastMaster = isMaster;
-            }
-        #endif
-        // Se SLAVE → niente logica applicativa, solo standby (già gestito da Manager.loop)
-        static EthernetClient client;
-        #if HOTSTANDBY_ENABLED
-            if (isMaster) {
+                if (instance->getIsMaster())
+
         #else
-            if (true) {
+
+                if (true)
+
         #endif
-            if(config.domoManager.hmi.enabled) {
-                if (!client || !client.connected()) {
-                    client = ethServer().available();
-                    if (client) {
-                        LOG_IF("Main", "Nuovo client connesso");
-                    }
-                }
-            }
+        {
+            // ----------------------------------------------------
+            // HMI
+            // ----------------------------------------------------
 
-            Manager->loop(client, modbusTCPClient(), now);
+            hmiEngine.SetLoopEnabled(
+                Manager->getPowerOnCycleCompleted()
+            );
 
-        } else {
-            // SLAVE → nessun client, nessun Bridge, solo:
-            Manager->loop(client, modbusTCPClient(), now);
+
+            hmiEngine.ProcessNetwork(
+                *Manager,
+                now
+            );
+
+
+            // ----------------------------------------------------
+            // DOMO MANAGER
+            // ----------------------------------------------------
+
+            Manager->loop(
+                network->
+                    modbusTCP()
+                    .modbus
+            );
         }
-        // 🔥 dopo aver chiamato Manager->loop
-        CheckFullCycle(now);  
+        else
+        {
+            // ----------------------------------------------------
+            // SLAVE
+            // ----------------------------------------------------
 
+            Manager->loop(
+                network->
+                    modbusTCP()
+                    .modbus
+            );
+        }
+
+
+        // ========================================================
+        // FULL CYCLE
+        // ========================================================
+
+        CheckFullCycle();
     }
 };
 
-   
+// ============================================================
+// DEFINIZIONE ISTANZA HMI
+// ============================================================
+
+HMIEngine DomoManagerFrontendEngine::hmiEngine;
 
 #endif

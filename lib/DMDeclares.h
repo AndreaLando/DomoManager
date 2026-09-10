@@ -130,10 +130,6 @@ struct DomoManagerConfig {
         int maxClients=1;
     } hmi;
 
-    struct ModbusRTU {
-        uint16_t port = 502;
-    } modbusRTU;
-
     Watchdog::Params watchdog;
 
     struct Devices {
@@ -221,44 +217,39 @@ struct FrontendConfig {
     {
         bool enabled = false;
 
-        // =========================================================
-        // IDENTITÀ DEL NODO DM
-        // =========================================================
+        // ============================================================
+        // Device specific String <-> Value enum
+        // ============================================================
 
-        const char* nodeId = nullptr;
-
-
-        // =========================================================
-        // CLIENT / BROKER MQTT
-        // =========================================================
-
-        struct Client
+        struct EnumValue
         {
-            bool enabled = false;
-
-            IPAddress broker;
-            uint16_t port = 1883;
-
-            enum class Backend
-            {
-                GENERIC,
-                HOME_ASSISTANT,
-                ZIGBEE2MQTT,
-                SHELLY
-            };
-
-            Backend backend = Backend::GENERIC;
-
-            const char* name = nullptr;
+            const char* text;
+            int value;
         };
 
-        const Client* clients = nullptr;
-        size_t clientCount = 0;
+        struct EnumList
+        {
+            const EnumValue* data = nullptr;
+            size_t count = 0;
 
+            constexpr EnumList() = default;
 
-        // =========================================================
-        // MAPPING MQTT <-> BUFFER
-        // =========================================================
+            template <size_t N>
+            constexpr EnumList(const EnumValue (&array)[N])
+                : data(array),
+                count(N)
+            {
+            }
+
+            constexpr bool empty() const
+            {
+                return data == nullptr || count == 0;
+            }
+        };
+        
+        // ============================================================
+        // Mapping
+        // ============================================================
 
         struct Mapping
         {
@@ -278,41 +269,61 @@ struct FrontendConfig {
                 INT,
                 FLOAT,
                 BOOL,
-                STRING
+                STRING,
+                ENUM
             };
 
             DataType type = DataType::INT;
 
-            // Area Buffer DM
+            // Area Buffer DomoManager
             int area = -1;
 
             // Scaling
             float scale = 1.0f;
+
+            // Tabella conversione specifica del dispositivo
+            EnumList enums{};
         };
 
-
-        // =========================================================
-        // DEVICE MQTT
-        // =========================================================
+        // ============================================================
+        // Device
+        // ============================================================
 
         struct Device
         {
-            uint8_t client = 0;
+            static constexpr size_t MAX_MAPPINGS = 16;
 
-            // Identificativo del device nel protocollo MQTT
-            // es. "0xa4c138a6a900c9d6"
             const char* id = nullptr;
-
-            // Nome logico
             const char* name = nullptr;
 
-            const Mapping* mappings = nullptr;
-            size_t mappingCount = 0;
+            Mapping mappings[MAX_MAPPINGS]{};
         };
 
+         struct Client
+        {
+            bool enabled = false;
+            IPAddress broker;
+            uint16_t port = 1883;
 
-        const Device* devices = nullptr;
-        size_t deviceCount = 0;
+            enum class Backend
+            {
+                GENERIC,
+                HOME_ASSISTANT,
+                ZIGBEE2MQTT,
+                SHELLY
+            };
+
+            Backend backend = Backend::GENERIC;
+
+            const char* name = nullptr;
+            const char* topicPrefix = nullptr;
+
+            const Device* devices = nullptr;
+            size_t deviceCount = 0;
+        };
+
+        const Client* clients = nullptr;
+        size_t clientCount = 0;
     } mqtt;
 
     DomoManagerConfig domoManager;
@@ -382,7 +393,7 @@ struct FrontendConfig {
         uint32_t intervalMs = 3000;
         const WiredSensorsManager::WiredSensorConfig* sensors;
         size_t count;
-
+        int statusArea=-1;
         uint32_t startupInhibitMs = 10000;   // <--- nuovo parametro
     } security;
 

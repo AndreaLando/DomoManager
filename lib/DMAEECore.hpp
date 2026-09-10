@@ -287,6 +287,17 @@ public:
                 return v;
         return nullptr;
     }
+
+    AEEVariableBase* find(const String& name) const
+    {
+        for (auto* v : vars)
+        {
+            if (v && strcmp(name.c_str(), v->def.name) == 0)
+                return v;
+        }
+
+        return nullptr;
+    }
 };
 
 // ============================================================

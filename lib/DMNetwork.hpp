@@ -66,288 +66,860 @@
  */
 
 
+
+
+// ============================================================
+// SocketManager
+//
+// NON BLOCKING.
+//
+// Funzioni:
+//   - tiene traccia della domanda configurata
+//   - tiene traccia delle socket effettivamente acquisite
+//   - non blocca mai il firmware
+//   - acquire() fallisce immediatamente se non c'è spazio
+//
+// Compatibile con NetworkManager esistente.
+// ============================================================
+
+
 class SocketManager
 {
 public:
 
-    // ============================================================
-    // CONFIG
-    // ============================================================
+    // ========================================================
+    // OWNER ID
+    // ========================================================
 
-    static constexpr uint8_t MAX_SOCKETS = 4; // **** LIMITE DI ARDUINO OPTA ****
+    using OwnerId = int;
 
-    // ============================================================
-    // TIPI PUBBLICI
-    // ============================================================
+
+    // ========================================================
+    // SOCKET TYPE
+    // ========================================================
+
+    enum class SocketKind : uint8_t
+    {
+        TCP_SERVER,
+        TCP_CLIENT,
+        UDP
+    };
+
+
+    // ========================================================
+    // SOCKET
+    // ========================================================
 
     struct Socket
     {
-        bool used;
-        const char* owner;
-        int resourceId;
+        bool used = false;
 
-        Socket()
-            : used(false),
-              owner(nullptr),
-              resourceId(-1)
-        {}
+        OwnerId owner = -1;
+
+        SocketKind kind = SocketKind::TCP_CLIENT;
+
+        int resourceId = -1;
     };
 
-    struct Demand
+
+    // ========================================================
+    // OWNER
+    // ========================================================
+
+    struct Owner
     {
-        const char* owner;
-        uint8_t maximum;
+        OwnerId id = -1;
 
-        Demand()
-            : owner(nullptr),
-              maximum(0)
-        {}
+        const char* name = nullptr;
 
-        Demand(
-            const char* owner_,
-            uint8_t maximum_)
-            : owner(owner_),
-              maximum(maximum_)
-        {}
+        uint16_t demand = 0;
+
+        // true = per questo owner è già stato emesso
+        // un warning di saturazione.
+        //
+        // Viene azzerato quando l'owner riesce nuovamente
+        // ad acquisire una socket.
+        bool capacityWarningShown = false;
     };
+
+
+    // ========================================================
+    // CONFIGURATION
+    // ========================================================
+
+    static constexpr uint8_t MAX_SOCKETS = 4;
+
 
 private:
 
-    // ============================================================
-    // STATO
-    // ============================================================
+    // ========================================================
+    // OWNER TABLE
+    // ========================================================
 
-    Socket sockets[MAX_SOCKETS];
+    std::vector<Owner> owners;
 
-    std::vector<Demand> demands;
+
+    // ========================================================
+    // SOCKET TABLE
+    // ========================================================
+
+    Socket sockets_[MAX_SOCKETS];
+
 
 public:
 
-    // ============================================================
-    // DEMAND
-    // ============================================================
+    // ========================================================
+    // CONSTRUCTOR
+    // ========================================================
 
-    void registerDemand(
-        const char* owner,
+    SocketManager() = default;
+
+
+    // ========================================================
+    // RESET
+    // ========================================================
+
+    void reset()
+    {
+        for (uint8_t i = 0;
+             i < MAX_SOCKETS;
+             ++i)
+        {
+            sockets_[i] = Socket{};
+        }
+
+        owners.clear();
+    }
+
+
+    // ========================================================
+    // REGISTER OWNER
+    //
+    // Owner creato dinamicamente a runtime.
+    //
+    // NON riserva socket.
+    // ========================================================
+
+    OwnerId registerOwner(
+        const char* name,
+        uint16_t demand)
+    {
+        if (!name)
+            return -1;
+
+
+        // ----------------------------------------------------
+        // Owner già esistente
+        // ----------------------------------------------------
+
+        for (auto& owner : owners)
+        {
+            if (owner.name &&
+                strcmp(owner.name, name) == 0)
+            {
+                owner.demand = demand;
+
+                return owner.id;
+            }
+        }
+
+
+        // ----------------------------------------------------
+        // Nuovo owner
+        // ----------------------------------------------------
+
+        const OwnerId id =
+            static_cast<OwnerId>(
+                owners.size()
+            );
+
+
+        owners.push_back({
+            id,
+            name,
+            demand,
+            false
+        });
+
+
+        return id;
+    }
+
+
+    // ========================================================
+    // COMPATIBILITY
+    // ========================================================
+
+    OwnerId registerDemand(
+        const char* name,
         uint8_t maximum)
     {
-        demands.push_back(
-            Demand(owner, maximum)
+        return registerOwner(
+            name,
+            maximum
         );
     }
+
+
+    // ========================================================
+    // OWNER LOOKUP
+    // ========================================================
+
+    OwnerId findOwner(
+        const char* name) const
+    {
+        if (!name)
+            return -1;
+
+
+        for (const auto& owner : owners)
+        {
+            if (owner.name &&
+                strcmp(owner.name, name) == 0)
+            {
+                return owner.id;
+            }
+        }
+
+
+        return -1;
+    }
+
+
+    // ========================================================
+    // GET OWNER
+    // ========================================================
+
+    const Owner* getOwner(
+        OwnerId id) const
+    {
+        if (id < 0 ||
+            id >= static_cast<OwnerId>(
+                owners.size()))
+        {
+            return nullptr;
+        }
+
+
+        return &owners[id];
+    }
+
+
+    // ========================================================
+    // OWNER NAME
+    // ========================================================
+
+    const char* ownerName(
+        OwnerId id) const
+    {
+        const Owner* owner =
+            getOwner(id);
+
+
+        if (!owner)
+            return "?";
+
+
+        return owner->name
+            ? owner->name
+            : "?";
+    }
+
+
+    // ========================================================
+    // CONFIGURED DEMAND
+    // ========================================================
 
     uint16_t configuredDemand() const
     {
         uint16_t total = 0;
 
-        for (size_t i = 0; i < demands.size(); ++i)
-            total += demands[i].maximum;
+
+        for (const auto& owner : owners)
+        {
+            total += owner.demand;
+        }
+
 
         return total;
     }
 
-    // ============================================================
-    // VALIDAZIONE CONFIGURAZIONE
-    // ============================================================
 
-    bool validateCapacity() const
+    // ========================================================
+    // OWNER DEMAND
+    // ========================================================
+
+    uint16_t ownerDemand(
+        OwnerId id) const
     {
-        const uint16_t total =
-            configuredDemand();
+        const Owner* owner =
+            getOwner(id);
 
-        LOG_IF(
-            "NET::SOCKET",
-            "Configured demand=%u/%u",
-            (unsigned)total,
-            (unsigned)MAX_SOCKETS
-        );
 
-        for (size_t i = 0; i < demands.size(); ++i)
-        {
-            LOG_IF(
-                "NET::SOCKET",
-                "  %s max=%u",
-                demands[i].owner ?
-                    demands[i].owner :
-                    "?",
-                (unsigned)demands[i].maximum
-            );
-        }
+        if (!owner)
+            return 0;
 
-        if (total > MAX_SOCKETS)
+
+        return owner->demand;
+    }
+
+
+    // ========================================================
+    // ACQUIRE
+    //
+    // NON BLOCKING.
+    //
+    // Se la socket non è disponibile:
+    //   - ritorna -1
+    //   - emette un solo warning per owner
+    //
+    // Il warning viene riabilitato automaticamente quando
+    // l'owner riesce nuovamente ad acquisire una socket.
+    // ========================================================
+
+    int acquire(
+        OwnerId owner,
+        int resourceId,
+        SocketKind kind)
+    {
+        if (!isValidOwner(owner))
         {
             LOG_WF(
                 "NET::SOCKET",
-                "WARNING: configured socket demand=%u exceeds hardware limit=%u",
-                (unsigned)total,
-                (unsigned)MAX_SOCKETS
+                "ACQUIRE denied: invalid owner=%d",
+                owner
             );
 
-            return false;
+            return -1;
         }
 
-        return true;
-    }
 
-    // ============================================================
-    // ACQUIRE
-    // ============================================================
+        // ----------------------------------------------------
+        // Già acquisita
+        // ----------------------------------------------------
 
-    int acquire(
-        const char* owner,
-        int resourceId = -1)
-    {
-        // Evita doppia assegnazione della stessa risorsa
-        if (resourceId >= 0)
+        for (uint8_t i = 0;
+             i < MAX_SOCKETS;
+             ++i)
         {
-            for (uint8_t i = 0; i < MAX_SOCKETS; ++i)
-            {
-                if (sockets[i].used &&
-                    sockets[i].owner &&
-                    owner &&
-                    strcmp(sockets[i].owner, owner) == 0 &&
-                    sockets[i].resourceId == resourceId)
-                {
-                    return i;
-                }
-            }
-        }
+            Socket& socket =
+                sockets_[i];
 
-        for (uint8_t i = 0; i < MAX_SOCKETS; ++i)
-        {
-            if (!sockets[i].used)
-            {
-                sockets[i].used = true;
-                sockets[i].owner = owner;
-                sockets[i].resourceId = resourceId;
 
-                LOG_IF(
-                    "NET::SOCKET",
-                    "ACQUIRE slot=%u owner=%s resource=%d used=%u/%u",
-                    (unsigned)i,
-                    owner ? owner : "?",
-                    resourceId,
-                    (unsigned)usedCount(),
-                    (unsigned)MAX_SOCKETS
-                );
+            if (!socket.used)
+                continue;
+
+
+            if (socket.owner == owner &&
+                socket.resourceId == resourceId &&
+                socket.kind == kind)
+            {
+                // La risorsa è disponibile e correttamente
+                // tracciata: il prossimo failure potrà
+                // nuovamente generare warning.
+                owners[owner].capacityWarningShown =
+                    false;
 
                 return i;
             }
         }
 
-        // ============================================================
-        // NESSUN SLOT LIBERO
-        // NON BLOCCARE IL CHIAMANTE
-        // ============================================================
 
-        LOG_WF(
-            "NET::SOCKET",
-            "WARNING: no free socket for owner=%s resource=%d used=%u/%u",
-            owner ? owner : "?",
-            resourceId,
-            (unsigned)usedCount(),
-            (unsigned)MAX_SOCKETS
-        );
+        // ----------------------------------------------------
+        // Cerca socket libera
+        // ----------------------------------------------------
+
+        for (uint8_t i = 0;
+             i < MAX_SOCKETS;
+             ++i)
+        {
+            Socket& socket =
+                sockets_[i];
+
+
+            if (socket.used)
+                continue;
+
+
+            socket.used = true;
+
+            socket.owner =
+                owner;
+
+            socket.kind =
+                kind;
+
+            socket.resourceId =
+                resourceId;
+
+
+            owners[owner].capacityWarningShown =
+                false;
+
+
+            return i;
+        }
+
+
+        // ----------------------------------------------------
+        // SATURAZIONE
+        // ----------------------------------------------------
+
+        Owner& ownerData =
+            owners[owner];
+
+
+        if (!ownerData.capacityWarningShown)
+        {
+            LOG_WF(
+                "NET::SOCKET",
+                "NO SOCKET owner=%s(%d) resource=%d kind=%s used=%u/%u",
+                ownerData.name
+                    ? ownerData.name
+                    : "?",
+                owner,
+                resourceId,
+                kindName(kind),
+                usedCount(),
+                MAX_SOCKETS
+            );
+
+            ownerData.capacityWarningShown =
+                true;
+        }
+
 
         return -1;
     }
 
-    // ============================================================
-    // RELEASE
-    // ============================================================
 
-    void release(int slot)
+    // ========================================================
+    // COMPATIBILITY
+    //
+    // Legacy SocketHandle:
+    //
+    //     acquire(ownerName, resourceId)
+    //
+    // Cerca un owner già registrato.
+    // ========================================================
+
+    int acquire(
+        const char* owner,
+        int resourceId)
     {
-        if (slot < 0 ||
-            slot >= MAX_SOCKETS)
-            return;
+        const OwnerId ownerId =
+            findOwner(owner);
 
-        if (!sockets[slot].used)
-            return;
 
-        LOG_IF(
-            "NET::SOCKET",
-            "RELEASE slot=%u owner=%s resource=%d",
-            (unsigned)slot,
-            sockets[slot].owner ?
-                sockets[slot].owner :
-                "?",
-            sockets[slot].resourceId
+        if (ownerId < 0)
+        {
+            LOG_WF(
+                "NET::SOCKET",
+                "ACQUIRE denied: owner '%s' not registered",
+                owner ? owner : "?"
+            );
+
+            return -1;
+        }
+
+
+        return acquire(
+            ownerId,
+            resourceId,
+            SocketKind::TCP_CLIENT
         );
-
-        sockets[slot].used = false;
-        sockets[slot].owner = nullptr;
-        sockets[slot].resourceId = -1;
     }
 
-    // ============================================================
-    // STATUS
-    // ============================================================
+
+    // ========================================================
+    // RELEASE BY SLOT
+    // ========================================================
+
+    bool release(
+        int slot)
+    {
+        if (!isValidSlot(slot))
+            return false;
+
+
+        Socket& socket =
+            sockets_[slot];
+
+
+        if (!socket.used)
+            return false;
+
+
+        const OwnerId owner =
+            socket.owner;
+
+
+        socket = Socket{};
+
+
+        // Se l'owner è valido, il prossimo failure potrà
+        // generare nuovamente il warning.
+        if (isValidOwner(owner))
+        {
+            owners[owner].capacityWarningShown =
+                false;
+        }
+
+
+        return true;
+    }
+
+
+    // ========================================================
+    // RELEASE BY OWNER
+    // ========================================================
+
+    bool release(
+        OwnerId owner,
+        int resourceId,
+        SocketKind kind)
+    {
+        if (!isValidOwner(owner))
+            return false;
+
+
+        for (uint8_t i = 0;
+             i < MAX_SOCKETS;
+             ++i)
+        {
+            Socket& socket =
+                sockets_[i];
+
+
+            if (!socket.used)
+                continue;
+
+
+            if (socket.owner == owner &&
+                socket.resourceId == resourceId &&
+                socket.kind == kind)
+            {
+                return release(i);
+            }
+        }
+
+
+        return false;
+    }
+
+
+    // ========================================================
+    // COMPATIBILITY
+    // ========================================================
+
+    bool release(
+        const char* owner,
+        int resourceId,
+        SocketKind kind)
+    {
+        const OwnerId ownerId =
+            findOwner(owner);
+
+
+        if (ownerId < 0)
+            return false;
+
+
+        return release(
+            ownerId,
+            resourceId,
+            kind
+        );
+    }
+
+
+    // ========================================================
+    // RELEASE OWNER ALL
+    // ========================================================
+
+    uint8_t releaseOwner(
+        OwnerId owner)
+    {
+        if (!isValidOwner(owner))
+            return 0;
+
+
+        uint8_t released = 0;
+
+
+        for (uint8_t i = 0;
+             i < MAX_SOCKETS;
+             ++i)
+        {
+            if (!sockets_[i].used)
+                continue;
+
+
+            if (sockets_[i].owner != owner)
+                continue;
+
+
+            if (release(i))
+                ++released;
+        }
+
+
+        owners[owner].capacityWarningShown =
+            false;
+
+
+        return released;
+    }
+
+
+    // ========================================================
+    // COUNTERS
+    // ========================================================
 
     uint8_t usedCount() const
     {
         uint8_t count = 0;
 
+
         for (uint8_t i = 0;
              i < MAX_SOCKETS;
              ++i)
         {
-            if (sockets[i].used)
+            if (sockets_[i].used)
                 ++count;
         }
+
 
         return count;
     }
 
+
     uint8_t freeCount() const
     {
-        return MAX_SOCKETS - usedCount();
+        return static_cast<uint8_t>(
+            MAX_SOCKETS - usedCount()
+        );
     }
 
-    bool isUsed(int slot) const
+
+    // ========================================================
+    // QUERY SOCKET
+    // ========================================================
+
+    bool isUsed(
+        int slot) const
     {
-        if (slot < 0 ||
-            slot >= MAX_SOCKETS)
+        if (!isValidSlot(slot))
             return false;
 
-        return sockets[slot].used;
+
+        return sockets_[slot].used;
     }
 
-    const Socket& getSocket(int slot) const
+
+    const Socket* getSocket(
+        int slot) const
     {
-        return sockets[slot];
+        if (!isValidSlot(slot))
+            return nullptr;
+
+
+        return &sockets_[slot];
     }
 
-    // ============================================================
-    // DIAGNOSTICA
-    // ============================================================
 
-    void dump() const
+    // ========================================================
+    // COUNT BY OWNER
+    // ========================================================
+
+    uint8_t usedCountByOwner(
+        OwnerId owner) const
     {
-        LOG_IF(
-            "NET::SOCKET",
-            "Sockets used=%u/%u",
-            (unsigned)usedCount(),
-            (unsigned)MAX_SOCKETS
-        );
+        if (!isValidOwner(owner))
+            return 0;
+
+
+        uint8_t count = 0;
+
 
         for (uint8_t i = 0;
              i < MAX_SOCKETS;
              ++i)
         {
+            if (sockets_[i].used &&
+                sockets_[i].owner == owner)
+            {
+                ++count;
+            }
+        }
+
+
+        return count;
+    }
+
+
+    // ========================================================
+    // COUNT BY KIND
+    // ========================================================
+
+    uint8_t usedCountByKind(
+        SocketKind kind) const
+    {
+        uint8_t count = 0;
+
+
+        for (uint8_t i = 0;
+             i < MAX_SOCKETS;
+             ++i)
+        {
+            if (sockets_[i].used &&
+                sockets_[i].kind == kind)
+            {
+                ++count;
+            }
+        }
+
+
+        return count;
+    }
+
+
+    // ========================================================
+    // DIAGNOSTICS
+    //
+    // Chiamata esplicita: stampa tutto.
+    // Nessun logging automatico di acquire/release.
+    // ========================================================
+
+    void dump() const
+    {
+        LOG_IF(
+            "SocketManager",
+            "SOCKETS %u/%u used, %u free, owners=%u configuredDemand=%u",
+            usedCount(),
+            MAX_SOCKETS,
+            freeCount(),
+            (unsigned)owners.size(),
+            (unsigned)configuredDemand()
+        );
+
+
+        // ----------------------------------------------------
+        // Owner table
+        // ----------------------------------------------------
+
+        for (const auto& owner : owners)
+        {
             LOG_IF(
-                "NET::SOCKET",
-                "  slot=%u used=%u owner=%s resource=%d",
-                (unsigned)i,
-                sockets[i].used ? 1U : 0U,
-                sockets[i].owner ?
-                    sockets[i].owner :
-                    "-",
-                sockets[i].resourceId
+                "SocketManager",
+                "  OWNER [%d] %s demand=%u used=%u",
+                owner.id,
+                owner.name
+                    ? owner.name
+                    : "?",
+                (unsigned)owner.demand,
+                (unsigned)usedCountByOwner(
+                    owner.id
+                )
+            );
+        }
+
+
+        // ----------------------------------------------------
+        // Socket table
+        // ----------------------------------------------------
+
+        for (uint8_t i = 0;
+             i < MAX_SOCKETS;
+             ++i)
+        {
+            const Socket& socket =
+                sockets_[i];
+
+
+            if (!socket.used)
+            {
+                LOG_IF(
+                    "SocketManager",
+                    "  SOCKET [%u] FREE",
+                    i
+                );
+
+                continue;
+            }
+
+
+            LOG_IF(
+                "SocketManager",
+                "  SOCKET [%u] owner=%s(%d) resource=%d kind=%s",
+                i,
+                ownerName(socket.owner),
+                socket.owner,
+                socket.resourceId,
+                kindName(socket.kind)
             );
         }
     }
+
+
+private:
+
+    // ========================================================
+    // VALID OWNER
+    // ========================================================
+
+    bool isValidOwner(
+        OwnerId owner) const
+    {
+        return
+            owner >= 0 &&
+            owner <
+                static_cast<OwnerId>(
+                    owners.size()
+                );
+    }
+
+
+    // ========================================================
+    // VALID SOCKET SLOT
+    // ========================================================
+
+    bool isValidSlot(
+        int slot) const
+    {
+        return
+            slot >= 0 &&
+            slot <
+                static_cast<int>(
+                    MAX_SOCKETS
+                );
+    }
+
+
+    // ========================================================
+    // KIND NAME
+    // ========================================================
+
+    static const char* kindName(
+        SocketKind kind)
+    {
+        switch (kind)
+        {
+            case SocketKind::TCP_SERVER:
+                return "TCP_SERVER";
+
+            case SocketKind::TCP_CLIENT:
+                return "TCP_CLIENT";
+
+            case SocketKind::UDP:
+                return "UDP";
+
+            default:
+                return "?";
+        }
+    }
 };
+
 
 class NetworkManager {
 public:
@@ -393,6 +965,9 @@ public:
         } lastState = State::OK;
 
         ProtocolRuntime runtime;
+
+        // SOCKET OWNER
+        SocketManager::OwnerId socketOwner = -1;
     };
 
 private:
@@ -502,13 +1077,26 @@ public:
                 ? maxDuration
                 : p.slotDuration;
 
+        // ========================================================
+        // SOCKET OWNER
+        // ========================================================
+
+        p.socketOwner =
+            socketManager.registerOwner(
+                name,
+                maxSockets
+            );
+
+        // ========================================================
+        // REGISTRA PROTOCOLLO
+        // ========================================================
+
         protocols.push_back({ id, p });
         protocolActive.push_back(false);
 
-        socketManager.registerDemand(
-            name,
-            maxSockets
-        );
+        // ========================================================
+        // SOCKET DEMAND
+        // ========================================================
 
         const uint16_t demand =
             socketManager.configuredDemand();
@@ -517,12 +1105,21 @@ public:
         {
             LOG_WF(
                 "NET::SOCKET",
-                "WARNING: socket demand=%u exceeds hardware limit=%u after protocol '%s'",
+                "WARNING: configured socket demand=%u exceeds budget=%u after '%s'",
                 (unsigned)demand,
                 (unsigned)SocketManager::MAX_SOCKETS,
                 name ? name : "?"
             );
         }
+
+        LOG_IF(
+            "NET::SOCKET",
+            "Protocol registered: id=%d name=%s socketOwner=%d demand=%u",
+            id,
+            name ? name : "?",
+            p.socketOwner,
+            (unsigned)maxSockets
+        );
 
         return id;
     }
@@ -1126,37 +1723,49 @@ class SocketHandle
 {
 private:
     int slot = -1;
+
     NetworkManager* network = nullptr;
-    const char* owner = nullptr;
+
+    SocketManager::OwnerId owner = -1;
     int resourceId = -1;
+
+    SocketManager::SocketKind kind =
+        SocketManager::SocketKind::TCP_CLIENT;
 
 public:
 
+    SocketHandle() = default;
+
     SocketHandle(
         NetworkManager* net,
-        const char* ownerName,
-        int resource)
+        SocketManager::OwnerId ownerId,
+        int resource,
+        SocketManager::SocketKind socketKind =
+            SocketManager::SocketKind::TCP_CLIENT)
         : network(net),
-          owner(ownerName),
-          resourceId(resource)
-    {}
-
-    SocketHandle()
-        : slot(-1),
-          network(nullptr),
-          owner(nullptr),
-          resourceId(-1)
-    {}
+          owner(ownerId),
+          resourceId(resource),
+          kind(socketKind)
+    {
+    }
 
     void setup(
         NetworkManager* net,
-        const char* ownerName,
-        int resource)
+        SocketManager::OwnerId ownerId,
+        int resource,
+        SocketManager::SocketKind socketKind =
+            SocketManager::SocketKind::TCP_CLIENT)
     {
-        network = net;
-        owner = ownerName;
-        resourceId = resource;
+        /*
+         * Se il handle era già associato ad una socket,
+         * il driver dovrebbe averla rilasciata prima del setup.
+         */
         slot = -1;
+
+        network = net;
+        owner = ownerId;
+        resourceId = resource;
+        kind = socketKind;
     }
 
     bool acquire()
@@ -1167,20 +1776,25 @@ public:
         if (!network)
             return false;
 
+        if (owner < 0)
+            return false;
+
         slot = network->sockets().acquire(
             owner,
-            resourceId
+            resourceId,
+            kind
         );
 
+        /*
+         * Nessun warning qui.
+         *
+         * SocketManager gestisce già:
+         * - owner
+         * - saturazione
+         * - warning una tantum
+         */
         if (slot < 0)
         {
-            LOG_WF(
-                "NET::SOCKET",
-                "Socket unavailable owner=%s resource=%d",
-                owner ? owner : "?",
-                resourceId
-            );
-
             return false;
         }
 
@@ -1206,6 +1820,21 @@ public:
     int get() const
     {
         return slot;
+    }
+
+    SocketManager::OwnerId getOwner() const
+    {
+        return owner;
+    }
+
+    int getResourceId() const
+    {
+        return resourceId;
+    }
+
+    SocketManager::SocketKind getKind() const
+    {
+        return kind;
     }
 };
 
