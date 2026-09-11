@@ -8,10 +8,10 @@
    Nome:            Andrea Lando
    Contatto:        mail@domo-manager.it
   
-   Versione modulo: 1.0.0
-   Ultima modifica: 2026‑03‑24
+   Versione modulo: 1.0.1
+   Ultima modifica: 2026‑09‑11
    Note:
-    • Nessuna
+    • Effettuati affinamenti sulla performance
 
    ============================================================================ */
 
@@ -32,7 +32,6 @@
 class ModbusManager
 {
 private:
-
     NetworkManager* net = nullptr;
     int modbusProtocolId = -1;
 
@@ -49,42 +48,65 @@ private:
     struct ClientStepState
     {
         ClientStep step = ClientStep::READ;
-        unsigned long lastReadTime = 0;
     };
 
     std::vector<ClientStepState> clientStates;
 
-
     // ============================================================
     // CONNESSIONE MODBUS PERSISTENTE
     // ============================================================
-
     class PersistentModbusConnection
     {
     private:
 
         static constexpr unsigned long INACTIVITY = 600;
-
-        ModbusTCPClient& cli;
-
-        IPAddress lastIp;
-
-        bool hasConnection;
-
-        unsigned long lastActivity;
+        static constexpr unsigned long IP_SWITCH_GUARD_MS = 0; //Attende il tempo in milisecondi tra le connect degli ip modbus rtu
 
         // ========================================================
-        // SOCKET MANAGER
+        // CONNECTION STATE
         // ========================================================
+        struct ConnectionState
+        {
+            IPAddress lastIp;
+            bool hasConnection = false;
+            unsigned long lastActivity = 0;
+        };
 
-        NetworkManager* net = nullptr;
+        // ========================================================
+        // IP SWITCH STATE
+        // ========================================================
+        struct SwitchState
+        {
+            unsigned long time = 0;
+            bool waiting = false;
+        };
 
-        SocketManager::OwnerId socketOwner = -1;
+        // ========================================================
+        // SOCKET STATE
+        // ========================================================
+        struct SocketState
+        {
+            NetworkManager* net = nullptr;
+            SocketManager::OwnerId owner = -1;
+            bool acquired = false;
+        };
 
-        bool socketAcquired = false;
+        ModbusTCPClient& modbusClient;
 
+        ConnectionState connection;
+        SwitchState switchState;
+        SocketState socket;
 
     public:
+        // ========================================================
+        // ENSURE RESULT
+        // ========================================================
+        enum class EnsureResult : uint8_t
+        {
+            CONNECTED,
+            WAITING,
+            FAILED
+        };
 
         enum class ReconnectReason
         {
@@ -94,16 +116,17 @@ private:
             INACTIVITY
         };
 
-
+        // ========================================================
+        // CONSTRUCTOR
+        // ========================================================
         explicit PersistentModbusConnection(
             ModbusTCPClient& client)
-            : cli(client),
-            lastIp(0, 0, 0, 0),
-            hasConnection(false),
-            lastActivity(0),
-            net(nullptr),
-            socketOwner(-1),
-            socketAcquired(false)
+            : modbusClient(client),
+            connection{
+                IPAddress(0, 0, 0, 0),
+                false,
+                0
+            }
         {
         }
 
@@ -116,8 +139,8 @@ private:
             NetworkManager& networkManager,
             SocketManager::OwnerId owner)
         {
-            net = &networkManager;
-            socketOwner = owner;
+            socket.net = &networkManager;
+            socket.owner = owner;
         }
 
 
@@ -127,28 +150,28 @@ private:
 
         void releaseSocket()
         {
-            if (!net)
+            if (!socket.net)
             {
-                socketAcquired = false;
+                socket.acquired = false;
                 return;
             }
 
-            if (socketOwner < 0)
+            if (socket.owner < 0)
             {
-                socketAcquired = false;
+                socket.acquired = false;
                 return;
             }
 
-            if (!socketAcquired)
+            if (!socket.acquired)
                 return;
 
-            net->sockets().release(
-                socketOwner,
+            socket.net->sockets().release(
+                socket.owner,
                 0,
                 SocketManager::SocketKind::TCP_CLIENT
             );
 
-            socketAcquired = false;
+            socket.acquired = false;
         }
 
 
@@ -158,7 +181,7 @@ private:
 
         bool acquireSocket()
         {
-            if (!net)
+            if (!socket.net)
             {
                 LOG_EF(
                     "MDB::Socket",
@@ -168,8 +191,7 @@ private:
                 return false;
             }
 
-
-            if (socketOwner < 0)
+            if (socket.owner < 0)
             {
                 LOG_EF(
                     "MDB::Socket",
@@ -179,26 +201,15 @@ private:
                 return false;
             }
 
-
-            // ----------------------------------------------------
-            // Già acquisita
-            // ----------------------------------------------------
-
-            if (socketAcquired)
+            if (socket.acquired)
                 return true;
 
-
-            // ----------------------------------------------------
-            // Acquire
-            // ----------------------------------------------------
-
             const int slot =
-                net->sockets().acquire(
-                    socketOwner,
+                socket.net->sockets().acquire(
+                    socket.owner,
                     0,
                     SocketManager::SocketKind::TCP_CLIENT
                 );
-
 
             if (slot < 0)
             {
@@ -210,43 +221,35 @@ private:
                 return false;
             }
 
-
-            socketAcquired = true;
+            socket.acquired = true;
 
             return true;
         }
 
-
         // ========================================================
         // TOUCH
         // ========================================================
-
         inline void touch(
             unsigned long now)
         {
-            lastActivity = now;
+            connection.lastActivity = now;
         }
-
 
         // ========================================================
         // RECONNECT REASON
         // ========================================================
-
         inline ReconnectReason getReconnectReason(
             const IPAddress& ip,
             unsigned long now) const
         {
-            if (!cli.connected())
+            if (!modbusClient.connected())
                 return ReconnectReason::NOT_CONNECTED;
 
-
-            if (lastIp != ip)
+            if (connection.lastIp != ip)
                 return ReconnectReason::IP_CHANGED;
 
-
-            if (now - lastActivity > INACTIVITY)
+            if (now - connection.lastActivity > INACTIVITY)
                 return ReconnectReason::INACTIVITY;
-
 
             return ReconnectReason::NONE;
         }
@@ -256,15 +259,13 @@ private:
         // ENSURE CONNECTION
         // ========================================================
 
-        bool ensure(
+        EnsureResult ensure(
             int ipIndex,
             IpManager& ipManager,
             int port,
             unsigned long now)
         {
-            auto& ips =
-                ipManager.GetIps();
-
+            auto& ips = ipManager.GetIps();
 
             // ----------------------------------------------------
             // VALID IP INDEX
@@ -279,35 +280,38 @@ private:
                     ipIndex
                 );
 
-                return false;
+                return EnsureResult::FAILED;
             }
-
-
-            auto& ipStruct =
-                ips[ipIndex];
-
-
-            const IPAddress ip =
-                ipStruct.IP;
-
 
             // ----------------------------------------------------
             // SHOULD QUERY
             // ----------------------------------------------------
-
             if (!ipManager.ShouldQuery(
                     ipIndex,
                     now))
             {
-                hasConnection = false;
-
-                return false;
+                return EnsureResult::FAILED;
             }
 
+            // ====================================================
+            // ATTESA DOPO CAMBIO IP
+            // ====================================================
+            if (switchState.waiting)
+            {
+                if (now - switchState.time <
+                    IP_SWITCH_GUARD_MS)
+                {
+                    return EnsureResult::WAITING;
+                }
+
+                switchState.waiting = false;
+            }
 
             // ----------------------------------------------------
             // RECONNECT REASON
             // ----------------------------------------------------
+            auto& ipStruct = ips[ipIndex];
+            const IPAddress ip = ipStruct.IP;
 
             const ReconnectReason reason =
                 getReconnectReason(
@@ -315,28 +319,23 @@ private:
                     now
                 );
 
-
-            // ----------------------------------------------------
-            // CONNESSIONE ANCORA VALIDA
-            // ----------------------------------------------------
+            // ====================================================
+            // CONNESSIONE VALIDA
+            // ====================================================
 
             if (reason == ReconnectReason::NONE)
             {
-                hasConnection = true;
+                connection.hasConnection = true;
 
-                // In teoria socketAcquired deve essere true.
-                // Se per qualunque motivo non lo fosse,
-                // riallineiamo il tracker.
-                if (!socketAcquired)
+                if (!socket.acquired)
                 {
                     if (!acquireSocket())
                     {
-                        hasConnection = false;
+                        connection.hasConnection = false;
 
-                        return false;
+                        return EnsureResult::FAILED;
                     }
                 }
-
 
                 if (ipStruct.state !=
                     IpManager::IpState::OK)
@@ -346,24 +345,42 @@ private:
                     );
                 }
 
-
-                return true;
+                return EnsureResult::CONNECTED;
             }
 
-
             // ====================================================
-            // CONNESSIONE DA CHIUDERE
+            // CAMBIO IP
             // ====================================================
-
-            if (reason == ReconnectReason::IP_CHANGED ||
-                reason == ReconnectReason::INACTIVITY)
+            if (reason == ReconnectReason::IP_CHANGED)
             {
-                if (cli.connected())
-                {
-                    cli.stop();
-                }
+                if (modbusClient.connected())
+                    modbusClient.stop();
 
-                hasConnection = false;
+                connection.hasConnection = false;
+
+                releaseSocket();
+
+                // ------------------------------------------------
+                // Non riconnettere nello stesso giro.
+                // Lasciamo lavorare MQTT e il resto del runtime.
+                // ------------------------------------------------
+
+                switchState.time = now;
+                switchState.waiting = true;
+
+                return EnsureResult::WAITING;
+            }
+
+            // ====================================================
+            // INACTIVITY
+            // ====================================================
+
+            if (reason == ReconnectReason::INACTIVITY)
+            {
+                if (modbusClient.connected())
+                    modbusClient.stop();
+
+                connection.hasConnection = false;
 
                 releaseSocket();
             }
@@ -375,71 +392,77 @@ private:
 
             if (reason == ReconnectReason::NOT_CONNECTED)
             {
-                hasConnection = false;
+                connection.hasConnection = false;
 
-                // Nel caso la socket sia caduta esternamente,
-                // allineiamo il SocketManager.
+                // La connessione può essere caduta esternamente.
                 releaseSocket();
             }
-
 
             // ====================================================
             // ACQUIRE PRIMA DEL CONNECT
             // ====================================================
-
             if (!acquireSocket())
             {
-                hasConnection = false;
+                connection.hasConnection = false;
 
-                return false;
+                return EnsureResult::FAILED;
             }
-
 
             // ====================================================
             // CONNECT
             // ====================================================
+            const unsigned long start = millis();
 
             const bool connected =
-                cli.begin(
+                modbusClient.begin(
                     ip,
                     port
                 );
 
+            const unsigned long duration =
+                millis() - start;
+
+
+            // ----------------------------------------------------
+            // Log solo in caso di connect lento
+            // ----------------------------------------------------
+
+            if (duration > 100)
+            {
+                LOG_WF(
+                    "MDB::CONNECT",
+                    "ip=%s result=%d duration=%lu ms",
+                    ip.toString().c_str(),
+                    connected,
+                    duration
+                );
+            }
+
+            // ====================================================
+            // CONNECT FALLITO
+            // ====================================================
 
             if (!connected)
             {
-                hasConnection = false;
+                connection.hasConnection = false;
 
-                // Il connect non è riuscito:
-                // la reservation non deve rimanere occupata.
                 releaseSocket();
-
 
                 ipManager.ReportError(
                     ipIndex,
                     now
                 );
 
-
-                return false;
+                return EnsureResult::FAILED;
             }
-
 
             // ====================================================
             // CONNECT SUCCESS
             // ====================================================
 
-            lastIp =
-                ip;
-
-
-            lastActivity =
-                now;
-
-
-            hasConnection =
-                true;
-
+            connection.lastIp = ip;
+            connection.lastActivity = now;
+            connection.hasConnection = true;
 
             if (ipStruct.state !=
                 IpManager::IpState::OK)
@@ -448,8 +471,8 @@ private:
                     ipIndex
                 );
             }
-            
-            return true;
+
+            return EnsureResult::CONNECTED;
         }
     };
 
@@ -457,7 +480,6 @@ private:
     // ============================================================
     // AREA → DEVICE MAP
     // ============================================================
-
     class AreaDeviceMap
     {
     public:
@@ -469,7 +491,6 @@ private:
             int itemIndex;
         };
 
-
         inline void buildOnce(
             std::vector<GenericPrgDevice>& devices)
         {
@@ -479,7 +500,6 @@ private:
             buildInternal(devices);
             initialized = true;
         }
-
 
         inline bool find(
             int area,
@@ -495,18 +515,15 @@ private:
             return true;
         }
 
-
         inline bool isInitialized() const
         {
             return initialized;
         }
 
-
     private:
 
         std::unordered_map<int, Entry> map;
         bool initialized = false;
-
 
         void buildInternal(
             std::vector<GenericPrgDevice>& devices)
@@ -558,7 +575,6 @@ private:
     // ============================================================
     // INTERNAL PACING
     // ============================================================
-
     inline bool InternalPacingCheck(
         IpManager& ipManager,
         int ipIndex,
@@ -582,7 +598,6 @@ private:
         if (now - startTime <= slotDuration)
             return false;
 
-
         LOG_WF(
             "INTERNAL PACING",
             "SlotDuration superato: ip=%d devIdx=%d",
@@ -590,12 +605,10 @@ private:
             deviceIndex
         );
 
-
         net->onSlotDurationExceeded(
             modbusProtocolId,
             now
         );
-
 
         if (protocol.safeMode)
         {
@@ -608,7 +621,6 @@ private:
             return false;
         }
 
-
         ipManager.UpdatePriorityAfterRead(
             ipIndex,
             true,
@@ -618,7 +630,6 @@ private:
 
         return true;
     }
-
 
     // ============================================================
     // PERFORMANCE
@@ -633,7 +644,6 @@ private:
     uint8_t PROF_PROCESS;
     uint8_t PROF_WRITE;
 
-
     // ============================================================
     // WRITE PENDING PER IP
     // ============================================================
@@ -643,15 +653,11 @@ private:
         auto& buf  = *buffer;
         auto& devs = *prgDevices;
 
-        const auto& targetIp =
-            ipManager->GetIps()[ipIndex].IP;
-
         const auto changed =
             buf.getChangedMap(true);
 
         if (changed.empty())
             return false;
-
 
         for (const auto& area : changed)
         {
@@ -659,7 +665,6 @@ private:
 
             if (!areaMap.find(area, entry))
                 continue;
-
 
             const int devIdx =
                 entry.devIndex;
@@ -670,14 +675,13 @@ private:
                 continue;
             }
 
-
             auto& dev =
                 devs[devIdx];
-
+            const auto& targetIp =
+                ipManager->GetIps()[ipIndex].IP;
 
             if (dev.GetIp() != targetIp)
                 continue;
-
 
             // Il pending rimane nel Buffer,
             // ma un device in errore non deve
@@ -685,12 +689,10 @@ private:
             if (dev.GetError().IsInError())
                 continue;
 
-
             const auto chType =
                 dev.GetChannelInfo(
                     entry.channel
                 ).type;
-
 
             if (chType == GenericPrgDevice::DO ||
                 chType == GenericPrgDevice::AO)
@@ -701,7 +703,6 @@ private:
 
         return false;
     }
-
 
 public:
 
@@ -716,13 +717,11 @@ public:
         );
     }
 
-
     // ============================================================
     // MAP
     // ============================================================
 
     AreaDeviceMap areaMap;
-
   
     // ============================================================
     // CALLBACK
@@ -731,16 +730,13 @@ public:
     using SomethingChangedFn =
         void (*)();
 
-
     using FieldChangedCallback =
         void (*)(int area, long value);
-
 
     using ReadAreaPolicyFn =
         bool (*)(int area,
                  long value,
                  Buffer& buffer);
-
 
     // ============================================================
     // RIFERIMENTI ESTERNI
@@ -756,7 +752,6 @@ public:
 
     IpManager* ipManager =
         nullptr;
-
 
     // ============================================================
     // CALLBACK INSTANCE
@@ -802,19 +797,16 @@ public:
         this->net              = &netManager;
         this->modbusProtocolId = modbusId;
 
-
         // Stato READ/WRITE indipendente per ogni IP.
         clientStates.clear();
         clientStates.resize(
             ipManager.GetIps().size()
         );
 
-
         // Costruzione mappa area → device.
         areaMap.buildOnce(
             prgDevices
         );
-
 
         // Performance profiler.
         PROF_ENSURE =
@@ -841,7 +833,8 @@ public:
         WRITE_DONE,
         CYCLE_OK,
         DEVICE_ERROR,
-        ERROR
+        ERROR,
+        WAITING
     };
 
 
@@ -868,6 +861,9 @@ public:
 
             case CS::ERROR:
                 return PS::ERROR;
+
+            case CS::WAITING:
+                return PS::WAITING;
 
             case CS::WRITE_DONE:
                 return PS::WRITE_DONE;
@@ -904,7 +900,7 @@ public:
     // ============================================================
 
     ClientState RunClient(
-        ModbusTCPClient& cli,
+        ModbusTCPClient& modbusClient,
         short ipIndex,
         int port,
         std::vector<uint16_t>& mbRead,
@@ -934,21 +930,16 @@ public:
         ClientStep& step =
             clientState.step;
 
-        unsigned long& lastReadTime =
-            clientState.lastReadTime;
-
+        static unsigned long& lastReadTime = now;
 
          // --------------------------------------------------------
         // CONNESSIONE MODBUS PERSISTENTE
         // --------------------------------------------------------
-
-        static PersistentModbusConnection conn(cli);
-
+        static PersistentModbusConnection conn(modbusClient);
 
         // --------------------------------------------------------
         // SOCKET MANAGER CONTEXT
         // --------------------------------------------------------
-
         if (net)
         {
             conn.setSocketContext(
@@ -959,28 +950,26 @@ public:
             );
         }
 
-
         auto& ip =
             ipManager->GetIps()[ipIndex];
 
 
         // --------------------------------------------------------
         // ENSURE CONNECTION
-        // --------------------------------------------------------
-
+        // -------------------------------------------------------      
         profiler.begin(
             PROF_ENSURE,
             ipIndex,
             millis()
         );
 
-        const bool ensureOk =
+        const auto ensureResult =
             conn.ensure(
                 ipIndex,
                 *ipManager,
                 port,
                 now
-            );
+          );
 
         profiler.end(
             PROF_ENSURE,
@@ -988,8 +977,22 @@ public:
             millis()
         );
 
+        // --------------------------------------------------------
+        // WAITING
+        // --------------------------------------------------------
+        if (ensureResult ==
+            PersistentModbusConnection::EnsureResult::WAITING)
+        {
+            // Nessun errore.
+            // Il giro corrente viene semplicemente rimandato.
+            return ClientState::WAITING;
+        }
 
-        if (!ensureOk)
+        // --------------------------------------------------------
+        // FAILED
+        // --------------------------------------------------------
+        if (ensureResult ==
+            PersistentModbusConnection::EnsureResult::FAILED)
         {
             LOG_WF(
                 "ModbusManager",
@@ -1014,22 +1017,12 @@ public:
             return ClientState::ERROR;
         }
 
-
         // ========================================================
         // READ
         // ========================================================
-
         if (step == ClientStep::READ)
         {
-            LOG_DF(
-                "MDB",
-                "READ phase start (ip=%d)",
-                ipIndex
-            );
-
-
             timing.startDevice(now);
-
 
             profiler.begin(
                 PROF_READ,
@@ -1039,7 +1032,7 @@ public:
 
             const bool readOk =
                 DeviceRead(
-                    cli,
+                    modbusClient,
                     ipIndex,
                     mbRead,
                     now
@@ -1050,7 +1043,6 @@ public:
                 ipIndex,
                 millis()
             );
-
 
             if (!readOk)
             {
@@ -1067,10 +1059,8 @@ public:
                 return ClientState::DEVICE_ERROR;
             }
 
-
             conn.touch(now);
             lastReadTime = now;
-
 
             // ----------------------------------------------------
             // PROCESS BUFFER
@@ -1082,40 +1072,43 @@ public:
                 millis()
             );
 
-
             const auto& changedMap =
                 buffer->getChangedMap();
 
+            bool somethingChangedNeeded = false;
 
             for (const auto& area : changedMap)
             {
-                const BufferSourceInfo& entry =
-                    buffer->getFieldEntry(area);
-
-                const uint16_t value =
-                    static_cast<uint16_t>(entry.value);
-
-
                 const int areaToWrite =
                     buffer->GetAreaToWrite(area);
 
                 if (areaToWrite > 0)
                 {
-                    buffer->WriteElement(
-                        areaToWrite,
-                        value,
-                        now
-                    );
+                    const BufferSourceInfo& entry =
+                        buffer->getFieldEntry(area);
+
+                    const uint16_t value =
+                        static_cast<uint16_t>(entry.value);
+
+                    const auto result =
+                        buffer->WriteElement(
+                            areaToWrite,
+                            value,
+                            now
+                        );
+
+                    if (result == Buffer::WriteResult::CHANGED)
+                    {
+                        somethingChangedNeeded = true;
+                    }
                 }
             }
 
-
-            if (!changedMap.empty() &&
+            if (somethingChangedNeeded &&
                 somethingChanged)
             {
                 somethingChanged();
             }
-
 
             profiler.end(
                 PROF_PROCESS,
@@ -1123,10 +1116,8 @@ public:
                 millis()
             );
 
-
             // Passa alla WRITE.
             step = ClientStep::WRITE;
-
 
             if (net)
             {
@@ -1147,44 +1138,24 @@ public:
 
         if (step == ClientStep::WRITE)
         {
-            constexpr unsigned long fixedDelay = 2;
-
-
-            if (now - lastReadTime < fixedDelay)
-            {
-                if (net)
-                {
-                    net->updateProtocolState(
-                        modbusProtocolId,
-                        NetworkManager::Protocol::State::WRITE_DONE
-                    );
-                }
-
-                return ClientState::WRITE_DONE;
-            }
-
-
             profiler.begin(
                 PROF_WRITE,
                 ipIndex,
                 millis()
             );
 
-
             const bool writeOk =
                 DeviceWrite(
-                    cli,
+                    modbusClient,
                     ip.IP,
                     now
                 );
-
 
             profiler.end(
                 PROF_WRITE,
                 ipIndex,
                 millis()
             );
-
 
             if (!writeOk)
             {
@@ -1204,23 +1175,18 @@ public:
                 return ClientState::DEVICE_ERROR;
             }
 
-
             timing.endDevice(
                 now,
                 ipIndex
             );
-
 
             ipManager->setLastCycleDuration(
                 ipIndex,
                 now - lastReadTime
             );
 
-
             conn.touch(now);
-
             step = ClientStep::READ;
-
 
             if (net)
             {
@@ -1230,10 +1196,8 @@ public:
                 );
             }
 
-
             return ClientState::CYCLE_OK;
         }
-
 
         if (net)
         {
@@ -1243,10 +1207,8 @@ public:
             );
         }
 
-
         return ClientState::ERROR;
     }
-
 
     // ============================================================
     // AREA MAP DIAGNOSTICS
@@ -1264,12 +1226,10 @@ public:
             return;
         }
 
-
         LOG_WF(
             "AreaMap",
             "===== DUMP AREA → DEVICE MAP ====="
         );
-
 
         const int totalAreas =
             static_cast<int>(buffer->size());
@@ -1292,13 +1252,11 @@ public:
                 continue;
             }
 
-
             auto& dev =
                 (*prgDevices)[entry.devIndex];
 
             const auto ip =
                 dev.GetIp();
-
 
             LOG_WF(
                 "AreaMap",
@@ -1317,7 +1275,6 @@ public:
             );
         }
 
-
         LOG_WF(
             "AreaMap",
             "===== END DUMP ====="
@@ -1328,13 +1285,11 @@ public:
     // ============================================================
     // PENDING WRITE PUBLIC API
     // ============================================================
-
     inline bool hasPendingWritesForIp(
         int ipIndex)
     {
         return hasWriteForIp(ipIndex);
     }
-
 
 private:
 
@@ -1343,14 +1298,14 @@ private:
     // ============================================================
 
     inline bool DeviceRead(
-        ModbusTCPClient& cli,
+        ModbusTCPClient& modbusClient,
         short ipIndex,
         std::vector<uint16_t>& mbRead,
         unsigned long now)
     {
         return DeviceManagement_Read(
             m_ledController,
-            cli,
+            modbusClient,
             *ipManager,
             ipIndex,
             *buffer,
@@ -1368,13 +1323,13 @@ private:
     // ============================================================
 
     inline bool DeviceWrite(
-        ModbusTCPClient& cli,
+        ModbusTCPClient& modbusClient,
         arduino::IPAddress ip,
         unsigned long now)
     {
         return DeviceManagement_Write(
             m_ledController,
-            cli,
+            modbusClient,
             ip,
             *buffer,
             *prgDevices,
@@ -1396,11 +1351,17 @@ private:
         unsigned long now)
     {
         bool inError = false;
+        bool done = false;
 
+        // Massimo numero di transazioni Modbus eseguite
+        // in una singola chiamata.
+        constexpr uint8_t MAX_WRITES_PER_CYCLE = 2;
 
-        // --------------------------------------------------------
+        uint8_t writesThisCycle = 0;
+
+        // ========================================================
         // DEVICE ASSOCIATI ALL'IP
-        // --------------------------------------------------------
+        // ========================================================
 
         auto devicesForIP =
             ipManager->GetDevicesByIP(ip);
@@ -1421,11 +1382,9 @@ private:
             return true;
         }
 
-
-        // --------------------------------------------------------
+        // ========================================================
         // CHANGED MAP
-        // --------------------------------------------------------
-
+        // ========================================================
         const auto& changedMap =
             buffer.getChangedMap(true);
 
@@ -1445,10 +1404,9 @@ private:
         }
 
 
-        // --------------------------------------------------------
+        // ========================================================
         // DEVICE LOOKUP PER IP
-        // --------------------------------------------------------
-
+        // ========================================================
         static std::unordered_set<int> devSet;
 
         devSet.clear();
@@ -1456,19 +1414,30 @@ private:
         for (const int idx : *devicesForIP)
             devSet.insert(idx);
 
-
-        // --------------------------------------------------------
+        // ========================================================
         // WRITE
-        // --------------------------------------------------------
-
-        bool done = false;
-
+        //
+        // Regola:
+        //   - massimo 2 WRITE riuscite per chiamata
+        //   - se una WRITE fallisce, il ciclo viene interrotto
+        //   - la pending della WRITE fallita rimane nel Buffer
+        //
+        // Questo impedisce che una raffica MQTT/Zigbee trasformi
+        // una singola esecuzione in una lunga sequenza di timeout.
+        // ========================================================
 
         for (const auto& area : changedMap)
         {
+            // ----------------------------------------------------
+            // BUDGET
+            // ----------------------------------------------------
+            if (writesThisCycle >= MAX_WRITES_PER_CYCLE)
+                break;
+
+            // ----------------------------------------------------
+            // AREA MAP
+            // ----------------------------------------------------
             AreaDeviceMap::Entry entry;
-
-
             if (!areaMap.find(area, entry))
             {
                 LOG_WF(
@@ -1480,19 +1449,31 @@ private:
                 continue;
             }
 
-
+            // ----------------------------------------------------
+            // DEVICE ASSOCIATO ALL'IP
+            // ---------------------------------------------------
             if (!devSet.count(entry.devIndex))
                 continue;
 
+            if (entry.devIndex < 0 ||
+                entry.devIndex >= static_cast<int>(prgDevices.size()))
+            {
+                LOG_WF(
+                    "ModbusManager",
+                    "Invalid device index=%d for area=%d",
+                    entry.devIndex,
+                    area
+                );
+
+                continue;
+            }
 
             GenericPrgDevice& dev =
                 prgDevices[entry.devIndex];
 
-
             // ----------------------------------------------------
             // DEVICE IN ERRORE
             // ----------------------------------------------------
-
             if (dev.GetError().IsInError())
             {
                 dev.GetError().Loop(
@@ -1512,8 +1493,7 @@ private:
                     dev.GetIp()[3]
                 );
 
-                // IMPORTANTISSIMO:
-                // la pending NON viene cancellata.
+                // La pending NON viene cancellata.
                 continue;
             }
 
@@ -1521,12 +1501,10 @@ private:
             // ----------------------------------------------------
             // SOLO DO / AO
             // ----------------------------------------------------
-
             const auto chType =
                 dev.GetChannelInfo(
                     entry.channel
                 ).type;
-
 
             if (chType != GenericPrgDevice::DO &&
                 chType != GenericPrgDevice::AO)
@@ -1534,19 +1512,15 @@ private:
                 continue;
             }
 
-
             // ----------------------------------------------------
             // VALORE
             // ----------------------------------------------------
-
             const BufferSourceInfo& info =
                 buffer.getFieldEntry(area);
-
 
             // ----------------------------------------------------
             // WRITE MODBUS
             // ----------------------------------------------------
-
             const bool writeOk =
                 dev.Write(
                     modbusTCPCli,
@@ -1554,8 +1528,11 @@ private:
                     entry.itemIndex,
                     info.value,
                     now
-                ) != 0;
+                );
 
+            // ----------------------------------------------------
+            // WRITE FALLITA
+            // ----------------------------------------------------
 
             if (!writeOk)
             {
@@ -1564,32 +1541,34 @@ private:
                 LOG_EF(
                     "ModbusManager",
                     "FAIL to WRITE → area=%d "
-                    "channel=%d itemIndex=%d value=%d",
+                    "channel=%d itemIndex=%d value=%ld ",
                     area,
                     entry.channel,
                     entry.itemIndex,
                     info.value
                 );
 
-                // NON resettiamo:
-                // retry successivo.
-                continue;
+                // NON resettiamo il Buffer:
+                // la pending verrà ritentata successivamente.
+
+                // IMPORTANTISSIMO:
+                // non continuiamo con altre WRITE nello stesso ciclo.
+                break;
             }
 
-
             // ----------------------------------------------------
-            // WRITE CONSUMATA
+            // WRITE RIUSCITA
             // ----------------------------------------------------
 
             buffer.ResetElement(area);
 
             done = true;
+            ++writesThisCycle;
         }
 
-
-        // --------------------------------------------------------
+        // ========================================================
         // LED
-        // --------------------------------------------------------
+        // ========================================================
 
         if (ledsController &&
             ledsController->hasChannel(
@@ -1609,9 +1588,12 @@ private:
         }
 
 
+        // ========================================================
+        // RESULT
+        // ========================================================
+
         return !inError;
     }
-
 
     // ============================================================
     // READ SET OUT
@@ -1625,15 +1607,16 @@ private:
         bool skipForward = false)
     {
         // Scrittura reale della sorgente.
-        buffer.WriteElement(
-            area,
-            value,
-            now
-        );
+        const auto result =
+            buffer.WriteElement(
+                area,
+                value,
+                now
+            );
 
-
-        // Evento verso EventManager / consumer.
-        if (fieldChangedCallback)
+        // Evento solo se il valore è realmente cambiato.
+        if (result == Buffer::WriteResult::CHANGED &&
+            fieldChangedCallback)
         {
             fieldChangedCallback(
                 area,
@@ -1641,46 +1624,44 @@ private:
             );
         }
 
-
         // Toggle / Split / altri consumer:
         // niente forward automatico.
         if (skipForward)
             return;
 
-
         // --------------------------------------------------------
         // FORWARD AUTOMATICO
         // --------------------------------------------------------
-
         const int outArea =
             buffer.GetAreaToWrite(area);
 
-
         if (outArea >= 0)
         {
-            buffer.WriteElement(
-                outArea,
-                value,
-                now
-            );
+            const auto result =
+                buffer.WriteElement(
+                    outArea,
+                    value,
+                    now
+                );
 
-
-            if (fieldChangedCallback)
+            if (result == Buffer::WriteResult::CHANGED)
             {
-                fieldChangedCallback(
+                if (fieldChangedCallback)
+                {
+                    fieldChangedCallback(
+                        outArea,
+                        value
+                    );
+                }
+
+                LOG_DF(
+                    "ModbusManager",
+                    "Forward: area=%d areaToWrite=%d value=%d",
+                    area,
                     outArea,
                     value
                 );
             }
-
-
-            LOG_WF(
-                "ModbusManager",
-                "Forward: area=%d areaToWrite=%d value=%d",
-                area,
-                outArea,
-                value
-            );
         }
         else if (outArea != Buffer::NO_AREA)
         {
@@ -1692,7 +1673,6 @@ private:
             );
         }
     }
-
 
     // ============================================================
     // DEVICE READ PLANNER
@@ -1707,7 +1687,6 @@ private:
         {
         }
 
-
         inline void buildCacheIfNeeded(
             std::vector<GenericPrgDevice>& prgDevices)
         {
@@ -1721,13 +1700,11 @@ private:
             cacheBuilt = true;
         }
 
-
         inline const GenericPrgDeviceManager&
         getDeviceManager() const
         {
             return manager;
         }
-
 
         inline const std::vector<int>&
         getDevicesForIp(
@@ -1741,13 +1718,11 @@ private:
             );
         }
 
-
         struct Range
         {
             int start;
             int end;
         };
-
 
         Range computeRange(
             IpManager::PriorityMgmtEx& priorityEx,
@@ -1870,9 +1845,7 @@ private:
             return r;
         }
 
-
     private:
-
         GenericPrgDeviceManager manager;
         bool cacheBuilt;
     };
@@ -1896,18 +1869,15 @@ private:
     {
         bool error = false;
 
-
         static DeviceReadPlanner planner;
 
         planner.buildCacheIfNeeded(
             prgDevices
         );
 
-
         // --------------------------------------------------------
         // PRIORITÀ
         // --------------------------------------------------------
-
         auto& prioEx =
             ipManager.GetCurrentPriority(
                 ipIndex,
@@ -1922,7 +1892,6 @@ private:
         // --------------------------------------------------------
         // DEVICE DELL'IP
         // --------------------------------------------------------
-
         const std::vector<int>& devices =
             planner.getDevicesForIp(
                 actualPriority,
@@ -1930,12 +1899,10 @@ private:
                 ipIndex
             );
 
-
         const int items =
             static_cast<int>(
                 devices.size()
             );
-
 
         if (items <= 0)
         {
@@ -1957,13 +1924,11 @@ private:
         // --------------------------------------------------------
         // LED READ
         // --------------------------------------------------------
-
         if (ledsController &&
             ledsController->hasChannel(
                 LedController::ONE))
         {
             static bool ledState = false;
-
             ledState = !ledState;
 
             ledsController->set(
@@ -1976,7 +1941,6 @@ private:
         // --------------------------------------------------------
         // RANGE
         // --------------------------------------------------------
-
         const auto range =
             planner.computeRange(
                 prioEx,
@@ -1989,7 +1953,6 @@ private:
         // --------------------------------------------------------
         // RESUME PACING
         // --------------------------------------------------------
-
         int startIdx;
 
         if (prioEx.Interrupted)
@@ -2009,11 +1972,9 @@ private:
                 range.start;
         }
 
-
         // --------------------------------------------------------
         // DEVICE LOOP
         // --------------------------------------------------------
-
         for (int deviceIndex = startIdx;
              deviceIndex < range.end;
              ++deviceIndex)
@@ -2022,7 +1983,6 @@ private:
                 prgDevices[
                     devices[deviceIndex]
                 ];
-
 
             // ----------------------------------------------------
             // DEVICE IN ERRORE
@@ -2064,19 +2024,19 @@ private:
 
             #ifdef DEBUG_VIEW
 
-                        LOG_IF(
-                            "MDB::READ",
-                            "Device %d: %s IP=%d.%d.%d.%d PRIOR=%d",
-                            deviceIndex,
-                            dev.GetName(),
-                            dev.GetIp()[0],
-                            dev.GetIp()[1],
-                            dev.GetIp()[2],
-                            dev.GetIp()[3],
-                            (int)dev.GetPriority()
-                        );
+                LOG_IF(
+                    "MDB::READ",
+                    "Device %d: %s IP=%d.%d.%d.%d PRIOR=%d",
+                    deviceIndex,
+                    dev.GetName(),
+                    dev.GetIp()[0],
+                    dev.GetIp()[1],
+                    dev.GetIp()[2],
+                    dev.GetIp()[3],
+                    (int)dev.GetPriority()
+                );
 
-                        delay(500);
+                delay(500);
 
             #endif
 
@@ -2084,10 +2044,8 @@ private:
             // ----------------------------------------------------
             // CHANNELS
             // ----------------------------------------------------
-
             const int channels =
                 dev.GetChannelsSize();
-
 
             for (int channel = 0;
                  channel < channels;
@@ -2096,13 +2054,11 @@ private:
                 const auto chInfo =
                     dev.GetChannelInfo(channel);
 
-
                 if (chInfo.type != GenericPrgDevice::DI &&
                     chInfo.type != GenericPrgDevice::AI)
                 {
                     continue;
                 }
-
 
                 // ------------------------------------------------
                 // MODBUS READ
@@ -2116,22 +2072,11 @@ private:
                         now
                     );
 
-
                 if (!read.ok)
                 {
-                    LOG_DF(
-                        "READ::ERR",
-                        "Errore lettura → ip=%d "
-                        "devIdx=%d addr=%d → ciclo si ferma",
-                        ipIndex,
-                        devices[deviceIndex],
-                        dev.GetDeviceAddress()
-                    );
-
                     error = true;
                     break;
                 }
-
 
                 // ------------------------------------------------
                 // PROCESS READ DATA
@@ -2150,22 +2095,16 @@ private:
                             index
                         );
 
-
                     const BufferSourceInfo& bufferEntry =
-                        buffer.getFieldEntry(area);
-
-
-                    long value;
-
+                        buffer.getFieldEntry(area);                
 
                     // ------------------------------------------------
                     // DIGITAL / ANALOG
                     // ------------------------------------------------
-
+                    long value;
                     if (read.itemsPerCall == 1)
                     {
-                        value =
-                            mbRead[j];
+                        value = mbRead[j];
                     }
                     else
                     {
@@ -2189,10 +2128,7 @@ private:
                                   );
                     }
 
-
                     bool process = false;
-
-
                     if (chInfo.type ==
                         GenericPrgDevice::AI)
                     {
@@ -2225,17 +2161,14 @@ private:
                             bufferEntry.value;
                     }
 
-
                     if (!process)
                         continue;
-
 
                     // ------------------------------------------------
                     // LOG EVENTO REALE
                     // ------------------------------------------------
 
-                    if (value > 0 &&
-                        area >= 10)
+                    if (value > 0 && area >= 10)
                     {
                         const int devIdx =
                             devices[deviceIndex];
@@ -2256,11 +2189,9 @@ private:
                         );
                     }
 
-
                     // ------------------------------------------------
                     // CONSUMER POLICY
                     // ------------------------------------------------
-
                     const bool skipForward =
                         readAreaPolicy &&
                         readAreaPolicy(
@@ -2268,7 +2199,6 @@ private:
                             value,
                             buffer
                         );
-
 
                     // ------------------------------------------------
                     // BUFFER + EVENT
@@ -2282,46 +2212,39 @@ private:
                         skipForward
                     );
 
-
                     // ------------------------------------------------
                     // AREA GESTITA DA CONSUMER:
                     // NON DEVE RESTARE PENDING COME SORGENTE
                     // ------------------------------------------------
-
                     if (skipForward)
                     {
                         buffer.ResetElement(area);
                     }
+                }
 
+                // ------------------------------------------------
+                // WRITE LOCALE IMMEDIATA
+                // ------------------------------------------------
+                if (hasWriteForIp(ipIndex))
+                {
+                    LOG_WF(
+                        "ModbusManager",
+                        "WRITE locale rilevata durante READ "
+                        "→ interrompo DeviceRead (ip=%d)",
+                        ipIndex
+                    );
 
-                    // ------------------------------------------------
-                    // WRITE LOCALE IMMEDIATA
-                    // ------------------------------------------------
-
-                    if (hasWriteForIp(ipIndex))
-                    {
-                        LOG_WF(
-                            "ModbusManager",
-                            "WRITE locale rilevata durante READ "
-                            "→ interrompo DeviceRead (ip=%d)",
-                            ipIndex
-                        );
-
-                        return true;
-                    }
+                    return true;
                 }
             }
-
 
             if (error)
                 break;
         }
 
-
         // --------------------------------------------------------
         // CICLO LETTURA COMPLETATO
         // --------------------------------------------------------
-
         if (!prioEx.Interrupted)
         {
             ipManager.UpdatePriorityAfterRead(

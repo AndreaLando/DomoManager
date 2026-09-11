@@ -17,7 +17,7 @@
    
 #include <Arduino.h>
 #include <PubSubClient.h>
-#include <Ethernet.h>
+#include "DMEthernet.hpp"
 
 
 #define LOG_LEVEL LogLevel::INFO

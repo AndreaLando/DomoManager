@@ -110,7 +110,8 @@ public:
 class DMRuntime {
 public:
     using ActivityLoopFn = void (*)(DomoManager&, unsigned long);
-    using SomethingChangedFn = void (*)();
+    using SomethingChangedFn =
+        void (*)(const std::unordered_set<int>& changed);
 
     struct ModbusCycleResult {
         ModbusManager::ClientState state;
@@ -134,30 +135,68 @@ private:
 
     EventManager eventManager;
 
-    class InternalEventPublisher {
+    class InternalEventPublisher
+    {
     private:
         Buffer& buffer;
         EventManager& events;
         uint8_t source = 255;
 
-        static void InternalCallback(const EventManager::Event& event) {
+        static void InternalCallback(
+            const EventManager::Event& event)
+        {
             (void)event;
         }
 
     public:
-        InternalEventPublisher(Buffer& b, EventManager& e) : buffer(b), events(e) {}
-
-        void attach() {
-            source = events.add(InternalCallback, "INTERNAL");
-            if (source == 255)
-                LOG_EF("DM", "Impossibile registrare INTERNAL Event source");
+        InternalEventPublisher(
+            Buffer& b,
+            EventManager& e)
+            : buffer(b),
+            events(e)
+        {
         }
 
-        void force(int area, long value, unsigned long now) {
+        void attach()
+        {
+            source = events.add(
+                InternalCallback,
+                "INTERNAL"
+            );
+
+            if (source == 255)
+            {
+                LOG_EF(
+                    "DM",
+                    "Impossibile registrare INTERNAL Event source"
+                );
+            }
+        }
+
+        void force(
+            int area,
+            long value,
+            unsigned long now)
+        {
             if (source == 255)
                 return;
-            buffer.WriteElement(area, value, now);
-            events.push(area, value, source);
+
+            const auto result =
+                buffer.WriteElement(
+                    area,
+                    value,
+                    false,
+                    now
+                );
+
+            if (result != Buffer::WriteResult::CHANGED)
+                return;
+
+            events.push(
+                area,
+                value,
+                source
+            );
         }
     };
 
@@ -218,8 +257,8 @@ private:
             return;
         }
 
-        constexpr int64_t ALPHA_FP = 26;
-        constexpr int64_t ONE_MINUS_ALPHA_FP = 230;
+        constexpr int64_t ALPHA_FP = 64;
+        constexpr int64_t ONE_MINUS_ALPHA_FP = 192;
         const int64_t exec_fp = static_cast<int64_t>(exec) << 8;
 
         t.avg_fp = ((static_cast<int64_t>(t.avg_fp) * ONE_MINUS_ALPHA_FP) +
@@ -239,6 +278,9 @@ private:
         if (!t.spike)
             return;
 
+        if (exec < 100)
+            return;
+
         const unsigned long now = millis();
         if (exec > t.maxSpike)
             t.maxSpike = exec;
@@ -251,6 +293,15 @@ private:
             LOG_WF("DM", "[SPIKE] %s exec=%lu avg=%lu thr=%lu",
                    t.name, exec, avg_ms, thr_ms);
         }
+    }
+
+    bool somethingChangedPending = false;
+    static void SomethingChangedNotify()
+    {
+        if (!instance)
+            return;
+
+        instance->somethingChangedPending = true;
     }
 
     static void SomethingChangedWrapper() {
@@ -272,12 +323,19 @@ private:
             }
         }
 
-        if (rt.somethingChanged) {
-            const unsigned long exec = rt.Measure([&]() {
-                rt.somethingChanged();
-            });
-            rt.UpdateTiming(rt.timings.somethingChanged, exec,
-                            rt.config.watchdog.spikeThresholdFactor_fp);
+        if (rt.somethingChanged)
+        {
+            const unsigned long exec =
+                rt.Measure([&]()
+                {
+                    rt.somethingChanged(changed);
+                });
+
+            rt.UpdateTiming(
+                rt.timings.somethingChanged,
+                exec,
+                rt.config.watchdog.spikeThresholdFactor_fp
+            );
         }
     }
 
@@ -304,7 +362,7 @@ private:
     }
 
     static void Task_WatchdogAndRunningT(DMRuntime* rt) {
-        constexpr unsigned long CHECK_INTERVAL = 2000;
+        constexpr unsigned long CHECK_INTERVAL = 3000;
         static unsigned long lastWatchdogCheck = 0;
         static unsigned long lastUpdateCycle = 0;
 
@@ -375,7 +433,7 @@ private:
         rt->activityPrepareReady = false;
     }
 
-    ModbusCycleResult RunModbusCycle(ModbusTCPClient& modbusTCPClient,
+    /* ModbusCycleResult RunModbusCycle(ModbusTCPClient& modbusTCPClient,
                                      unsigned long now) {
         auto& ips = ipManager.GetIps();
         if (ips.empty())
@@ -459,7 +517,199 @@ private:
 
         net.release(networkProtocolId, now);
         return {state, true};
+    } */
+
+ModbusCycleResult RunModbusCycle(
+    ModbusTCPClient& modbusTCPClient,
+    unsigned long now)
+{
+    auto& ips = ipManager.GetIps();
+
+    const size_t ipCount = ips.size();
+
+    if (ipCount == 0)
+        return {
+            ModbusManager::ClientState::ERROR,
+            false
+        };
+
+    auto& modbus = logic.getModbus();
+
+    static size_t ipIdx = 0;
+
+
+    // --------------------------------------------------------
+    // PENDING WRITE
+    // --------------------------------------------------------
+
+    int ipToWrite = -1;
+    if (modbus.hasPendingWritesForIp(ipIdx))
+    {
+        ipToWrite = static_cast<int>(ipIdx);
     }
+    else if (ipCount > 1)
+    {
+        const size_t nextIp = (ipIdx + 1) % ipCount;
+
+        if (modbus.hasPendingWritesForIp(nextIp))
+            ipToWrite = static_cast<int>(nextIp);
+    }
+
+
+    // --------------------------------------------------------
+    // SELEZIONE IP
+    // --------------------------------------------------------
+
+    if (ipToWrite >= 0)
+    {
+        if (!ipManager.ShouldQuery(ipToWrite, now))
+            return {
+                ModbusManager::ClientState::READ_DONE,
+                false
+            };
+
+        if (!net.tryAcquire(
+                networkProtocolId,
+                now))
+        {
+            return {
+                ModbusManager::ClientState::READ_DONE,
+                false
+            };
+        }
+
+        const auto state =
+            modbus.RunClient(
+                modbusTCPClient,
+                ipToWrite,
+                502,
+                mbReadBuffer,
+                now
+            );
+
+        net.updateProtocolState(
+            networkProtocolId,
+            modbus.mapClientState(state)
+        );
+
+        switch (state)
+        {
+            case ModbusManager::ClientState::CYCLE_OK:
+                ipManager.ReportSuccess(ipToWrite);
+                break;
+
+            case ModbusManager::ClientState::ERROR:
+                ipManager.ReportError(
+                    ipToWrite,
+                    now
+                );
+                break;
+
+            default:
+                break;
+        }
+
+        net.release(
+            networkProtocolId,
+            now
+        );
+
+        return {
+            state,
+            true
+        };
+    }
+
+
+    // --------------------------------------------------------
+    // CICLO NORMALE
+    // --------------------------------------------------------
+
+    if (!ipManager.ShouldQuery(ipIdx, now))
+    {
+        ipIdx = (ipIdx + 1) % ipCount;
+
+        return {
+            ModbusManager::ClientState::READ_DONE,
+            false
+        };
+    }
+
+
+    if (!net.tryAcquire(
+            networkProtocolId,
+            now))
+    {
+        return {
+            ModbusManager::ClientState::READ_DONE,
+            false
+        };
+    }
+
+
+    const auto state =
+        modbus.RunClient(
+            modbusTCPClient,
+            static_cast<int>(ipIdx),
+            502,
+            mbReadBuffer,
+            now
+        );
+
+
+    net.updateProtocolState(
+        networkProtocolId,
+        modbus.mapClientState(state)
+    );
+
+
+    switch (state)
+    {
+        case ModbusManager::ClientState::CYCLE_OK:
+            ipManager.ReportSuccess(ipIdx);
+            break;
+
+        case ModbusManager::ClientState::ERROR:
+            ipManager.ReportError(
+                ipIdx,
+                now
+            );
+            break;
+
+        default:
+            break;
+    }
+
+
+    // --------------------------------------------------------
+    // AVANZAMENTO IP
+    // --------------------------------------------------------
+
+    if (state == ModbusManager::ClientState::CYCLE_OK ||
+        state == ModbusManager::ClientState::ERROR ||
+        state == ModbusManager::ClientState::DEVICE_ERROR)
+    {
+        ipIdx = (ipIdx + 1) % ipCount;
+
+        if (ipIdx == 0)
+        {
+            activityPrepareReady = true;
+            ipCycleCompleted = true;
+            buffer.tick(now);
+        }
+    }
+
+
+    net.release(
+        networkProtocolId,
+        now
+    );
+
+    return {
+        state,
+        true
+    };
+}
 
     static bool ReadAreaPolicy(int area, long value, Buffer& b) {
         (void)value;
@@ -735,7 +985,7 @@ public:
 
         logic.getModbus().Begin(
             leds, buffer, deviceManager.getDevices(), ipManager,
-            logic.getThresholds(), &SomethingChangedWrapper, net,
+            logic.getThresholds(), &SomethingChangedNotify, net,
             networkProtocolId);
         logic.getModbus().setReadAreaPolicy(&ReadAreaPolicy);
         logic.getModbus().setFieldChangedCallback(OnModbusFieldChanged);
@@ -747,6 +997,7 @@ public:
 
     void loop(ModbusTCPClient& client) {
         const unsigned long now = timeManager.nowMs();
+
         if (networkProtocolId >= 0) {
             Update(client, now);
         } else {
@@ -754,10 +1005,24 @@ public:
             ipCycleCompleted = true;
         }
 
+        // ---------------------------------------------------------------------
+        // Event bus
+        // ---------------------------------------------------------------------
+        //
+        // Processa un numero limitato di eventi per ciclo.
+        // Le callback non vengono quindi mai eseguite direttamente da:
+        //
+        // MQTT -> callback -> forceEvent -> EventManager::push()
+        //
+        // ma vengono eseguite qui, nel normale ciclo del runtime.
+        //
+        eventManager.process(3);
+
         if (!ipCycleCompleted)
             return;
 
         LoopTask& t = loopTasks[loopTaskIndex];
+
         if (t.counter == 0) {
             t.fn(this);
             t.counter = t.weight;
@@ -766,6 +1031,7 @@ public:
         }
 
         ++loopTaskIndex;
+
         if (loopTaskIndex >= loopTaskCount) {
             loopTaskIndex = 0;
             backendCycleDone = true;
@@ -790,9 +1056,27 @@ public:
         internalEvents.force(area, value, timeManager.nowMs());
     }
 
-    void forceEvent(int area, long value, uint8_t source) {
-        buffer.WriteElement(area, value, timeManager.nowMs());
-        eventManager.push(area, value, source);
+    void forceEvent(
+        int area,
+        long value,
+        uint8_t source)
+    {
+        const auto result =
+            buffer.WriteElement(
+                area,
+                value,
+                false,
+                timeManager.nowMs()
+            );
+
+        if (result != Buffer::WriteResult::CHANGED)
+            return;
+
+        eventManager.push(
+            area,
+            value,
+            source
+        );
     }
 
     void checkWatchdog() {
@@ -851,7 +1135,7 @@ inline DMRuntime::LoopTask DMRuntime::loopTasks[] = {
     { DMRuntime::Task_Automation, 25, 0 },
     { DMRuntime::Task_ActivityLoop, 5, 0 },
     { DMRuntime::Task_Scheduler, 55, 0 },
-    { DMRuntime::Task_WatchdogAndRunningT, 15, 0 },
+    { DMRuntime::Task_WatchdogAndRunningT, 30, 0 },
     { DMRuntime::Task_RestartIP, 120, 0 }
 };
 
@@ -864,8 +1148,6 @@ inline int DMRuntime::toggleSource = 255;
 inline int DMRuntime::splitSource = 255;
 inline int DMRuntime::routeSource = 255;
 inline int DMRuntime::automationSource = 255;
-
-
 
 
 #endif

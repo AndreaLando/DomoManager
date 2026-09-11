@@ -108,10 +108,10 @@ private:
     DeviceManager deviceManager;
     NetworkManager::ProtocolId networkProtocolId = -1;
 
-#if HOTSTANDBY_ENABLED
-    bool isClusterMasterFlag = false;
-    HotStandbyManager hotStandby{false, &timeManager};
-#endif
+    #if HOTSTANDBY_ENABLED
+        bool isClusterMasterFlag = false;
+        HotStandbyManager hotStandby{false, &timeManager};
+    #endif
 
     DomoManagerConfig config;
     OwnerManager owner;
@@ -265,13 +265,13 @@ public:
     void Update(ModbusTCPClient& client, unsigned long now) { runtime.Update(client, now); }
 
     void loop(ModbusTCPClient& client) {
-#if HOTSTANDBY_ENABLED
-        hotStandby.poll();
-        if (!isClusterMasterFlag) {
-            runtime.checkWatchdog();
-            return;
-        }
-#endif
+        #if HOTSTANDBY_ENABLED
+                hotStandby.poll();
+                if (!isClusterMasterFlag) {
+                    runtime.checkWatchdog();
+                    return;
+                }
+        #endif
         runtime.loop(client);
     }
 
@@ -311,16 +311,16 @@ public:
     OwnerManager& getOwner() { return owner; }
     bool isDeveloperMode() const { return owner.getMode() == OwnerManager::DEVELOPER; }
 
-#if HOTSTANDBY_ENABLED
-    HotStandbyManager& getHotStandby() { return hotStandby; }
-    bool isClusterMaster() const { return isClusterMasterFlag; }
-    void enableHotStandby(bool startAsMaster) {
-        hotStandby.isMaster = startAsMaster;
-        isClusterMasterFlag = startAsMaster;
-        hotStandby.begin(9600);
-    }
-    void setClusterMaster(bool m) { isClusterMasterFlag = m; }
-#endif
+    #if HOTSTANDBY_ENABLED
+        HotStandbyManager& getHotStandby() { return hotStandby; }
+        bool isClusterMaster() const { return isClusterMasterFlag; }
+        void enableHotStandby(bool startAsMaster) {
+            hotStandby.isMaster = startAsMaster;
+            isClusterMasterFlag = startAsMaster;
+            hotStandby.begin(9600);
+        }
+        void setClusterMaster(bool m) { isClusterMasterFlag = m; }
+    #endif
 
     void DumpDevicesByIP(IpManager& ipm) {
         LOG_IF("DumpDevicesByIP", "=== DUMP devicesByIP ===");
@@ -373,9 +373,7 @@ inline void mySplitCallback(const SplitOutManager::Split& s, bool isStart) {
         return;
 
     auto& DomoManager = DomoManager::instance->devices();
-    LOG_DF("SplitCallback", "Callback START=%d mainArea=%d outCount=%u",
-           isStart ? 1 : 0, s.mainArea, (unsigned)s.outAreas.size());
-
+    
     for (int a : s.outAreas) {
         GenericPrgDevice* devFound = nullptr;
         int ch = -1;
@@ -672,7 +670,5 @@ inline bool DomoConfigValidator::validateToggles(const DMToggleEngineEx::Toggles
     }
     return ok;
 }
-
-
 
 #endif

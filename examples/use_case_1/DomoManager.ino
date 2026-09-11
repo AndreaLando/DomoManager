@@ -72,7 +72,7 @@ static FrontendConfig mainConfig = [](){
     c.net.subnet  = IPAddress(255, 255, 255, 0);
 
     // --- BRIDGE ---
-    c.bridge.enabled    = false;
+    c.bridge.enabled    = true;
     c.bridge.ip         = IPAddress(192,168,12,201); //Indirizzo del PEER
     c.bridge.localPort  = 8888;
     c.bridge.remotePort = 8888;

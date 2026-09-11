@@ -285,35 +285,24 @@ private:
         // 1) Scrittura nel Buffer
         // --------------------------------------------------------
 
-        buffer.WriteElement(
-            area,
-            value,
-            now
-        );
+        if (DomoManager::instance)
+        {
+            DomoManager::instance->forceEvent(
+                area,
+                value,
+                static_cast<uint8_t>(
+                    receiveContext.aeeSource
+                )
+            );
 
-        // --------------------------------------------------------
-        // 2) Pubblicazione evento
-        //
-        // IMPORTANTE:
-        // usiamo lo stesso aeeSource del consumer AEE.
-        // Quindi AEEEventCallback viene escluso dal dispatch.
-        // --------------------------------------------------------
-
-        receiveContext.events->push(
-            area,
-            value,
-            static_cast<uint8_t>(
-                receiveContext.aeeSource
-            )
-        );
-
-        LOG_DF(
-            "AEE::RX",
-            "AEE '%s' -> Buffer area=%d value=%ld",
-            v->def.name,
-            area,
-            value
-        );
+            LOG_DF(
+                "AEE::RX",
+                "AEE '%s' -> Buffer area=%d value=%ld",
+                v->def.name,
+                area,
+                value
+            );
+        }
     }
 
 
@@ -2931,7 +2920,6 @@ private:
 
         const auto& cfg =
             TaskEngineOrchestrator::getCfg();
-
 
         auto& buffer =
             manager.getBuffer();

@@ -392,8 +392,14 @@ public:
         return _buffer[area].field.value == value;
     }
 
+    enum class WriteResult : uint8_t
+    {
+        CHANGED,
+        EQUAL,
+        ERROR
+    };
 
-    inline bool WriteElement(
+    inline WriteResult WriteElement(
         int area,
         long value,
         unsigned long now)
@@ -407,7 +413,7 @@ public:
     }
 
 
-    inline bool WriteElement(
+    inline WriteResult WriteElement(
         int area,
         long value,
         bool silent,
@@ -421,14 +427,13 @@ public:
                 area
             );
 
-            return false;
+            return WriteResult::ERROR;
         }
 
         auto& entry = _buffer[area].field;
 
-        // Nessuna operazione se il valore non è cambiato.
         if (entry.value == value)
-            return true;
+            return WriteResult::EQUAL;
 
         entry.prevValue = entry.value;
         entry.value     = value;
@@ -437,7 +442,7 @@ public:
         if (!silent)
             markChanged(area);
 
-        return true;
+        return WriteResult::CHANGED;
     }
 
 

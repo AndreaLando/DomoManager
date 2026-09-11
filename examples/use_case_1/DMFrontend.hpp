@@ -500,8 +500,6 @@ class DomoManagerFrontendEngine
     : public FrontendRuntime
 {
 private:
-    
-
     // ============================================================
     //  INSTANCE
     // ============================================================
@@ -543,15 +541,12 @@ private:
     static void CheckFullCycle()
     {
         auto* dm = DomoManager::instance;
-
         if (!dm)
             return;
 
-        bool backend =
-            dm->hasBackendCycleCompleted();
+        bool backend = dm->hasBackendCycleCompleted();
 
-        bool frontend =
-            TaskEngine::hasFrontendCycleCompleted();
+        bool frontend = TaskEngine::hasFrontendCycleCompleted();
 
         if (backend && frontend)
         {
@@ -568,34 +563,23 @@ private:
     // ============================================================
     //  SOMETHING CHANGED
     // ============================================================
-
-    static void SomethingChanged()
+    static void SomethingChanged(
+        const std::unordered_set<int>& changed)
     {
-        auto& manager =
+        /* auto& manager =
             *DomoManager::instance;
 
         auto& buffer =
-            manager.getBuffer();
+            manager.getBuffer(); */
 
-
-        // --------------------------------------------------------
-        // Modifiche provenienti dal pannello HMI
-        // --------------------------------------------------------
-
-        auto changedFromPanel =
-            buffer.getChangedMap();
-
-        if (!changedFromPanel.empty())
+        if (!changed.empty())
         {
-            for (const auto& area :
-                 changedFromPanel)
+            for (const auto& area : changed)
             {
-                SecurityOrchestrator::
-                    ApplySecurityCommands(area);
+                SecurityOrchestrator::ApplySecurityCommands(area);
             }
         }
     }
-
 
     // ============================================================
     //  WATCHDOG
@@ -710,8 +694,7 @@ private:
             cfg.net.gateway,
             cfg.net.subnet
         );
-
-
+        
         if (Ethernet.hardwareStatus() ==
             EthernetNoHardware)
         {
@@ -950,7 +933,6 @@ private:
         );
     }
 
-
     static void Task_Meteo(
         DomoManager& manager,
         unsigned long now)
@@ -986,36 +968,26 @@ private:
         auto& averages =
             manager.getAverages();
 
-
         // --------------------------------------------------------
         // INPUTS
         // --------------------------------------------------------
-
         const int gridPower =
             buffer.getValueFast(
                 13,
                 100
             );
 
+        const float lux = 800.0f;
 
-        const float lux =
-            800.0f;
-
-
-        const float tempExt =
-            7.0f;
-
+        const float tempExt = 7.0f;
 
         const float actualProduction =
             0.0f;
 
-
         // --------------------------------------------------------
         // TIME
         // --------------------------------------------------------
-
         struct tm t;
-
 
         manager
             .getTimeManager()
@@ -1040,14 +1012,12 @@ private:
             t.tm_min
         );
 
-
         // --------------------------------------------------------
         // DIAGNOSTICS
         // --------------------------------------------------------
 
         auto& pm =
             PowerEngine::Get();
-
 
         LOG_DF(
             "Power",
@@ -1146,7 +1116,6 @@ protected:
          */
     }
 
-
     void onButtonPressed(
         unsigned long now) override
     {
@@ -1162,7 +1131,6 @@ protected:
     // ------------------------------------------------------------
     // DEVELOPER MODE
     // ------------------------------------------------------------
-
     void onDeveloperMode() override
     {
         /*
@@ -1182,7 +1150,6 @@ protected:
         // ------------------------------------------------------------
         // MASTER
         // ------------------------------------------------------------
-
         void onBecomeMaster() override
         {
             LOG_I(
@@ -1200,7 +1167,6 @@ protected:
         // ------------------------------------------------------------
         // SLAVE
         // ------------------------------------------------------------
-
         void onBecomeSlave() override
         {
             LOG_I(
@@ -1213,7 +1179,6 @@ protected:
         }
 
     #endif
-
 
 private:
 
@@ -1391,9 +1356,7 @@ public:
             cfg.modbus.timeoutMs
         );
 
-
         delay(2000);
-
 
         // --------------------------------------------------------
         // TASK ENGINE
@@ -1402,7 +1365,6 @@ public:
         TaskEngine::Setup(
             cfg
         );
-
 
         TaskEngine::AddTask(
             [](DomoManager& dm, unsigned long now)
@@ -1654,8 +1616,8 @@ public:
                         "MQTT",
                         50,
                         20,
-                        (uint8_t)
-                            cfg.mqtt.clientCount
+                        (uint8_t)cfg.mqtt.clientCount, 
+                        true
                     );
 
 
@@ -1689,19 +1651,15 @@ public:
                 {
                     const int OLDER = 5000;
 
-
                     auto& buffer =
                         dm.getBuffer();
-
 
                     std::vector<DMAEE::Update>
                         updates;
 
-
                     updates.reserve(
                         16
                     );
-
 
                     const unsigned long now =
                         dm.getTimeManager()
@@ -1720,7 +1678,6 @@ public:
                             updates
                         );
 
-
                     if (hasUpdates)
                     {
                         DMAEE::ApplyUpdates(
@@ -1729,11 +1686,9 @@ public:
                         );
                     }
 
-
                     // ------------------------------------------------
                     // Pulizia variazioni Buffer
                     // ------------------------------------------------
-
                     buffer.ResetAll(
                         now,
                         OLDER
@@ -1747,7 +1702,6 @@ public:
         // --------------------------------------------------------
 
         Manager->enableWatchdog();
-
 
         LOG_IF(
             "DOMO MANAGER",
@@ -1767,7 +1721,6 @@ public:
         if (!instance)
             return;
 
-
         // ========================================================
         // FRONTEND RUNTIME
         //
@@ -1779,44 +1732,33 @@ public:
         //   - HotStandby
         //
         // ========================================================
-
         const unsigned long now =
             instance->updateRuntime();
-
 
         // ========================================================
         // APPLICATION LOOP
         // ========================================================
-
         #if HOTSTANDBY_ENABLED
-
-                if (instance->getIsMaster())
-
+            if (instance->getIsMaster())
         #else
-
-                if (true)
-
+            if (true)
         #endif
         {
             // ----------------------------------------------------
             // HMI
             // ----------------------------------------------------
-
             hmiEngine.SetLoopEnabled(
                 Manager->getPowerOnCycleCompleted()
             );
-
 
             hmiEngine.ProcessNetwork(
                 *Manager,
                 now
             );
 
-
             // ----------------------------------------------------
             // DOMO MANAGER
             // ----------------------------------------------------
-
             Manager->loop(
                 network->
                     modbusTCP()
@@ -1828,7 +1770,6 @@ public:
             // ----------------------------------------------------
             // SLAVE
             // ----------------------------------------------------
-
             Manager->loop(
                 network->
                     modbusTCP()

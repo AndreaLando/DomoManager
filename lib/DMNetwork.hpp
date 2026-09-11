@@ -959,6 +959,7 @@ public:
             OK,
             DEVICE_ERROR,
             ERROR,
+            WAITING,
             CYCLE_OK,
             WRITE_DONE,
             READ_DONE
@@ -968,6 +969,15 @@ public:
 
         // SOCKET OWNER
         SocketManager::OwnerId socketOwner = -1;
+
+        // EVENT POLICY
+        //
+        // true  -> gli eventi emessi da questo protocollo
+        //          vengono coalesced per source + area.
+        //
+        // false -> FIFO normale.
+        bool coalesceEvents = false;
+
     };
 
 private:
@@ -1054,7 +1064,8 @@ public:
         const char* name,
         unsigned long minInterval,
         unsigned long maxDuration,
-        uint8_t maxSockets = 0)
+        uint8_t maxSockets = 0,
+        bool coalesceEvents = false )
     {
         int id = protocols.size();
 
@@ -1076,6 +1087,12 @@ public:
             (p.slotDuration == 0)
                 ? maxDuration
                 : p.slotDuration;
+
+        // ========================================================
+        // EVENT POLICY
+        // ========================================================
+
+        p.coalesceEvents = coalesceEvents;
 
         // ========================================================
         // SOCKET OWNER
@@ -1114,11 +1131,13 @@ public:
 
         LOG_IF(
             "NET::SOCKET",
-            "Protocol registered: id=%d name=%s socketOwner=%d demand=%u",
+            "Protocol registered: id=%d name=%s socketOwner=%d "
+            "demand=%u coalesceEvents=%d",
             id,
             name ? name : "?",
             p.socketOwner,
-            (unsigned)maxSockets
+            (unsigned)maxSockets,
+            p.coalesceEvents
         );
 
         return id;
@@ -1675,6 +1694,17 @@ public:
     Protocol& getProtocol(int id)
     {
         return protocols[id].proto;
+    }
+
+    bool shouldCoalesceEvents(int id) const
+    {
+        if (id < 0 ||
+            id >= static_cast<int>(protocols.size()))
+        {
+            return false;
+        }
+
+        return protocols[id].proto.coalesceEvents;
     }
 
     // ============================================================

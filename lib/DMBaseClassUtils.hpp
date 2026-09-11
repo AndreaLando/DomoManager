@@ -609,15 +609,20 @@ public:
 };
 
 
-
-
-// ============================================================
-// EventManager
-// ============================================================
-
 class EventManager
 {
 public:
+
+    // ============================================================
+    // CONFIGURAZIONE
+    // ============================================================
+
+    static constexpr uint8_t INVALID_CONSUMER_ID = 255;
+
+    static constexpr size_t EVENT_QUEUE_SIZE = 32;
+
+    static constexpr size_t DEFAULT_PROCESS_BUDGET = 4;
+
 
     // ============================================================
     // EVENT
@@ -625,14 +630,10 @@ public:
 
     struct Event
     {
-        int area;
-        long value;
-
-        // ID del consumer che ha generato l'evento.
-        uint8_t source;
-
-        // ID univoco dell'evento.
-        uint32_t id;
+        int area = -1;
+        long value = 0;
+        uint8_t source = INVALID_CONSUMER_ID;
+        uint32_t id = 0;
     };
 
 
@@ -644,67 +645,219 @@ public:
 
 
     // ============================================================
-    // CONSUMER
+    // COALESCING POLICY
+    //
+    // La policy NON è definita qui.
+    //
+    // EventManager chiede al proprietario esterno
+    // se il protocollo associato alla source deve
+    // usare coalescing.
+    // ============================================================
+
+    using CoalescePolicyFn =
+        bool (*)(void* context, int protocolId);
+
+
+    // ============================================================
+    // CONSUMER / SOURCE
     // ============================================================
 
     struct Consumer
     {
-        uint8_t id;
-        Callback callback;
-        const char* label;
+        uint8_t id = INVALID_CONSUMER_ID;
+
+        Callback callback = nullptr;
+
+        const char* label = nullptr;
+
+        // Protocollo proprietario della source.
+        //
+        // -1 = nessun protocollo associato.
+        int protocolId = -1;
+    };
+
+
+    // ============================================================
+    // STATISTICHE
+    // ============================================================
+
+    struct Statistics
+    {
+        size_t totalQueued = 0;
+        size_t totalProcessed = 0;
+        size_t totalDropped = 0;
+        size_t totalCoalesced = 0;
+        size_t peakQueue = 0;
+        size_t pending = 0;
     };
 
 
 private:
 
+    // ============================================================
+    // CONSUMERS
+    // ============================================================
+
     std::vector<Consumer> consumers;
 
     uint8_t nextConsumerId = 0;
 
+
+    // ============================================================
+    // POLICY PROVIDER
+    // ============================================================
+
+    CoalescePolicyFn coalescePolicy = nullptr;
+
+    void* coalescePolicyContext = nullptr;
+
+
+    // ============================================================
+    // EVENT FIFO
+    // ============================================================
+
+    Event eventQueue[EVENT_QUEUE_SIZE];
+
+    size_t eventHead = 0;
+
+    size_t eventTail = 0;
+
+    size_t eventCount = 0;
+
+
+    // ============================================================
+    // EVENT ID
+    // ============================================================
+
     uint32_t nextEventId = 1;
 
 
+    // ============================================================
+    // STATISTICHE
+    // ============================================================
+
+    size_t totalQueued = 0;
+
+    size_t totalProcessed = 0;
+
+    size_t totalDropped = 0;
+
+    size_t totalCoalesced = 0;
+
+    size_t peakQueue = 0;
+
+
 public:
+
+    // ============================================================
+    // CONSTRUCTOR
+    // ============================================================
 
     EventManager() = default;
 
 
     // ============================================================
-    // ADD CONSUMER
+    // CONFIGURA POLICY PROVIDER
+    //
+    // Viene impostato una sola volta dal runtime.
+    //
+    // Esempio:
+    //
+    // eventManager.setCoalescePolicy(
+    //     NetworkManager::EventCoalescePolicy,
+    //     &network
+    // );
     // ============================================================
 
-    /*
-        Registra un consumer e restituisce il suo ID.
+    void setCoalescePolicy(
+        CoalescePolicyFn fn,
+        void* context)
+    {
+        coalescePolicy = fn;
+        coalescePolicyContext = context;
+    }
 
-        L'ID restituito deve essere conservato dal chiamante
-        e usato come source quando genera un evento.
 
-        EventManager non conosce il significato dell'ID.
-    */
+    // ============================================================
+    // ADD CONSUMER / SOURCE
+    //
+    // protocolId collega la source al protocollo che l'ha
+    // generata.
+    //
+    // La policy viene decisa dal NetworkManager, non qui.
+    // ============================================================
 
     uint8_t add(
         Callback callback,
-        const char* label)
+        const char* label,
+        int protocolId = -1)
     {
         if (!callback)
-            return 255;
+            return INVALID_CONSUMER_ID;
 
-        if (nextConsumerId == 255)
-            return 255;
+        if (nextConsumerId == INVALID_CONSUMER_ID)
+            return INVALID_CONSUMER_ID;
 
-        const uint8_t id = nextConsumerId++;
+        const uint8_t id =
+            nextConsumerId++;
 
         consumers.push_back({
             id,
             callback,
-            label
+            label,
+            protocolId
         });
 
         return id;
     }
 
+
+    // ============================================================
+    // UPDATE PROTOCOL ASSOCIATO ALLA SOURCE
+    // ============================================================
+
+    bool setProtocol(
+        uint8_t source,
+        int protocolId)
+    {
+        for (auto& consumer : consumers)
+        {
+            if (consumer.id == source)
+            {
+                consumer.protocolId = protocolId;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+
+    // ============================================================
+    // GET SOURCE PROTOCOL
+    // ============================================================
+
+    int getProtocolId(
+        uint8_t source) const
+    {
+        for (const auto& consumer : consumers)
+        {
+            if (consumer.id == source)
+                return consumer.protocolId;
+        }
+
+        return -1;
+    }
+
+
     // ============================================================
     // PUSH NUOVO EVENTO
+    //
+    // NON esegue callback.
+    //
+    // Ritorno:
+    //   id > 0  -> evento inserito/coalesced
+    //   0       -> evento perso perché FIFO piena
     // ============================================================
 
     uint32_t push(
@@ -714,16 +867,19 @@ public:
     {
         Event event;
 
-        event.area   = area;
-        event.value  = value;
+        event.area = area;
+        event.value = value;
         event.source = source;
-        event.id     = nextEventId++;
 
-        // Protezione overflow
+        event.id = nextEventId++;
+
         if (nextEventId == 0)
             nextEventId = 1;
 
-        dispatch(event);
+
+        if (!enqueue(event))
+            return 0;
+
 
         return event.id;
     }
@@ -733,62 +889,98 @@ public:
     // PUSH EVENTO ESISTENTE
     // ============================================================
 
-    void push(const Event& event)
+    bool push(const Event& event)
     {
-        dispatch(event);
+        return enqueue(event);
     }
 
 
-private:
-
     // ============================================================
-    // DISPATCH
+    // PROCESS
+    //
+    // Dispatch differito.
     // ============================================================
 
-    void dispatch(const Event& event)
+    size_t process(
+        size_t maxEvents = DEFAULT_PROCESS_BUDGET)
     {
-        for (const auto& consumer : consumers)
+        if (maxEvents == 0)
+            return 0;
+
+
+        size_t processed = 0;
+
+
+        while (processed < maxEvents)
         {
-            if (!consumer.callback)
-                continue;
+            Event event;
 
-            // Il consumer che ha generato l'evento
-            // non deve riceverlo nuovamente.
-            if (consumer.id == event.source)
-            {
-                /*LOG_EF(
-                    "EventManager",
-                    "SKIP id=%lu area=%d source=%u -> consumer=%u [%s]",
-                    (unsigned long)event.id,
-                    event.area,
-                    event.source,
-                    consumer.id,
-                    consumer.label ? consumer.label : "?"
-                );*/
+            if (!dequeue(event))
+                break;
 
-                continue;
-            }
 
-            /*LOG_EF(
-                "EventManager",
-                "DISPATCH id=%lu area=%d value=%ld source=%u -> consumer=%u [%s]",
-                (unsigned long)event.id,
-                event.area,
-                event.value,
-                event.source,
-                consumer.id,
-                consumer.label ? consumer.label : "?"
-            );*/
+            dispatch(event);
 
-            consumer.callback(event);
+            ++processed;
+
+            ++totalProcessed;
         }
+
+
+        return processed;
     }
 
 
-public:
+    // ============================================================
+    // PROCESS ONE
+    // ============================================================
+
+    bool processOne()
+    {
+        Event event;
+
+        if (!dequeue(event))
+            return false;
+
+
+        dispatch(event);
+
+        ++totalProcessed;
+
+        return true;
+    }
+
 
     // ============================================================
-    // INFO
+    // FIFO STATUS
+    // ============================================================
+
+    bool empty() const
+    {
+        return eventCount == 0;
+    }
+
+
+    bool full() const
+    {
+        return eventCount >= EVENT_QUEUE_SIZE;
+    }
+
+
+    size_t pending() const
+    {
+        return eventCount;
+    }
+
+
+    constexpr size_t capacity() const
+    {
+        return EVENT_QUEUE_SIZE;
+    }
+
+
+    // ============================================================
+    // CONSUMERS
     // ============================================================
 
     size_t size() const
@@ -797,13 +989,342 @@ public:
     }
 
 
-    const std::vector<Consumer>& getConsumers() const
+    const std::vector<Consumer>&
+    getConsumers() const
     {
         return consumers;
     }
+
+
+    // ============================================================
+    // STATISTICHE
+    // ============================================================
+
+    Statistics getStatistics() const
+    {
+        Statistics stats;
+
+        stats.totalQueued =
+            totalQueued;
+
+        stats.totalProcessed =
+            totalProcessed;
+
+        stats.totalDropped =
+            totalDropped;
+
+        stats.totalCoalesced =
+            totalCoalesced;
+
+        stats.peakQueue =
+            peakQueue;
+
+        stats.pending =
+            eventCount;
+
+        return stats;
+    }
+
+
+    size_t getTotalQueued() const
+    {
+        return totalQueued;
+    }
+
+
+    size_t getTotalProcessed() const
+    {
+        return totalProcessed;
+    }
+
+
+    size_t getTotalDropped() const
+    {
+        return totalDropped;
+    }
+
+
+    size_t getTotalCoalesced() const
+    {
+        return totalCoalesced;
+    }
+
+
+    size_t getPeakQueue() const
+    {
+        return peakQueue;
+    }
+
+
+    // ============================================================
+    // RESET STATISTICHE
+    // ============================================================
+
+    void resetStatistics()
+    {
+        totalQueued = 0;
+
+        totalProcessed = 0;
+
+        totalDropped = 0;
+
+        totalCoalesced = 0;
+
+        peakQueue = eventCount;
+    }
+
+
+    // ============================================================
+    // CLEAR FIFO
+    // ============================================================
+
+    void clear()
+    {
+        eventHead = 0;
+
+        eventTail = 0;
+
+        eventCount = 0;
+    }
+
+
+private:
+
+    // ============================================================
+    // SOURCE -> COALESCE?
+    // ============================================================
+
+    bool shouldCoalesce(
+        uint8_t source) const
+    {
+        if (!coalescePolicy)
+            return false;
+
+
+        const int protocolId =
+            getProtocolId(source);
+
+
+        if (protocolId < 0)
+            return false;
+
+
+        return coalescePolicy(
+            coalescePolicyContext,
+            protocolId
+        );
+    }
+
+
+    // ============================================================
+    // UPDATE EVENTO ESISTENTE
+    //
+    // Chiave:
+    //
+    //      source + area
+    //
+    // Quindi:
+    //
+    // MQTT + area 127
+    //
+    // è diverso da:
+    //
+    // HMI + area 127
+    // ============================================================
+
+    bool updateExistingCoalesced(
+        const Event& event)
+    {
+        for (size_t i = 0;
+             i < eventCount;
+             ++i)
+        {
+            const size_t index =
+                (eventHead + i) %
+                EVENT_QUEUE_SIZE;
+
+
+            Event& queued =
+                eventQueue[index];
+
+
+            if (queued.source !=
+                event.source)
+            {
+                continue;
+            }
+
+
+            if (queued.area !=
+                event.area)
+            {
+                continue;
+            }
+
+
+            // ------------------------------------------------
+            // COALESCE
+            // ------------------------------------------------
+
+            queued.value =
+                event.value;
+
+            queued.id =
+                event.id;
+
+            ++totalCoalesced;
+
+            return true;
+        }
+
+
+        return false;
+    }
+
+
+    // ============================================================
+    // ENQUEUE
+    // ============================================================
+
+    bool enqueue(
+        const Event& event)
+    {
+        const bool coalesce =
+            shouldCoalesce(event.source);
+
+
+        // --------------------------------------------------------
+        // COALESCE EVENTO GIÀ PENDENTE
+        //
+        // Importante:
+        // anche se la FIFO è piena, una entry già esistente
+        // può comunque essere aggiornata.
+        // --------------------------------------------------------
+
+        if (coalesce)
+        {
+            if (updateExistingCoalesced(event))
+                return true;
+        }
+
+
+        // --------------------------------------------------------
+        // FIFO PIENA
+        // --------------------------------------------------------
+
+        if (eventCount >=
+            EVENT_QUEUE_SIZE)
+        {
+            ++totalDropped;
+
+            return false;
+        }
+
+
+        // --------------------------------------------------------
+        // INSERT
+        // --------------------------------------------------------
+
+        eventQueue[eventTail] =
+            event;
+
+
+        ++eventTail;
+
+
+        if (eventTail >=
+            EVENT_QUEUE_SIZE)
+        {
+            eventTail = 0;
+        }
+
+
+        ++eventCount;
+
+        ++totalQueued;
+
+
+        if (eventCount > peakQueue)
+        {
+            peakQueue =
+                eventCount;
+        }
+
+
+        return true;
+    }
+
+
+    // ============================================================
+    // DEQUEUE
+    // ============================================================
+
+    bool dequeue(
+        Event& event)
+    {
+        if (eventCount == 0)
+            return false;
+
+
+        event =
+            eventQueue[eventHead];
+
+
+        ++eventHead;
+
+
+        if (eventHead >=
+            EVENT_QUEUE_SIZE)
+        {
+            eventHead = 0;
+        }
+
+
+        --eventCount;
+
+        return true;
+    }
+
+
+    // ============================================================
+    // DISPATCH
+    // ============================================================
+
+    void dispatch(
+        const Event& event)
+    {
+        const size_t consumerCount =
+            consumers.size();
+
+
+        for (size_t i = 0;
+             i < consumerCount;
+             ++i)
+        {
+            // Copia locale per evitare
+            // riferimenti invalidati da eventuali
+            // modifiche al vector durante la callback.
+
+            const Consumer consumer =
+                consumers[i];
+
+
+            if (!consumer.callback)
+                continue;
+
+
+            // Il source non riceve il proprio evento.
+            if (consumer.id ==
+                event.source)
+            {
+                continue;
+            }
+
+
+            consumer.callback(event);
+        }
+    }
 };
-
-
 
 class CommunicationScheduler
 {

@@ -23,8 +23,7 @@
 #include <NTPClient.h>
 #include <WiFi.h>          
 
-#include <Ethernet.h>
-#include <EthernetUdp.h>
+#include "DMEthernet.hpp"
 
 
 #define LOG_LEVEL LogLevel::INFO
@@ -97,7 +96,7 @@ private:
             }
         }
         else {
-            if (!Ethernet.hostByName(server.c_str(), ntpIP))
+            if (!DMEthernet::hostByName(server.c_str(), ntpIP))
                 return 0;
 
             EthernetUDP udp;
@@ -341,7 +340,7 @@ public:
                     continue;
                 }
 
-                EthernetUDP udp;
+                DMEthernetUDP udp;
                 udp.begin(2390);
 
                 memset(packet, 0, DM_NTP_PACKET_SIZE);

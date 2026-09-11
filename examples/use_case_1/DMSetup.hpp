@@ -227,7 +227,7 @@ static const DomoManagerConfig::Devices mainDevicesConfig = {
 
         { "Sensore Light/Temp/Hum - Bagno", WaveSharePT_Addr, 11, "CWT_SLTH_6W_S_C",
           { 215, 216, 217 }, 3, Low
-        }
+        } 
     }
 };
 
@@ -1137,29 +1137,6 @@ static const FrontendConfig::MQTT::Device
     }
 };
 
-// ============================================================================
-// DEVICE - HOME ASSISTANT
-// ============================================================================
-
-static const FrontendConfig::MQTT::Device
-    MQTT_HA_Devices[] =
-{
-    {
-        "opta_domotica",
-        "Home Assistant",
-
-        {
-            {
-                "temp_cucina",
-                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
-                FrontendConfig::MQTT::Mapping::DataType::FLOAT,
-                189,
-                0.1f
-            }
-        }
-    }
-};
-
 
 // ============================================================================
 // CLIENT MQTT
@@ -1176,7 +1153,7 @@ static const FrontendConfig::MQTT::Client MQTT_CLIENTS[] =
 {
     {
         true,
-        IPAddress(192, 168, 12, 212),
+        IPAddress(192, 168, 12, 101), //212
         1883,
         FrontendConfig::MQTT::Client::Backend::ZIGBEE2MQTT,
         "SMHub",
