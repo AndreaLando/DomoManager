@@ -23,6 +23,7 @@
 #include "DMBuffers.hpp"
 #include "DMSignal.hpp"
 #include "DMBaseClassCore.hpp"
+#include "DMEthernet.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -33,7 +34,7 @@ public:
 
     static int readRaw(const Config& cfg, Buffer& buf) {
         switch (cfg.type) {
-            case Config::Type::ANALOG:
+            case Config::Type::ANALOGIC:
                 return analogRead(cfg.value);
 
             case Config::Type::DIGITAL:
@@ -88,7 +89,7 @@ class GenericPrgDevice {
       bool ok;
     }structRead; 
 
-    GenericPrgDevice(const char* name, arduino::IPAddress ip, unsigned int deviceAddress, std::vector<GenericPrgDeviceChannel> channels, std::vector<int> ioAreas, short ErrorCnt, Priority priority);     
+    GenericPrgDevice(const char* name, DMIPAddress ip, unsigned int deviceAddress, std::vector<GenericPrgDeviceChannel> channels, std::vector<int> ioAreas, short ErrorCnt, Priority priority);     
     bool Run();
     structRead Read(ModbusTCPClient &mb, int channel, uint16_t* outBuffer, unsigned long now);
     bool Write(ModbusClient &mb, int channel, int address, int value, unsigned long now);
@@ -97,7 +98,7 @@ class GenericPrgDevice {
     //GenericPrgDeviceChannel GetChannelInfo(int channel);
     const GenericPrgDeviceChannel& GetChannelInfo(int channel) const;
 
-    const arduino::IPAddress& GetIp() const;
+    const DMIPAddress& GetIp() const;
 
     Priority GetPriority();
     size_t GetChannelsSize();
@@ -117,7 +118,7 @@ class GenericPrgDevice {
     Priority _priority;
     const char* _name;
     unsigned int _deviceAddress;
-    arduino::IPAddress _ip;
+    DMIPAddress _ip;
     std::vector<GenericPrgDeviceChannel> _channels;
     Errors Error;
     const short MAX_CALLS=8;
@@ -131,11 +132,11 @@ public:
     
     const std::vector<int>& GetDevicesByPriority(
         Priority priority,
-        const arduino::IPAddress& ip) const;
+        const DMIPAddress& ip) const;
 
     bool HasDevicesByPriority(
         Priority priority,
-        const arduino::IPAddress& ip) const;
+        const DMIPAddress& ip) const;
 private:
     // Chiave: (IP << 8) | priority
     std::unordered_map<uint64_t, std::vector<int>> _cachePriorityIndex;
@@ -326,12 +327,9 @@ private:
     std::unordered_map<int, size_t> cacheByArea;
 
     // Cache: forward area → indice nel vector
-    // Serve per permettere ad EventManager di trovare
-    // direttamente il Toggle associato ad una forward area.
     std::unordered_map<int, size_t> cacheByForwardArea;
 
-    // Manteniamo anche questa cache perché viene già utilizzata
-    // da RunClient / altra logica esistente.
+    // Cache utilizzata dalla logica esistente
     std::unordered_set<int> forwardAreasCache;
 
 
@@ -339,11 +337,17 @@ public:
 
     ToggleManager() {}
 
+
+    // ============================================================
+    // AREA GESTITA DA TOGGLE?
+    // ============================================================
+
     bool handlesArea(int area) const
     {
         return cacheByArea.count(area) > 0 ||
-            cacheByForwardArea.count(area) > 0;
+               cacheByForwardArea.count(area) > 0;
     }
+
 
     // ============================================================
     // FORWARD AREA
@@ -388,7 +392,6 @@ public:
         for (int fwd : forwards)
         {
             forwardAreasCache.insert(fwd);
-
             cacheByForwardArea[fwd] = index;
         }
     }
@@ -428,8 +431,6 @@ public:
     // GET PER AREA READ
     // ============================================================
 
-    // SAFE:
-    // ritorna nullptr se l'area non è registrata
     inline ToggleSignalItem* get(int areaRead)
     {
         auto it = cacheByArea.find(areaRead);
@@ -448,24 +449,6 @@ public:
     // ============================================================
     // GET PER FORWARD AREA
     // ============================================================
-
-    // NUOVO:
-    // permette di risalire dalla forward area
-    // al Toggle che la utilizza.
-    //
-    // Esempio:
-    //
-    // Toggle:
-    //     areaRead = 127
-    //     forwards = {130, 131}
-    //
-    // getByForwardArea(130)
-    //     → Toggle areaRead 127
-    //
-    // getByForwardArea(131)
-    //     → Toggle areaRead 127
-    //
-    // Lookup O(1).
 
     inline ToggleSignalItem* getByForwardArea(int area)
     {
@@ -492,12 +475,10 @@ public:
     {
         const int max = buffer.size();
 
-        // Lookup diretto tramite areaRead
         ToggleSignalItem* t = get(area);
 
         if (!t)
             return 0;
-
 
         for (int fwdArea : t->forwardsFromAreas)
         {
@@ -512,12 +493,41 @@ public:
         return 0;
     }
 
-    
+
+    // ============================================================
+    // RESULT
+    // ============================================================
+
     struct ToggleResult
     {
+        // Area fisica del Buffer.
+        //
+        // Per Toggle normale:
+        //     areaToWrite
+        //
+        // Per Toggle Route-only:
+        //     Buffer::NO_AREA
         int area = Buffer::NO_AREA;
+
         long value = 0;
+
+        // Area logica del Toggle.
+        //
+        // Esempio:
+        //     Toggle 90 con forward 82
+        //
+        // Evento ricevuto:
+        //     area=82
+        //
+        // toggleArea:
+        //     90
+        int toggleArea = Buffer::NO_AREA;
     };
+
+
+    // ============================================================
+    // PROCESS EVENT
+    // ============================================================
 
     bool processEvent(
         int area,
@@ -526,6 +536,8 @@ public:
         unsigned long now,
         ToggleResult& result)
     {
+        (void)now;
+
         ToggleSignalItem* toggle = get(area);
 
         if (!toggle)
@@ -534,7 +546,14 @@ public:
         if (!toggle)
             return false;
 
+        // Area logica/primaria del Toggle.
+        result.toggleArea = toggle->areaRead;
+
         long signalIn = value;
+
+        // ========================================================
+        // FORWARD
+        // ========================================================
 
         if (!toggle->forwardsFromAreas.empty())
         {
@@ -547,28 +566,65 @@ public:
                 signalIn = value;
         }
 
+        // ========================================================
+        // CERCA AreaToWrite
+        // ========================================================
+
         const int areaToWrite =
             buffer.GetAreaToWrite(toggle->areaRead);
 
-        if (areaToWrite <= 0)
-            return false;
 
-        BufferSourceInfo outputInfo;
+        // ========================================================
+        // TOGGLE CON AreaToWrite
+        //
+        // COMPORTAMENTO ORIGINALE
+        // ========================================================
 
-        if (!buffer.GetData(areaToWrite, outputInfo))
-            return false;
+        if (areaToWrite > 0)
+        {
+            BufferSourceInfo outputInfo;
 
-        long toggleOut = outputInfo.value;
+            if (!buffer.GetData(
+                    areaToWrite,
+                    outputInfo))
+            {
+                return false;
+            }
 
-        if (!toggle->Toggle.change(
+            long toggleOut = outputInfo.value;
+
+            if (!toggle->Toggle.change(
+                    signalIn,
+                    toggleOut))
+            {
+                return false;
+            }
+
+            result.area = areaToWrite;
+            result.value = toggleOut;
+
+            return true;
+        }
+
+
+        // ========================================================
+        // TOGGLE SENZA AreaToWrite
+        //
+        // L'uscita viene gestita da Route.
+        // ========================================================
+
+        long toggleOut = 0;
+
+        if (!toggle->Toggle.changeRoute(
                 signalIn,
                 toggleOut))
         {
             return false;
         }
 
-        result.area = areaToWrite;
+        result.area = Buffer::NO_AREA;
         result.value = toggleOut;
+
         return true;
     }
 };

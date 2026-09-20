@@ -1,8 +1,6 @@
 #ifndef DMBaseClassCore_HPP
 #define DMBaseClassCore_HPP
 
-#pragma once
-
 /* ============================================================================
    SVILUPPATORE
    ============================================================================
@@ -17,16 +15,15 @@
 
    ============================================================================ */
 
-
-
 #include <Arduino.h>
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
 
+#pragma once
+
 #include "DMSignal.hpp"
 #include "DMLogger.hpp"
-#include "DMOptaRTC.hpp"
 
 enum Priority {
   Low=0, 
@@ -253,67 +250,9 @@ public:
     }
 };
 
-class TimeManager {
-public:
-    TimeManager()
-        : lastEpoch(0),
-          lastMillis(millis())   // ⭐ fondamentale
-    {}
-
-    void update() {
-        time_t e = rtc.getEpoch();
-
-        if (rtc.isTimeSynced() && e != 0) {
-            lastEpoch = e;
-            lastMillis = millis();
-        }
-    }
-
-    void updateFromEpoch(uint32_t epoch) {
-        rtc.applyEpoch(epoch);   // allinea OptaRTC
-        lastEpoch = epoch;       // aggiorna fallback
-        lastMillis = millis();
-    }
-
-    time_t getEpoch() {
-        time_t e = rtc.getEpoch();
-
-        if (rtc.isTimeSynced() && e != 0) {
-            lastEpoch = e;
-            lastMillis = millis();
-            return e;
-        }
-
-        return lastEpoch + (millis() - lastMillis) / 1000;
-    }
-
-    bool getDateTime(struct tm &t) {
-        time_t e = getEpoch();
-        if (e == 0) return false;
-
-        gmtime_r(&e, &t);
-        return rtc.isTimeSynced();
-    }
-
-    unsigned long nowMs() {
-        return millis();
-    }
-
-    bool isRTCValid() const {
-        return rtc.isTimeSynced();
-    }
-
-    OptaRTC& getRTC() { return rtc; }
-
-private:
-    OptaRTC rtc;
-    time_t lastEpoch;
-    unsigned long lastMillis;
-};
-
 struct GenericSensorConfig {
     enum class Type {
-        ANALOG,
+        ANALOGIC,
         DIGITAL,
         BUFFER,
         CONSTANT
@@ -340,7 +279,6 @@ class Cell {
     Cell(const T& initial) : value(initial), changed(false) {}
 
     inline void setIfDiff(const T& newValue) {
-      // Set change flag only if old and new values are differents
       if (value != newValue) {
           value = newValue;
           changed = true;
@@ -357,9 +295,12 @@ class Cell {
         return value;
     }
 
-    // Lettura che NON resetta il flag 
-    inline T preserveGet() const { 
-      return value; 
+    inline T get() const {
+        return value;
+    }
+
+    inline T preserveGet() const {
+      return value;
     }
 
     inline bool hasChanged() {
@@ -1417,162 +1358,6 @@ inline uint16_t AreaRegistry::maxValue() {
     static struct AutoReg_##name { \
         AutoReg_##name() { AreaRegistry::registerArea(#name, value); } \
     } autoRegInstance_##name;
-
-
-/* ============================================================
-   AsyncScheduler (Generic Version)
-   ============================================================ */
-class AsyncScheduler {
-public:
-    typedef bool (*FunctionPointer)(void* ctx);
-    typedef bool (*ConditionFunction)(void* ctx);
-    typedef void (*CompletionCallback)();
-
-    enum StepType { NORMAL_STEP, BRANCH_STEP };
-
-    struct Step {
-        StepType type = NORMAL_STEP;
-
-        FunctionPointer fnc = nullptr;
-        unsigned long delayAfterMs = 0;
-
-        ConditionFunction condition = nullptr;
-        int thenStep = -1;
-        int elseStep = -1;
-
-        ConditionFunction skipIf = nullptr;
-
-        String description;
-    };
-
-    struct Job {
-        std::vector<Step> steps;
-        int currentStep = 0;
-        bool active = false;
-        bool cancelled = false;
-        unsigned long nextRunTime = 0;
-        int priority = 0;
-        CompletionCallback onComplete = nullptr;
-        uint8_t priorityWeight = 1;   // default: alta priorità
-        uint8_t counter = 0;          // interno
-        String name = "";
-    };
-
-protected:
-    void* context = nullptr;
-    std::vector<Job> jobs;
-
-public:
-    AsyncScheduler() = default;
-    
-    void setContext(void* ctx) {
-        context = ctx;
-    }
-
-    int addJob(const Job& job, const String& name) {
-        Job j = job;
-        j.name = name;
-        jobs.push_back(j);
-        sortJobsByPriority();
-        return jobs.size() - 1;
-    }
-
-    bool startJob(size_t index, unsigned long now) {
-        if (index >= jobs.size()) return false;
-
-        Job& job = jobs[index];
-
-        if (job.active && !job.cancelled) {
-            LOG_IF("AsyncScheduler", "startJob failed: job already running");
-            return false;
-        }
-
-        job.active = true;
-        job.cancelled = false;
-        job.currentStep = 0;
-        job.nextRunTime = now;
-        return true;
-    }
-
-    void cancelJob(size_t index) {
-        if (index >= jobs.size()) return;
-        jobs[index].cancelled = true;
-        jobs[index].active = false;
-    }
-
-    const std::vector<Job>& getJobs() const {
-        return jobs;
-    }
-
-    void run(unsigned long now) {
-        for (auto& job : jobs) {
-            if (!job.active || job.cancelled) continue;
-
-            // PRIORITÀ: esegui solo quando counter == 0
-            if (job.counter > 0) {
-                job.counter--;
-                continue;
-            }
-
-            // Se c’è un delay temporale, rispettalo
-            if (now < job.nextRunTime) continue;
-
-            if (job.currentStep >= (int)job.steps.size()) {
-                job.active = false;
-                if (job.onComplete) job.onComplete();
-                continue;
-            }
-
-            Step& step = job.steps[job.currentStep];
-
-            // Branch step
-            if (step.type == BRANCH_STEP) {
-                bool result = step.condition ? step.condition(context) : false;
-
-                auto valid = [&](int idx) {
-                    return idx >= 0 && idx < (int)job.steps.size();
-                };
-
-                job.currentStep = result ?
-                    (valid(step.thenStep) ? step.thenStep : job.currentStep + 1) :
-                    (valid(step.elseStep) ? step.elseStep : job.currentStep + 1);
-
-                job.nextRunTime = now;
-                job.counter = job.priorityWeight;   // reset priorità
-                continue;
-            }
-
-            // Skip
-            if (step.skipIf && step.skipIf(context)) {
-                job.currentStep++;
-                job.nextRunTime = now;
-                job.counter = job.priorityWeight;
-                continue;
-            }
-
-            // Normal step
-            bool done = step.fnc(context);
-            if (done) {
-                job.nextRunTime = now + step.delayAfterMs;
-                job.currentStep++;
-            } else {
-                job.nextRunTime = now + 1;
-            }
-
-            job.counter = job.priorityWeight;   // reset priorità
-        }
-    }
-
-
-protected:
-    void sortJobsByPriority() {
-        std::sort(jobs.begin(), jobs.end(),
-            [](const Job& a, const Job& b) {
-                return a.priority > b.priority;
-            }
-        );
-    }
-};
 
 
 

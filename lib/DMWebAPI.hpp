@@ -22,7 +22,7 @@
 #include <Arduino.h>
 
 #include "DMAEECore.hpp"        
-
+#include "DMEthernet.hpp"  
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -41,7 +41,7 @@ public:
 
 class SimpleHttpTransport : public IWebApiTransport {
 private:
-    EthernetClient client;
+    DMEthernetClient  client;
 
     enum class State {
         Idle,

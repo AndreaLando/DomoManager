@@ -23,9 +23,10 @@
 #include "DMNetwork.hpp"
 
 #include "DMAutomationBuilder.hpp"
-#include "DMHStandby.hpp"
-
 #include "DMDeclares.h"
+
+// OPTA Platform
+#include "DMOPTAHStandby.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -257,8 +258,8 @@ private:
             return;
         }
 
-        constexpr int64_t ALPHA_FP = 64;
-        constexpr int64_t ONE_MINUS_ALPHA_FP = 192;
+        constexpr int64_t ALPHA_FP = 26;
+        constexpr int64_t ONE_MINUS_ALPHA_FP = 230;
         const int64_t exec_fp = static_cast<int64_t>(exec) << 8;
 
         t.avg_fp = ((static_cast<int64_t>(t.avg_fp) * ONE_MINUS_ALPHA_FP) +
@@ -276,9 +277,6 @@ private:
         t.spike = exec > thr_ms;
 
         if (!t.spike)
-            return;
-
-        if (exec < 100)
             return;
 
         const unsigned long now = millis();
@@ -433,140 +431,123 @@ private:
         rt->activityPrepareReady = false;
     }
 
-    /* ModbusCycleResult RunModbusCycle(ModbusTCPClient& modbusTCPClient,
-                                     unsigned long now) {
+ 
+    ModbusCycleResult RunModbusCycle(
+        ModbusTCPClient& modbusTCPClient,
+        unsigned long now)
+    {
         auto& ips = ipManager.GetIps();
-        if (ips.empty())
-            return {ModbusManager::ClientState::ERROR, false};
+
+        const size_t ipCount = ips.size();
+
+        if (ipCount == 0)
+            return {
+                ModbusManager::ClientState::ERROR,
+                false
+            };
+
+        auto& modbus = logic.getModbus();
 
         static size_t ipIdx = 0;
 
+
+        // --------------------------------------------------------
+        // PENDING WRITE
+        // --------------------------------------------------------
+
         int ipToWrite = -1;
-        for (size_t i = 0; i < ips.size(); ++i) {
-            if (logic.getModbus().hasPendingWritesForIp(i)) {
-                ipToWrite = static_cast<int>(i);
-                break;
-            }
+        if (modbus.hasPendingWritesForIp(ipIdx))
+        {
+            ipToWrite = static_cast<int>(ipIdx);
+        }
+        else if (ipCount > 1)
+        {
+            const size_t nextIp = (ipIdx + 1) % ipCount;
+
+            if (modbus.hasPendingWritesForIp(nextIp))
+                ipToWrite = static_cast<int>(nextIp);
         }
 
-        if (ipToWrite >= 0) {
+
+        // --------------------------------------------------------
+        // SELEZIONE IP
+        // --------------------------------------------------------
+
+        if (ipToWrite >= 0)
+        {
             if (!ipManager.ShouldQuery(ipToWrite, now))
-                return {ModbusManager::ClientState::READ_DONE, false};
+                return {
+                    ModbusManager::ClientState::READ_DONE,
+                    false
+                };
 
-            if (!net.tryAcquire(networkProtocolId, now))
-                return {ModbusManager::ClientState::READ_DONE, false};
+            if (!net.tryAcquire(
+                    networkProtocolId,
+                    now))
+            {
+                return {
+                    ModbusManager::ClientState::READ_DONE,
+                    false
+                };
+            }
 
-            const auto state = logic.getModbus().RunClient(
-                modbusTCPClient, ipToWrite, 502, mbReadBuffer, now);
+            const auto state =
+                modbus.RunClient(
+                    modbusTCPClient,
+                    ipToWrite,
+                    502,
+                    mbReadBuffer,
+                    now
+                );
 
-            net.updateProtocolState(networkProtocolId,
-                                    logic.getModbus().mapClientState(state));
+            net.updateProtocolState(
+                networkProtocolId,
+                modbus.mapClientState(state)
+            );
 
-            switch (state) {
+            switch (state)
+            {
                 case ModbusManager::ClientState::CYCLE_OK:
                     ipManager.ReportSuccess(ipToWrite);
                     break;
+
                 case ModbusManager::ClientState::ERROR:
-                    ipManager.ReportError(ipToWrite, now);
+                    ipManager.ReportError(
+                        ipToWrite,
+                        now
+                    );
                     break;
+
                 default:
                     break;
             }
 
-            net.release(networkProtocolId, now);
-            return {state, true};
+            net.release(
+                networkProtocolId,
+                now
+            );
+
+            return {
+                state,
+                true
+            };
         }
 
-        auto& ip = ips[ipIdx];
-        (void)ip;
-        if (!ipManager.ShouldQuery(ipIdx, now)) {
-            ipIdx = (ipIdx + 1) % ips.size();
-            return {ModbusManager::ClientState::READ_DONE, false};
-        }
 
-        if (!net.tryAcquire(networkProtocolId, now))
-            return {ModbusManager::ClientState::READ_DONE, false};
+        // --------------------------------------------------------
+        // CICLO NORMALE
+        // --------------------------------------------------------
 
-        const auto state = logic.getModbus().RunClient(
-            modbusTCPClient, static_cast<int>(ipIdx), 502, mbReadBuffer, now);
+        if (!ipManager.ShouldQuery(ipIdx, now))
+        {
+            ipIdx = (ipIdx + 1) % ipCount;
 
-        net.updateProtocolState(networkProtocolId,
-                                logic.getModbus().mapClientState(state));
-
-        switch (state) {
-            case ModbusManager::ClientState::CYCLE_OK:
-                ipManager.ReportSuccess(ipIdx);
-                break;
-            case ModbusManager::ClientState::ERROR:
-                ipManager.ReportError(ipIdx, now);
-                break;
-            default:
-                break;
-        }
-
-        if (state == ModbusManager::ClientState::CYCLE_OK ||
-            state == ModbusManager::ClientState::ERROR ||
-            state == ModbusManager::ClientState::DEVICE_ERROR) {
-            ipIdx = (ipIdx + 1) % ips.size();
-            if (ipIdx == 0) {
-                activityPrepareReady = true;
-                ipCycleCompleted = true;
-                buffer.tick(now);
-            }
-        }
-
-        net.release(networkProtocolId, now);
-        return {state, true};
-    } */
-
-ModbusCycleResult RunModbusCycle(
-    ModbusTCPClient& modbusTCPClient,
-    unsigned long now)
-{
-    auto& ips = ipManager.GetIps();
-
-    const size_t ipCount = ips.size();
-
-    if (ipCount == 0)
-        return {
-            ModbusManager::ClientState::ERROR,
-            false
-        };
-
-    auto& modbus = logic.getModbus();
-
-    static size_t ipIdx = 0;
-
-
-    // --------------------------------------------------------
-    // PENDING WRITE
-    // --------------------------------------------------------
-
-    int ipToWrite = -1;
-    if (modbus.hasPendingWritesForIp(ipIdx))
-    {
-        ipToWrite = static_cast<int>(ipIdx);
-    }
-    else if (ipCount > 1)
-    {
-        const size_t nextIp = (ipIdx + 1) % ipCount;
-
-        if (modbus.hasPendingWritesForIp(nextIp))
-            ipToWrite = static_cast<int>(nextIp);
-    }
-
-
-    // --------------------------------------------------------
-    // SELEZIONE IP
-    // --------------------------------------------------------
-
-    if (ipToWrite >= 0)
-    {
-        if (!ipManager.ShouldQuery(ipToWrite, now))
             return {
                 ModbusManager::ClientState::READ_DONE,
                 false
             };
+        }
+
 
         if (!net.tryAcquire(
                 networkProtocolId,
@@ -578,29 +559,32 @@ ModbusCycleResult RunModbusCycle(
             };
         }
 
+
         const auto state =
             modbus.RunClient(
                 modbusTCPClient,
-                ipToWrite,
+                static_cast<int>(ipIdx),
                 502,
                 mbReadBuffer,
                 now
             );
+
 
         net.updateProtocolState(
             networkProtocolId,
             modbus.mapClientState(state)
         );
 
+
         switch (state)
         {
             case ModbusManager::ClientState::CYCLE_OK:
-                ipManager.ReportSuccess(ipToWrite);
+                ipManager.ReportSuccess(ipIdx);
                 break;
 
             case ModbusManager::ClientState::ERROR:
                 ipManager.ReportError(
-                    ipToWrite,
+                    ipIdx,
                     now
                 );
                 break;
@@ -608,6 +592,26 @@ ModbusCycleResult RunModbusCycle(
             default:
                 break;
         }
+
+
+        // --------------------------------------------------------
+        // AVANZAMENTO IP
+        // --------------------------------------------------------
+
+        if (state == ModbusManager::ClientState::CYCLE_OK ||
+            state == ModbusManager::ClientState::ERROR ||
+            state == ModbusManager::ClientState::DEVICE_ERROR)
+        {
+            ipIdx = (ipIdx + 1) % ipCount;
+
+            if (ipIdx == 0)
+            {
+                activityPrepareReady = true;
+                ipCycleCompleted = true;
+                buffer.tick(now);
+            }
+        }
+
 
         net.release(
             networkProtocolId,
@@ -619,97 +623,6 @@ ModbusCycleResult RunModbusCycle(
             true
         };
     }
-
-
-    // --------------------------------------------------------
-    // CICLO NORMALE
-    // --------------------------------------------------------
-
-    if (!ipManager.ShouldQuery(ipIdx, now))
-    {
-        ipIdx = (ipIdx + 1) % ipCount;
-
-        return {
-            ModbusManager::ClientState::READ_DONE,
-            false
-        };
-    }
-
-
-    if (!net.tryAcquire(
-            networkProtocolId,
-            now))
-    {
-        return {
-            ModbusManager::ClientState::READ_DONE,
-            false
-        };
-    }
-
-
-    const auto state =
-        modbus.RunClient(
-            modbusTCPClient,
-            static_cast<int>(ipIdx),
-            502,
-            mbReadBuffer,
-            now
-        );
-
-
-    net.updateProtocolState(
-        networkProtocolId,
-        modbus.mapClientState(state)
-    );
-
-
-    switch (state)
-    {
-        case ModbusManager::ClientState::CYCLE_OK:
-            ipManager.ReportSuccess(ipIdx);
-            break;
-
-        case ModbusManager::ClientState::ERROR:
-            ipManager.ReportError(
-                ipIdx,
-                now
-            );
-            break;
-
-        default:
-            break;
-    }
-
-
-    // --------------------------------------------------------
-    // AVANZAMENTO IP
-    // --------------------------------------------------------
-
-    if (state == ModbusManager::ClientState::CYCLE_OK ||
-        state == ModbusManager::ClientState::ERROR ||
-        state == ModbusManager::ClientState::DEVICE_ERROR)
-    {
-        ipIdx = (ipIdx + 1) % ipCount;
-
-        if (ipIdx == 0)
-        {
-            activityPrepareReady = true;
-            ipCycleCompleted = true;
-            buffer.tick(now);
-        }
-    }
-
-
-    net.release(
-        networkProtocolId,
-        now
-    );
-
-    return {
-        state,
-        true
-    };
-}
 
     static bool ReadAreaPolicy(int area, long value, Buffer& b) {
         (void)value;
@@ -744,18 +657,75 @@ ModbusCycleResult RunModbusCycle(
         instance->buffer.WriteElement(event.area, event.value, now);
     }
 
-    static void ToggleEventCallback(const EventManager::Event& event) {
+    static void ToggleEventCallback(
+        const EventManager::Event& event)
+    {
         if (!instance)
+        return;
+
+        // Il Toggle reagisce esclusivamente agli ingressi Modbus.
+        if (event.source != modbusRtuSource)
+            return;
+
+        // Le aree riservate al sistema non entrano nella logica Toggle.
+        if (DeviceManager::IsReservedArea(event.area))
+            return;
+
+        auto& toggles =
+            instance->logic.getToggles();
+
+        if (!toggles.handlesArea(event.area))
             return;
 
         ToggleManager::ToggleResult result;
-        if (!instance->logic.getToggles().processEvent(
-                event.area, event.value, instance->buffer,
-                instance->timeManager.nowMs(), result))
-            return;
 
-        instance->forceInternalEvent(result.area, result.value);
+        if (!toggles.processEvent(
+                event.area,
+                event.value,
+                instance->buffer,
+                instance->timeManager.nowMs(),
+                result))
+        {
+            // -------------------------------------------------------- 
+            // NON È NECESSARIAMENTE UN ERRORE. // 
+            // Esempio: 
+            // value=1 -> fronte di salita -> Toggle esegue l'azione 
+            // value=0 -> rilascio -> nessuna nuova azione
+            // Quindi non usare ERROR "PROCESS FALLITO". 
+            // --------------------------------------------------------
+
+            return;
+        }
+
+        // ============================================================
+        // TOGGLE NORMALE
+        // ============================================================
+
+        if (result.area != Buffer::NO_AREA)
+        {
+            instance->forceInternalEvent(
+                result.area,
+                result.value);
+
+            return;
+        }
+
+        // ============================================================
+        // TOGGLE ROUTE-ONLY
+        // ============================================================
+
+        if (result.toggleArea == Buffer::NO_AREA)
+        {
+            return;
+        }
+
+        instance->eventManager.push(
+            result.toggleArea,
+            result.value,
+            static_cast<uint8_t>(toggleSource));
     }
+
+
 
     static void SplitEventCallback(const EventManager::Event& event) {
         if (!instance)
@@ -774,19 +744,90 @@ ModbusCycleResult RunModbusCycle(
         instance->buffer.ResetElement(event.area);
     }
 
-    static void RouteEventCallback(const EventManager::Event& event) {
+    static void RouteEventCallback(
+        const EventManager::Event& event)
+    {
         if (!instance)
+        return;
+
+        // ============================================================
+        // AREE RISERVATE
+        // ============================================================
+
+        if (DeviceManager::IsReservedArea(event.area))
             return;
 
-        auto& routes = instance->logic.getRoutes();
+        auto& routes =
+            instance->logic.getRoutes();
+
         if (!routes.hasRoute(event.area))
             return;
 
-        const auto actions = routes.execute(event.area, event.value, instance->buffer);
-        for (const auto& action : actions) {
-            instance->forceEvent(action.targetArea, action.value,
-                                 static_cast<uint8_t>(routeSource));
+        auto& toggles =
+            instance->logic.getToggles();
+
+        // ============================================================
+        // EVENTO GENERATO DAL TOGGLE
+        //
+        // MODBUS -> TOGGLE -> ROUTE
+        // ============================================================
+
+        if (event.source == toggleSource)
+        {
+            const auto actions =
+                routes.execute(
+                    event.area,
+                    event.value,
+                    instance->buffer);
+
+
+            for (const auto& action : actions)
+            {
+                instance->forceEvent(
+                    action.targetArea,
+                    action.value,
+                    static_cast<uint8_t>(routeSource));
+            }
+
+            return;
         }
+
+        // ============================================================
+        // EVENTO MODBUS DIRETTO
+        //
+        // Se l'area è gestita dal Toggle, il Route diretto NON deve
+        // essere eseguito.
+        // ============================================================
+
+        if (event.source == modbusRtuSource)
+        {
+            if (toggles.handlesArea(event.area))
+            {
+                return;
+            }
+        }
+
+        // ============================================================
+        // ROUTE DIRETTA
+        //
+        // MODBUS -> ROUTE -> OUTPUT
+        // ============================================================
+
+        const auto actions =
+            routes.execute(
+                event.area,
+                event.value,
+                instance->buffer);
+
+
+        for (const auto& action : actions)
+        {
+            instance->forceEvent(
+                action.targetArea,
+                action.value,
+                static_cast<uint8_t>(routeSource));
+        }
+
     }
 
     static void AutomationEventCallback(const EventManager::Event& event) {
@@ -1016,7 +1057,7 @@ public:
         //
         // ma vengono eseguite qui, nel normale ciclo del runtime.
         //
-        eventManager.process(3);
+        eventManager.process(4);
 
         if (!ipCycleCompleted)
             return;
@@ -1148,6 +1189,8 @@ inline int DMRuntime::toggleSource = 255;
 inline int DMRuntime::splitSource = 255;
 inline int DMRuntime::routeSource = 255;
 inline int DMRuntime::automationSource = 255;
+
+
 
 
 #endif

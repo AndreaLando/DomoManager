@@ -17,7 +17,7 @@
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
-
+#include "DMPlatform.hpp"
 
 // ======================================================
 // DIAGNOSTICS
@@ -72,7 +72,7 @@ static FrontendConfig mainConfig = [](){
     c.net.subnet  = IPAddress(255, 255, 255, 0);
 
     // --- BRIDGE ---
-    c.bridge.enabled    = true;
+    c.bridge.enabled    = false;
     c.bridge.ip         = IPAddress(192,168,12,201); //Indirizzo del PEER
     c.bridge.localPort  = 8888;
     c.bridge.remotePort = 8888;
@@ -89,7 +89,7 @@ static FrontendConfig mainConfig = [](){
     // CONFIG MQTT NEL FRONTEND
     // ============================================================================
 
-    c.mqtt.enabled = true;
+    c.mqtt.enabled = false;
     c.mqtt.clients = MQTT_CLIENTS;
     c.mqtt.clientCount =
         sizeof(MQTT_CLIENTS) /
@@ -115,7 +115,7 @@ static FrontendConfig mainConfig = [](){
         return DomoManager::instance->getAverages().groupAverage("Temperature");
     };
     c.hvac.readWindowOpen = [&]() {
-        auto& sys = SecuritySensorEngine::getSystem().info.f;
+        auto& sys = SecurityOrchestrator::getSystem().info.f;
         using SM = SecurityOrchestrator::SystemManager;
 
         return sys[SM::WINDOWS_OPEN].get() ||
@@ -141,7 +141,10 @@ static FrontendConfig mainConfig = [](){
 
     // --- SECURITY ---
     c.security.enabled    = true;
-    c.security.intervalMs = 1500;
+    c.security.intervalMs = 300;
+    c.security.reportOnChange  = true;  //Abilito la visualizzazione del report ogni volta che cambia un sensore
+    c.security.eventArea = AREA_SECURITY_EVT_AREA;
+    c.security.panelCommandArea = AREA_SECURITY_CMD_AREA;
     c.security.startupInhibitMs = 10000;
     c.security.statusArea= AREA_SECURITY_STATUS;
     c.security.sensors = WIRED_SENSOR_CONFIG;

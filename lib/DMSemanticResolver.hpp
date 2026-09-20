@@ -33,6 +33,7 @@
 
 #pragma once
 
+#include "DMIntrospection.hpp"
 
 class DomoSemanticResolver
 {

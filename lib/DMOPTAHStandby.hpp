@@ -1,5 +1,7 @@
-#ifndef DMHStandby_HPP
-#define DMHStandby_HPP
+#if defined(ARDUINO_ARCH_MBED)  //OPTA only
+
+#ifndef DMOPTAHStandby_HPP
+#define DMOPTAHStandby_HPP
 
 #pragma once
 
@@ -17,14 +19,14 @@
 
    ============================================================================ */
 
-#include "DMRS485Node.hpp"
+#include "DMOPTARS485Node.hpp"
 
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
 
 
-class HotStandbyManager {
+class OPTA_HotStandbyManager {
 public:
     // ---------------------------------------------------------
     // CALLBACK TYPES
@@ -38,7 +40,7 @@ public:
     // ---------------------------------------------------------
     // COSTRUTTORE
     // ---------------------------------------------------------
-    HotStandbyManager(bool startAsMaster, TimeManager* tm)
+    OPTA_HotStandbyManager(bool startAsMaster, TimeManager* tm)
         : node(startAsMaster), isMaster(startAsMaster), tm(tm) {}
 
     // ---------------------------------------------------------
@@ -111,10 +113,10 @@ public:
     unsigned long getTimestampSyncInterval() const { return timestampInterval; }
     int32_t getEpochOffset() const { return epochOffset; }
 
-    RS485Node& getNode() { return node; }
+    OPTA_RS485Node& getNode() { return node; }
 
 private:
-    RS485Node node;
+    OPTA_RS485Node node;
     TimeManager* tm;
 
     // Heartbeat
@@ -150,7 +152,7 @@ private:
     TimestampCallback cbTimestampSync = nullptr;
 
     // Static trampoline
-    static HotStandbyManager* instance;
+    static OPTA_HotStandbyManager* instance;
 
     static void onPacketStatic(uint8_t type, uint8_t* payload, uint8_t len) {
         instance->onPacket(type, payload, len);
@@ -322,8 +324,148 @@ private:
 
         if (cbBecomeSlave) cbBecomeSlave();
     }
+
+public:
+
+    /* ============================================================
+       1. STATO GENERALE
+       ============================================================ */
+    static void ReportStatus() {
+        if (!instance) return;
+        auto* hs = instance;
+
+        Serial.println("\n===== HOT-STANDBY STATUS =====");
+
+        Serial.print("Role: ");
+        Serial.println(hs->isMaster ? "MASTER" : "SLAVE");
+
+        Serial.print("Last heartbeat sent: ");
+        Serial.print(hs->getLastHeartbeat());
+        Serial.println(" ms ago");
+
+        Serial.print("Last peer heartbeat: ");
+        Serial.print(hs->getLastPeerHeartbeat());
+        Serial.println(" ms ago");
+
+        Serial.print("Heartbeat timeout: ");
+        Serial.print(hs->getHeartbeatTimeout());
+        Serial.println(" ms");
+
+        Serial.print("StateSync interval: ");
+        Serial.print(hs->getStateSyncInterval());
+        Serial.println(" ms");
+
+        Serial.print("ProcessData interval: ");
+        Serial.print(hs->getProcessDataInterval());
+        Serial.println(" ms");
+
+        Serial.print("TimestampSync interval: ");
+        Serial.print(hs->getTimestampSyncInterval());
+        Serial.println(" ms");
+    }
+
+
+    /* ============================================================
+       2. STATE SYNC
+       ============================================================ */
+    static void ReportStateSync() {
+        if (!instance) return;
+        auto* hs = instance;
+
+        Serial.println("\n===== HOT-STANDBY STATE SYNC =====");
+
+        Serial.print("Last StateSync sent: ");
+        Serial.print(hs->getLastStateSync());
+        Serial.println(" ms ago");
+
+        Serial.print("StateSync size: ");
+        Serial.print(hs->getStateDataLen());
+        Serial.println(" bytes");
+
+        if (hs->getStateDataLen() == 0)
+            Serial.println("WARNING: No state data being replicated.");
+    }
+
+
+    /* ============================================================
+       3. PROCESS DATA
+       ============================================================ */
+    static void ReportProcessData() {
+        if (!instance) return;
+        auto* hs = instance;
+
+        Serial.println("\n===== HOT-STANDBY PROCESS DATA =====");
+
+        Serial.print("Last ProcessData sent: ");
+        Serial.print(hs->getLastProcessDataSync());
+        Serial.println(" ms ago");
+
+        Serial.print("ProcessData size: ");
+        Serial.print(hs->getProcessDataLen());
+        Serial.println(" bytes");
+
+        if (hs->getProcessDataLen() == 0)
+            Serial.println("WARNING: No process data being replicated.");
+    }
+
+    /* ============================================================
+       4. TIMESTAMP SYNC
+       ============================================================ */
+    static void ReportTimestampSync() {
+        if (!instance) return;
+        auto* hs = instance;
+
+        Serial.println("\n===== HOT-STANDBY TIMESTAMP SYNC =====");
+
+        Serial.print("Last TimestampSync: ");
+        Serial.print(hs->getLastTimestampSync());
+        Serial.println(" ms ago");
+
+        Serial.print("Epoch offset: ");
+        Serial.println(hs->getEpochOffset());
+    }
+
+    /* ============================================================
+       5. RS485 DIAGNOSTIC
+       ============================================================ */
+    static void ReportRS485() {
+        if (!instance) return;
+        auto* hs = instance;
+
+        Serial.println("\n===== HOT-STANDBY RS485 =====");
+
+        Serial.print("Is master: ");
+        Serial.println(hs->isMaster ? "YES" : "NO");
+
+        Serial.print("Awaiting ACK: ");
+        Serial.println(hs->getNode().isAwaitingAck() ? "YES" : "NO");
+
+        Serial.print("Retry count: ");
+        Serial.println(hs->getNode().getRetryCount());
+
+        Serial.print("Last send time: ");
+        Serial.print(hs->getNode().getLastSendTime());
+        Serial.println(" ms ago");
+    }
+
+    /* ============================================================
+       6. FULL REPORT
+       ============================================================ */
+    static void FullReport() {
+        #if HOTSTANDBY_ENABLED
+            ReportStatus();
+            ReportStateSync();
+            ReportProcessData();
+            ReportTimestampSync();
+            ReportRS485();
+        #else
+            Serial.println("Hot-standby disabilitato (HOTSTANDBY_ENABLED=0)");
+        #endif
+        
+    }
 };
 
-HotStandbyManager* HotStandbyManager::instance = nullptr;
+OPTA_HotStandbyManager* OPTA_HotStandbyManager::instance = nullptr;
 
 #endif
+#endif // ARDUINO_ARCH_MBED

@@ -17,9 +17,9 @@ static const char* modeToString(HeatPumpController::Mode m) {
 
 static const char* fanSpeedToString(HeatPumpController::FanSpeed v) {
     switch (v) {
-        case HeatPumpController::FanSpeed::LOW:    return "LOW";
-        case HeatPumpController::FanSpeed::MEDIUM: return "MEDIUM";
-        case HeatPumpController::FanSpeed::HIGH:   return "HIGH";
+        case HeatPumpController::FanSpeed::LOW_SPEED:    return "LOW";
+        case HeatPumpController::FanSpeed::MEDIUM_SPEED: return "MEDIUM";
+        case HeatPumpController::FanSpeed::HIGH_SPEED:   return "HIGH";
     }
     return "UNKNOWN";
 }
@@ -33,7 +33,7 @@ HeatPumpController::HeatPumpController(Mode m, float sp, const Config& c)
       indoorTemperature(20.0f),
       outdoorTemperature(10.0f),
       compressorActive(false),
-      fanSpeed(FanSpeed::LOW),
+      fanSpeed(FanSpeed::LOW_SPEED),
       safetyActive(false),
       lastStateChangeTime(0),
       compressorOnTime(0),
@@ -117,7 +117,7 @@ void HeatPumpController::controlLoop(uint32_t now) {
     if (windowOpen) {
         if (now - windowOpenStartTime > cfg.windowOpenTimeoutMs) {
             forceCompressorOff();
-            setFanSpeed(FanSpeed::LOW);
+            setFanSpeed(FanSpeed::LOW_SPEED);
             activateCirculationPump(now);
             return;
         }
@@ -128,7 +128,7 @@ void HeatPumpController::controlLoop(uint32_t now) {
     // ---------------------------
     if (mode == Mode::OFF) {
         forceCompressorOff();
-        setFanSpeed(FanSpeed::LOW);
+        setFanSpeed(FanSpeed::LOW_SPEED);
         deactivateCirculationPump(now);
         return;
     }
@@ -138,7 +138,7 @@ void HeatPumpController::controlLoop(uint32_t now) {
     // ---------------------------
     if (mode == Mode::MANUAL) {
         activateCompressor(now);
-        setFanSpeed(FanSpeed::HIGH);
+        setFanSpeed(FanSpeed::HIGH_SPEED);
         activateCirculationPump(now);
         return;
     }
@@ -263,11 +263,11 @@ void HeatPumpController::updateFanSpeed(Mode effectiveMode) {
     FanSpeed newSpeed = fanSpeed;
 
     if (diff < cfg.diffLow - cfg.fanHysteresis)
-        newSpeed = FanSpeed::LOW;
+        newSpeed = FanSpeed::LOW_SPEED;
     else if (diff < cfg.diffMed - cfg.fanHysteresis)
-        newSpeed = FanSpeed::MEDIUM;
+        newSpeed = FanSpeed::MEDIUM_SPEED;
     else if (diff > cfg.diffMed + cfg.fanHysteresis)
-        newSpeed = FanSpeed::HIGH;
+        newSpeed = FanSpeed::HIGH_SPEED;
 
     setFanSpeed(newSpeed);
 }
@@ -319,7 +319,7 @@ void HeatPumpController::startDefrost(uint32_t now) {
     mode = Mode::DEFROST;
     defrostStartTime = now;
     forceCompressorOff();
-    setFanSpeed(FanSpeed::MEDIUM);
+    setFanSpeed(FanSpeed::MEDIUM_SPEED);
     activateCirculationPump(now);
 }
 
@@ -329,7 +329,7 @@ void HeatPumpController::handleDefrost(uint32_t now) {
         return;
     }
     forceCompressorOff();
-    setFanSpeed(FanSpeed::MEDIUM);
+    setFanSpeed(FanSpeed::MEDIUM_SPEED);
     activateCirculationPump(now);
 }
 

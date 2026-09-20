@@ -1,5 +1,7 @@
-#ifndef DMRS485Node_HPP
-#define DMRS485Node_HPP
+#if defined(ARDUINO_ARCH_MBED)  //OPTA only
+
+#ifndef DMOPTARS485Node_HPP
+#define DMOPTARS485Node_HPP
 
 #pragma once
 
@@ -138,7 +140,7 @@
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
 
-class RS485Node {
+class OPTA_RS485Node {
 public:
     // ---------------------------------------------------------
     // CALLBACK TYPES
@@ -150,7 +152,7 @@ public:
     // ---------------------------------------------------------
     // COSTRUTTORE
     // ---------------------------------------------------------
-    RS485Node(bool master = false)
+    OPTA_RS485Node(bool master = false)
         : isMaster(master) {}
 
     void begin(unsigned long baud = 9600) {
@@ -359,3 +361,5 @@ private:
 };
 
 #endif
+
+#endif // ARDUINO_ARCH_MBED

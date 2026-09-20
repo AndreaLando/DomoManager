@@ -50,18 +50,52 @@ enum class SensorCategory {
 class SensorChannel {
 public:
     int pin;
-    TON timer;
-    FastDebounce debounce;
-    bool mem = false;
-    bool inhibit = false;
     SensorChannelType type;
 
-    SensorChannel(int pin, float delayMs, SensorChannelType type)
+private:
+    TON timer;
+    FastDebounce debounce;
+
+    bool mem = false;
+    bool inhibit = false;
+
+    bool lastDebounced = false;
+    bool lastAlarmState = false;
+
+    friend class Sensor;
+
+public:
+    SensorChannel(
+        int pin,
+        float delayMs,
+        SensorChannelType type)
         : pin(pin),
           type(type),
           timer(delayMs, TimerBase::Milliseconds),
-          debounce(20)   // default debounce 20 ms
+          debounce(20),
+          lastDebounced(false),
+          lastAlarmState(false)
     {}
+
+    inline bool IsActive() const
+    {
+        return timer.Q() || mem;
+    }
+
+    inline bool IsInhibit() const
+    {
+        return inhibit;
+    }
+
+    inline bool GetLastAlarmState() const
+    {
+        return lastAlarmState;
+    }
+
+    inline void SetLastAlarmState(bool state)
+    {
+        lastAlarmState = state;
+    }
 };
 
 
@@ -73,124 +107,224 @@ public:
     std::vector<SensorChannel> channels;
     std::unordered_map<SensorChannelType, SensorChannel*> lookup;
 
+    std::array<SensorChannel*, 4> channelByType{};
+
     bool _engage = false;
     bool _disabled = false;
     bool alarmOut = false;
 
-    unsigned long startupInhibitMs = 2000;    // ignore alarms for 2 seconds
-    TON startupInhibit = TON(startupInhibitMs, TimerBase::Milliseconds);
- 
+    unsigned long startupInhibitMs = 2000;
+    TON startupInhibit =
+        TON(startupInhibitMs, TimerBase::Milliseconds);
+
     Sensor(std::initializer_list<SensorChannel> list)
         : channels(list)
     {
+        channelByType.fill(nullptr);
+
         for (auto& ch : channels)
+        {
             lookup[ch.type] = &ch;
+
+            const size_t index =
+                static_cast<size_t>(ch.type);
+
+            if (index < channelByType.size())
+                channelByType[index] = &ch;
+        }
     }
 
-    void SetStartupInhibit(unsigned long ms) {
+    void SetStartupInhibit(unsigned long ms)
+    {
         startupInhibitMs = ms;
-        startupInhibit = TON(ms, TimerBase::Milliseconds);
+        startupInhibit =
+            TON(ms, TimerBase::Milliseconds);
     }
 
-    SensorChannel* Get(SensorChannelType type) {
-        auto it = lookup.find(type);
-        return (it != lookup.end()) ? it->second : nullptr;
+    SensorChannel* Get(SensorChannelType type)
+    {
+        const size_t index =
+            static_cast<size_t>(type);
+
+        if (index >= channelByType.size())
+            return nullptr;
+
+        return channelByType[index];
     }
 
-    void Engage(bool mode) {
+    const SensorChannel* Get(SensorChannelType type) const
+    {
+        const size_t index =
+            static_cast<size_t>(type);
+
+        if (index >= channelByType.size())
+            return nullptr;
+
+        return channelByType[index];
+    }
+
+    void Engage(bool mode)
+    {
         _engage = mode;
     }
 
-    void Enable(bool mode) {
-        if (mode) {
+    void Enable(bool mode)
+    {
+        if (mode)
+        {
             startupInhibit.Run(true);
-        } else {
-            for (auto& ch : channels) {
+        }
+        else
+        {
+            for (auto& ch : channels)
+            {
                 ch.timer.Run(false);
                 ch.mem = false;
+                ch.lastDebounced = false;
             }
         }
+
         _disabled = !mode;
     }
 
-    bool IsEnabled() const { return !_disabled; }
-    bool IsEngaged() const { return _engage; }
+    bool IsEnabled() const
+    {
+        return !_disabled;
+    }
 
-    void Reset() {
-        for (auto& ch : channels) {
+    bool IsEngaged() const
+    {
+        return _engage;
+    }
+
+    void Reset()
+    {
+        for (auto& ch : channels)
+        {
             ch.timer.Run(false);
             ch.mem = false;
+            ch.lastDebounced = false;
         }
     }
 
-    // Check alarm for a specific channel type
-    bool ChannelAlarm(SensorChannelType type) const {
-        auto it = lookup.find(type);
-        if (it == lookup.end())
+    bool ChannelAlarm(SensorChannelType type) const
+    {
+        const size_t index =
+            static_cast<size_t>(type);
+
+        if (index >= channelByType.size())
             return false;
 
-        const SensorChannel* ch = it->second;
+        const SensorChannel* ch =
+            channelByType[index];
 
-        bool active = ch->timer.Q() && !ch->inhibit && startupInhibit.Q();
-        return active || ch->mem;
+        if (!ch)
+            return false;
+
+        return
+            (ch->timer.Q() &&
+             !ch->inhibit &&
+             startupInhibit.Q())
+            ||
+            ch->mem;
     }
 
-    // Main processing
-    void Run(const bool* inputs, size_t count, unsigned long now) {
+    bool Run(
+        const bool* inputs,
+        size_t count,
+        unsigned long now)
+    {
+        const bool oldAlarmOut = alarmOut;
+
+        bool readerChanged = false;
         bool tempAlarm = false;
+        bool tempMem = false;
 
-        startupInhibit.Run(true, now);
-        bool inhibit = !startupInhibit.Q();
+        startupInhibit.Run(
+            true,
+            now
+        );
 
-        if (!_disabled) {
+        const bool inhibit =
+            !startupInhibit.Q();
 
-            for (size_t i = 0; i < channels.size(); i++) {
-                auto& ch = channels[i];
+        if (!_disabled)
+        {
+            const size_t channelCount =
+                channels.size();
 
-                bool raw = false;
-                if (i < count)
-                    raw = inputs[i];
+            for (size_t i = 0;
+                 i < channelCount;
+                 ++i)
+            {
+                SensorChannel& ch =
+                    channels[i];
 
-                bool debounced = ch.debounce.update(raw, now);
+                const bool raw =
+                    (i < count)
+                    ? inputs[i]
+                    : false;
 
-                // Startup inhibit
-                if (inhibit) {
+                const bool debounced =
+                    ch.debounce.update(
+                        raw,
+                        now
+                    );
+
+                if (debounced != ch.lastDebounced)
+                {
+                    ch.lastDebounced =
+                        debounced;
+
+                    readerChanged = true;
+                }
+
+                if (inhibit)
+                {
                     ch.timer.Stop();
                     ch.mem = false;
                     continue;
                 }
 
-                // Reset per canale
-                if (!debounced) {
+                if (!debounced)
+                {
                     ch.timer.Stop();
                     ch.mem = false;
                     continue;
                 }
 
-                // Timer normale
-        
-                ch.timer.Run(true, now);
+                ch.timer.Run(
+                    true,
+                    now
+                );
 
-                // Allarme canale
-                if (ch.timer.Q() && !ch.inhibit) {
+                if (ch.timer.Q() &&
+                    !ch.inhibit)
+                {
                     tempAlarm = true;
+
                     if (_engage)
                         ch.mem = true;
                 }
-            }
 
-        } else {
+                if (ch.mem)
+                    tempMem = true;
+            }
+        }
+        else
+        {
             for (auto& ch : channels)
                 ch.mem = false;
         }
 
-        // Uscita aggregata
-        alarmOut = tempAlarm;
-        for (auto& ch : channels)
-            alarmOut |= ch.mem;
+        alarmOut =
+            tempAlarm ||
+            tempMem;
+
+        return
+            readerChanged ||
+            (oldAlarmOut != alarmOut);
     }
-
-
 };
 
 
@@ -202,7 +336,8 @@ public:
     using Callback = std::function<void(
         const std::string& zone,
         SensorChannelType type,
-        const std::vector<Sensor*>& sensors
+        const std::vector<Sensor*>& sensors,
+        bool active
     )>;
 
     // Global callbacks (any zone, any type)
@@ -246,31 +381,83 @@ public:
     void Dispatch(
         const std::string& zone,
         SensorChannelType type,
-        const std::vector<Sensor*>& sensors ) {
-        
-        // Global callbacks
-        for (auto& cb : globalCallbacks)
-            cb(zone, type, sensors);
+        const std::vector<Sensor*>& sensors,
+        bool active)
+    {
+        // ---------------------------------------------------------
+        // GLOBAL CALLBACKS
+        // ---------------------------------------------------------
+        for (const auto& cb : globalCallbacks)
+        {
+            cb(
+                zone,
+                type,
+                sensors,
+                active
+            );
+        }
 
-        // Type-specific callbacks
-        auto itType = typeCallbacks.find(type);
+        // ---------------------------------------------------------
+        // TYPE-SPECIFIC CALLBACKS
+        // ---------------------------------------------------------
+        const auto itType =
+            typeCallbacks.find(type);
+
         if (itType != typeCallbacks.end())
-            for (auto& cb : itType->second)
-                cb(zone, type, sensors);
+        {
+            for (const auto& cb : itType->second)
+            {
+                cb(
+                    zone,
+                    type,
+                    sensors,
+                    active
+                );
+            }
+        }
 
-        // Zone-specific callbacks
-        auto itZone = zoneCallbacks.find(zone);
+        // ---------------------------------------------------------
+        // ZONE-SPECIFIC CALLBACKS
+        // ---------------------------------------------------------
+        const auto itZone =
+            zoneCallbacks.find(zone);
+
         if (itZone != zoneCallbacks.end())
-            for (auto& cb : itZone->second)
-                cb(zone, type, sensors);
+        {
+            for (const auto& cb : itZone->second)
+            {
+                cb(
+                    zone,
+                    type,
+                    sensors,
+                    active
+                );
+            }
+        }
 
-        // Zone + Type callbacks
-        auto itZT = zoneTypeCallbacks.find(zone);
-        if (itZT != zoneTypeCallbacks.end()) {
-            auto itZT2 = itZT->second.find(type);
+        // ---------------------------------------------------------
+        // ZONE + TYPE CALLBACKS
+        // ---------------------------------------------------------
+        const auto itZT =
+            zoneTypeCallbacks.find(zone);
+
+        if (itZT != zoneTypeCallbacks.end())
+        {
+            const auto itZT2 =
+                itZT->second.find(type);
+
             if (itZT2 != itZT->second.end())
-                for (auto& cb : itZT2->second)
-                    cb(zone, type, sensors);
+            {
+                for (const auto& cb : itZT2->second)
+                {
+                    cb(
+                        zone,
+                        type,
+                        sensors,
+                        active
+                    );
+                }
+            }
         }
     }
 };
@@ -288,6 +475,17 @@ public:
 
     // Track last alarm state per channel type
     std::unordered_map<SensorChannelType, bool> lastState;
+
+    // ============================================================
+    // LAST SENSOR STATE
+    //
+    // Stato precedente dello stato di allarme di ogni singolo
+    // sensore per ogni tipo di canale.
+    //
+    // Questo evita il problema dello stato globale per tipo:
+    // se A è attivo e B entra in allarme, B genera comunque
+    // il proprio evento.
+    // ============================================================
 
     // Track snoozed alarms per channel type
     std::unordered_map<SensorChannelType, bool> snoozed;
@@ -356,7 +554,8 @@ public:
     // -------------------------------
     // New Alarm Detection + Snooze
     // -------------------------------
-    void ProcessAllTypes() {
+    bool ProcessAllTypes()
+    {
         static const SensorChannelType types[] = {
             SensorChannelType::RT,
             SensorChannelType::H24,
@@ -364,59 +563,155 @@ public:
             SensorChannelType::LEN
         };
 
-        for (SensorChannelType type : types) {
-            bool current = AnyAlarmByType(type);
-            bool previous = lastState[type];
-            bool isSnoozed = snoozed[type];
+        bool changed = false;
+
+        for (SensorChannelType type : types)
+        {
+            bool current = false;
+
+            const bool isSnoozed =
+                snoozed[type];
+
+            for (auto& [zoneName, zoneSensors] : zones)
+            {
+                for (auto* sensor : zoneSensors)
+                {
+                    if (!sensor)
+                        continue;
+
+                    SensorChannel* ch =
+                        sensor->Get(type);
+
+                    if (!ch)
+                        continue;
+
+                    const bool sensorCurrent =
+                        sensor->ChannelAlarm(type);
+
+                    if (sensorCurrent)
+                        current = true;
+
+                    const bool sensorPrevious = ch->GetLastAlarmState();
+                        
+                    if (sensorCurrent ==
+                        sensorPrevious)
+                    {
+                        continue;
+                    }
+
+                    changed = true;
+
+                    ch->SetLastAlarmState(sensorCurrent);
+
+                    // ------------------------------------------------
+                    // ATTIVAZIONE
+                    // ------------------------------------------------
+
+                    if (sensorCurrent)
+                    {
+                        if (isSnoozed)
+                            continue;
+
+                        std::vector<Sensor*> affected;
+                        affected.push_back(sensor);
+
+                        dispatcher.Dispatch(
+                            zoneName,
+                            type,
+                            affected,
+                            true
+                        );
+
+                        continue;
+                    }
+
+                    // ------------------------------------------------
+                    // RIPRISTINO
+                    // ------------------------------------------------
+
+                    std::vector<Sensor*> affected;
+                    affected.push_back(sensor);
+
+                    dispatcher.Dispatch(
+                        zoneName,
+                        type,
+                        affected,
+                        false
+                    );
+                }
+            }
 
             if (!current)
                 snoozed[type] = false;
 
-            bool newAlarm = current && !previous && !isSnoozed;
-            lastState[type] = current;
-
-            if (!newAlarm)
-                continue;
-
-            // Dispatch per-zone events
-            for (auto& [zoneName, zoneSensors] : zones) {
-                std::vector<Sensor*> active;
-
-                for (auto* s : zoneSensors)
-                    if (s->ChannelAlarm(type))
-                        active.push_back(s);
-
-                if (!active.empty())
-                    dispatcher.Dispatch(zoneName, type, active);
-            }
+            lastState[type] =
+                current;
         }
+
+        return changed;
     }
 
-    bool NewAlarmByType(SensorChannelType type) {
-        bool current = AnyAlarmByType(type);
-        bool previous = lastState[type];
-        bool isSnoozed = snoozed[type];
+    bool NewAlarmByType(
+        SensorChannelType type)
+    {
+        const bool current =
+            AnyAlarmByType(type);
+
+
+        const bool previous =
+            lastState[type];
+
+
+        const bool isSnoozed =
+            snoozed[type];
+
 
         if (!current)
             snoozed[type] = false;
 
-        bool newAlarm = current && !previous && !isSnoozed;
-        lastState[type] = current;
+
+        lastState[type] =
+            current;
+
+
+        const bool newAlarm =
+            current &&
+            !previous &&
+            !isSnoozed;
+
 
         if (!newAlarm)
             return false;
 
-        // Dispatch per-zone events
-        for (auto& [zoneName, zoneSensors] : zones) {
-            std::vector<Sensor*> active;
 
-            for (auto* s : zoneSensors)
-                if (s->ChannelAlarm(type))
-                    active.push_back(s);
+        for (auto& [zoneName, zoneSensors] : zones)
+        {
+            for (auto* sensor : zoneSensors)
+            {
+                if (!sensor)
+                    continue;
 
-            if (!active.empty())
-                dispatcher.Dispatch(zoneName, type, active);
+
+                if (!sensor->ChannelAlarm(type))
+                    continue;
+
+
+                std::vector<Sensor*> affected;
+
+                affected.push_back(
+                    sensor
+                );
+
+
+                dispatcher.Dispatch(
+                    zoneName,
+                    type,
+                    affected,
+                    true
+                );
+            }
         }
+
 
         return true;
     }
@@ -475,6 +770,7 @@ class WiredSensorsManager {
 public:
 
     struct WiredSensorConfig {
+        const char* name;
         const char* zone;
         std::initializer_list<SensorChannel> channels;
         std::initializer_list<std::function<bool()>> readers;
@@ -541,49 +837,70 @@ public:
         bool tamper = false;
     };
 
-    void Process(uint32_t now) {
-        const ConfigType* cfg = config;
-        size_t count = configCount;
+    bool Process(uint32_t now)
+    {
+        bool changed = false;
 
-        for (size_t i = 0; i < count; ++i) {
-            Sensor* s = sensors[i];
-            if (!s) continue;
+        const ConfigType* cfg =
+            config;
 
-            const auto& c = cfg[i];
+        const size_t count =
+            configCount;
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            Sensor* s =
+                sensors[i];
+
+            if (!s)
+                continue;
+
+            const auto& readers =
+                cfg[i].readers;
 
             bool tmp[8];
             size_t n = 0;
 
-            // Lettura tramite funzioni configurate
-            for (auto& fn : c.readers) {
-                if (n >= 8) break;
+            for (const auto& fn : readers)
+            {
+                if (n >= 8)
+                    break;
+
                 tmp[n++] = fn();
             }
 
-            if (n > 0) {
-                s->Run( tmp, n, now );
-                LOG_DF("WiredSensors", "Process: sensor[%u] zone=%s alarmOut=%d",
-                    (unsigned)i, c.zone, s->alarmOut ? 1 : 0);
-            }
+            if (n == 0)
+                continue;
+
+            if (s->Run(tmp, n, now))
+                changed = true;
         }
+
+        return changed;
     }
 
-
     // --- Compute aggregated state from current sensors
-    AggregateState ComputeAggregate() const {
+    AggregateState ComputeAggregate() const
+    {
         AggregateState st;
 
         const ConfigType* cfg = config;
-        size_t count = configCount;
-        if (!cfg || count == 0) return st;
+        const size_t count = configCount;
 
-        for (size_t i = 0; i < count; ++i) {
-            const auto& c = cfg[i];
+        if (!cfg || count == 0)
+            return st;
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            const ConfigType& c = cfg[i];
             Sensor* s = sensors[i];
-            if (!s) continue;
 
-            switch (c.category) {
-                case SensorCategory::PIR:                    
+            if (!s)
+                continue;
+
+            switch (c.category)
+            {
+                case SensorCategory::PIR:
                 {
                     // Movimento → Intrusione
                     if (s->ChannelAlarm(SensorChannelType::RT))
@@ -601,38 +918,49 @@ public:
                 }
 
                 case SensorCategory::WINDOW:
+                {
                     if (s->alarmOut)
                         st.windowsOpen = true;
+
                     break;
+                }
 
                 case SensorCategory::DOOR:
+                {
                     if (s->alarmOut)
                         st.doorsOpen = true;
+
                     break;
+                }
 
                 case SensorCategory::FLOOD:
+                {
                     if (s->alarmOut)
                         st.flood = true;
+
                     break;
+                }
 
                 case SensorCategory::SMOKE:
+                {
                     if (s->alarmOut)
                         st.smoke = true;
+
                     break;
+                }
 
                 case SensorCategory::TAMPER:
+                {
                     if (s->alarmOut)
                         st.tamper = true;
+
                     break;
+                }
 
                 default:
                     break;
             }
         }
-
-        LOG_DF("WiredSensors", "ComputeAggregate: intrusion=%d intrusionH24=%d flood=%d smoke=%d windows=%d doors=%d tamper=%d",
-              st.intrusion ? 1 : 0, st.intrusionH24 ? 1 : 0, st.flood ? 1 : 0, st.smoke ? 1 : 0,
-              st.windowsOpen ? 1 : 0, st.doorsOpen ? 1 : 0, st.tamper ? 1 : 0);
 
         return st;
     }
@@ -735,22 +1063,29 @@ public:
     // ---------------------------------------------------------
     // CALCOLO BITMASK ATTUALE
     // ---------------------------------------------------------
-    void ComputeCurrent(WiredSensorsManager& ws) {
+    void ComputeCurrent(WiredSensorsManager& ws)
+    {
         currentMask = 0;
 
         size_t bit = 0;
 
-        for (size_t i = 0; i < ws.Count(); i++) {
-            Sensor* s = ws.GetSensor(i);
+        for (size_t i = 0; i < ws.Count(); ++i)
+        {
+            Sensor* s =
+                ws.GetSensor(i);
 
-            for (auto& ch : s->channels) {
-                bool active = (ch.timer.Q() || ch.mem);
+            if (!s)
+                continue;
 
-                if (active) {
-                    currentMask |= (uint64_t(1) << bit);
+            for (auto& ch : s->channels)
+            {
+                if (ch.IsActive())
+                {
+                    currentMask |=
+                        (uint64_t(1) << bit);
                 }
 
-                bit++;
+                ++bit;
             }
         }
 

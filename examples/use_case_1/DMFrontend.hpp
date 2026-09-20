@@ -566,7 +566,8 @@ private:
     static void SomethingChanged(
         const std::unordered_set<int>& changed)
     {
-        /* auto& manager =
+        /* Esempio per accedere al database delle variabili 
+        auto& manager =
             *DomoManager::instance;
 
         auto& buffer =
@@ -576,7 +577,7 @@ private:
         {
             for (const auto& area : changed)
             {
-                SecurityOrchestrator::ApplySecurityCommands(area);
+                
             }
         }
     }
@@ -746,11 +747,9 @@ private:
 
     static void InitEngines(
         DomoManager& manager)
-    {
+    {       
         if (config.security.enabled)
-            SecuritySensorEngine::Setup(
-                config.security
-            );
+            SecurityOrchestrator::Setup(&config.security);
 
 
         if (config.hvac.enabled)
@@ -827,9 +826,7 @@ private:
         if (!Manager)
             return;
 
-
         std::vector<DMAEE::Update> updates;
-
 
         if (!DMAEE::BuildUpdatesFromBufferArea(
                 AEEEngine::getMgr(),
@@ -855,6 +852,21 @@ private:
         );
     }
 
+    // ============================================================
+    // SECURITY EVENT
+    // ============================================================
+
+    static void SecurityEventCallback(
+        const EventManager::Event& event)
+    {
+        (void)event;
+
+        // Il SecurityEngine genera gli eventi security e li pubblica
+        // sull'EventManager usando securitySource.
+        //
+        // Questo callback non deve ripubblicare l'evento, altrimenti
+        // si rischia un loop.
+    }
 
     // ============================================================
     //  MQTT EVENT
@@ -865,7 +877,6 @@ private:
     {
         if (!config.mqtt.enabled)
             return;
-
 
         MQTTEngine::PublishEvent(
             event
@@ -917,7 +928,7 @@ private:
         }
     }
 
-
+    
     // ============================================================
     //  CUSTOM TASK
     // ============================================================
@@ -1638,6 +1649,22 @@ public:
                     (uint8_t)mqttSource
                 );
             }
+
+            if (config.security.enabled)
+            {
+                static int securitySource =
+                        Manager->getEventManager().add(
+                            SecurityEventCallback,
+                            "SECURITY"
+                        );
+                        
+                SecurityEngine::Setup(
+                    *Manager,
+                    config.security,
+                    (uint8_t)securitySource
+                );
+            }
+             
         #endif
 
 

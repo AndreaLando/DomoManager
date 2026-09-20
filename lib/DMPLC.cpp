@@ -2,7 +2,7 @@
 
 ///////////////// GenericPrgDeviceManager
 
-uint64_t MakeKey(const arduino::IPAddress& ip, uint8_t prio)
+uint64_t MakeKey(const DMIPAddress& ip, uint8_t prio)
 {
     uint32_t ipKey =
         ((uint32_t)ip[0] << 24) |
@@ -42,7 +42,7 @@ void GenericPrgDeviceManager::DebugPriorityCache(std::vector<GenericPrgDevice>& 
         uint32_t ipRaw = (uint32_t)(key >> 8);
         uint8_t prio   = (uint8_t)(key & 0xFF);
 
-        arduino::IPAddress ip(
+        DMIPAddress ip(
             (ipRaw >> 24) & 0xFF,
             (ipRaw >> 16) & 0xFF,
             (ipRaw >> 8)  & 0xFF,
@@ -75,7 +75,7 @@ void GenericPrgDeviceManager::DebugPriorityCache(std::vector<GenericPrgDevice>& 
 
 const std::vector<int>& GenericPrgDeviceManager::GetDevicesByPriority(
     Priority priority,
-    const arduino::IPAddress& ip) const
+    const DMIPAddress& ip) const
 {
     static const std::vector<int> empty;
 
@@ -111,7 +111,7 @@ const std::vector<int>& GenericPrgDeviceManager::GetDevicesByPriority(
 
 
 ////////////////////////////////////////////////////////// GenericDevice
-GenericPrgDevice::GenericPrgDevice(const char* name, arduino::IPAddress ip, unsigned int deviceAddress, std::vector<GenericPrgDeviceChannel> channels, std::vector<int> ioAreas, short ErrorCnt, Priority priority): Error(ErrorCnt, 30000)
+GenericPrgDevice::GenericPrgDevice(const char* name, DMIPAddress ip, unsigned int deviceAddress, std::vector<GenericPrgDeviceChannel> channels, std::vector<int> ioAreas, short ErrorCnt, Priority priority): Error(ErrorCnt, 30000)
 { 
  this->_channels=channels;
  
@@ -183,7 +183,7 @@ Priority GenericPrgDevice::GetPriority()
   return this->_priority;
 }
 
-const arduino::IPAddress& GenericPrgDevice::GetIp() const
+const DMIPAddress& GenericPrgDevice::GetIp() const
 {
     return _ip;
 }
@@ -200,7 +200,7 @@ const char* GenericPrgDevice::GetName()
 
 bool GenericPrgDeviceManager::HasDevicesByPriority(
     Priority priority,
-    const arduino::IPAddress& ip) const
+    const DMIPAddress& ip) const
 {
     const uint64_t key =
         MakeKey(ip, static_cast<uint8_t>(priority));

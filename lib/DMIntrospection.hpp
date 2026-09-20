@@ -75,7 +75,7 @@ public:
         AVERAGE,
         POWER,
         AEE,
-        EXTERNAL
+        EXTERNAL_SOURCE
     };
 
 
@@ -2206,7 +2206,7 @@ private:
                         true;
 
                     entity.origin =
-                        EntityOrigin::EXTERNAL;
+                        EntityOrigin::EXTERNAL_SOURCE;
 
 
                     entity.scale *=
@@ -2325,7 +2325,7 @@ private:
 
 
                     entity.origin =
-                        EntityOrigin::EXTERNAL;
+                        EntityOrigin::EXTERNAL_SOURCE;
 
 
                     Relation relation;

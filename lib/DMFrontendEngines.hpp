@@ -24,6 +24,8 @@
 #include "DMDeclares.h"
 #include "DMMQTT.hpp"
 #include "DMFrontendOrchestrators.hpp"
+#include "DMIntrospection.hpp"
+#include "DMIntrusion.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -2651,124 +2653,607 @@ public:
 };
 
 
-class SecuritySensorEngine {
+class SecurityEngine
+{
 private:
+    static inline bool reportOnChange = false;
 
-    // ------------------------------------------------------------
-    // CALLBACKS
-    // ------------------------------------------------------------
-    static void onAnyAlarm(const std::string& zone,
-                           SensorChannelType type,
-                           const std::vector<Sensor*>& sensors)
+    // ============================================================
+    // INSTANCE / CONTEXT
+    // ============================================================
+
+    // DomoManager utilizzato dal frontend security per:
+    // - pubblicare gli eventi sull'EventManager
+    // - pubblicare lo stato sulla statusArea
+    static inline DomoManager* manager = nullptr;
+
+
+    // Configurazione security del Frontend.
+    // Contiene:
+    // - configurazione sensori
+    // - statusArea
+    // - panelCommandArea
+    // - eventArea
+    static inline FrontendConfig::Security* config = nullptr;
+
+
+    // Source già registrato dal DomoManagerFrontendEngine
+    // nell'EventManager.
+    //
+    // SECURITY non possiede il source: lo utilizza.
+    static inline uint8_t securitySource = 255;
+
+
+    // Engine inizializzato correttamente.
+    static inline bool initialized = false;
+
+    // ============================================================
+    // CHANGE FLAGS
+    //
+    // Accumula le variazioni rilevate durante il ciclo security.
+    //
+    // Più flag possono essere attivi contemporaneamente.
+    // ============================================================
+
+    static inline uint8_t changeFlags =
+        SecurityOrchestrator::CHANGE_NONE;
+
+    static inline long lastPublishedStatus = 0;
+    static inline int lastPublishedStatusArea = -1;
+    static inline bool statusPublished = false;
+
+    // ============================================================
+    // SECURITY EVENT ENCODER
+    //
+    // Conversione dell'evento semantico:
+    //
+    // AlarmPanelInterface::Event
+    //
+    // nel formato:
+    //
+    // EventManager::Event
+    //
+    // value:
+    //
+    // bits  0..7   = EventType
+    // bits  8..15  = zone
+    // bits 16..23  = partition
+    //
+    // 0xFF = valore non disponibile (-1)
+    //
+    // description e timestamp restano disponibili nell'eventLog
+    // del DomoManagerAlarmPanel, mentre EventManager trasporta
+    // il codice compatto area/value/source.
+    // ============================================================
+
+    static long EncodeEvent(
+        const AlarmPanelInterface::Event& event)
     {
-        LOG_IF("SecurityFrontend",
-               "[GLOBAL] Alarm zone=%s type=%d sensors=%u",
-               zone.c_str(), (int)type, (unsigned)sensors.size());
+        const uint32_t type =
+            static_cast<uint32_t>(
+                event.type
+            ) & 0xFFu;
+
+
+        const uint32_t zone =
+            static_cast<uint32_t>(
+                event.zone < 0
+                    ? 0xFF
+                    : event.zone
+            ) & 0xFFu;
+
+
+        const uint32_t partition =
+            static_cast<uint32_t>(
+                event.partition < 0
+                    ? 0xFF
+                    : event.partition
+            ) & 0xFFu;
+
+
+        const uint32_t value =
+            type |
+            (zone << 8) |
+            (partition << 16);
+
+
+        return static_cast<long>(
+            value
+        );
     }
 
-    static void onZoneAlarm(const std::string& zone,
-                            SensorChannelType type,
-                            const std::vector<Sensor*>& sensors)
+
+    // ============================================================
+    // ALARM PANEL EVENT CALLBACK
+    //
+    // Percorso:
+    //
+    // AlarmPanel
+    //      ↓
+    // SecurityEngine
+    //      ↓
+    // EventManager
+    //
+    // SecurityEngine genera l'evento nel sistema frontend.
+    // HMI / AEE / MQTT rimangono consumer separati dell'EventManager.
+    // ============================================================
+
+    static void AlarmPanelAlarmCallback(
+        const AlarmPanelInterface::Event& event)
     {
-        LOG_IF("SecurityFrontend",
-               "[ZONE] Alarm in zone=%s type=%d sensors=%u",
-               zone.c_str(), (int)type, (unsigned)sensors.size());
+        if (!initialized)
+            return;
+
+        if (!manager)
+            return;
+
+        if (!config)
+            return;
+
+        if (config->eventArea < 0)
+            return;
+
+        if (securitySource == 255)
+            return;
+
+
+        const long value =
+            EncodeEvent(event);
+
+
+        manager->getEventManager().push(
+            config->eventArea,
+            value,
+            securitySource
+        );
+
+
+        changeFlags |=
+            SecurityOrchestrator::CHANGE_PANEL;
+
+
+        LOG_IF(
+            "SECURITY",
+            "ALARM type=%d alarmType=%d zone=%d partition=%d area=%d value=%ld",
+            static_cast<int>(event.type),
+            static_cast<int>(event.alarmType),
+            event.zone,
+            event.partition,
+            config->eventArea,
+            value
+        );
     }
 
-    static void onTypeAlarm(const std::string& zone,
-                            SensorChannelType type,
-                            const std::vector<Sensor*>& sensors)
+    static void AlarmPanelEventCallback(
+        const AlarmPanelInterface::Event& event)
     {
-        LOG_IF("SecurityFrontend",
-               "[TYPE] Alarm type=%d in zone=%s sensors=%u",
-               (int)type, zone.c_str(), (unsigned)sensors.size());
+        if (!initialized)
+            return;
+
+        if (!manager)
+            return;
+
+        if (!config)
+            return;
+
+        if (config->eventArea < 0)
+            return;
+
+        if (securitySource == 255)
+            return;
+
+
+        const long value =
+            EncodeEvent(event);
+
+
+        manager->getEventManager().push(
+            config->eventArea,
+            value,
+            securitySource
+        );
+
+
+        changeFlags |=
+            SecurityOrchestrator::CHANGE_PANEL;
+
+
+        LOG_IF(
+            "SECURITY",
+            "EVENT type=%d zone=%d partition=%d area=%d value=%ld",
+            static_cast<int>(event.type),
+            event.zone,
+            event.partition,
+            config->eventArea,
+            value
+        );
     }
 
-    static void onZoneTypeAlarm(const std::string& zone,
-                                SensorChannelType type,
-                                const std::vector<Sensor*>& sensors)
+    // ============================================================
+    // STATUS
+    //
+    // SecurityOrchestrator -> DM statusArea
+    //
+    // Lo stato pubblicato è il bitmask aggregato del sistema
+    // security.
+    // ============================================================
+
+    static void PublishStatus(
+        unsigned long now)
     {
-        LOG_IF("SecurityFrontend",
-               "[ZONE+TYPE] Alarm zone=%s type=%d sensors=%u",
-               zone.c_str(), (int)type, (unsigned)sensors.size());
-    }
+        (void)now;
 
-    // ------------------------------------------------------------
-    // DYNAMIC CALLBACK REGISTRATION
-    // ------------------------------------------------------------
-    static void registerSecurityCallbacks() {
+        if (!initialized)
+            return;
 
-        auto& wired = SecurityOrchestrator::getWiredSensors();
+        if (!manager)
+            return;
 
-        // Global
-        SecurityOrchestrator::RegisterCallbackAny(onAnyAlarm);
+        if (!config)
+            return;
 
-        // Types
-        static const SensorChannelType allTypes[] = {
-            SensorChannelType::RT,
-            SensorChannelType::H24,
-            SensorChannelType::MASK,
-            SensorChannelType::LEN
-        };
+        const int statusArea =
+            config->statusArea;
 
-        for (auto t : allTypes)
-            SecurityOrchestrator::RegisterCallbackType(t, onTypeAlarm);
+        if (statusArea < 0)
+            return;
 
-        // Dynamic zones
-        for (const auto& entry : wired.GetZoneMap()) {
-            const std::string& zoneName = entry.first;
+        const long status =
+            SecurityOrchestrator::
+                getSystem()
+                .getBitmask();
 
-            SecurityOrchestrator::RegisterCallbackZone(zoneName, onZoneAlarm);
+        // --------------------------------------------------------
+        // Nessuna variazione reale dello status:
+        // non serve ripubblicarlo.
+        // --------------------------------------------------------
 
-            for (auto t : allTypes)
-                SecurityOrchestrator::RegisterCallbackZoneType(zoneName, t, onZoneTypeAlarm);
+        if (statusPublished &&
+            lastPublishedStatus == status &&
+            lastPublishedStatusArea == statusArea)
+        {
+            return;
         }
 
-        LOG_DF("SecurityFrontend", "Dynamic security callbacks registered");
+        manager->forceInternalEvent(
+            statusArea,
+            status
+        );
+
+        lastPublishedStatus =
+            status;
+
+        lastPublishedStatusArea =
+            statusArea;
+
+        statusPublished = true;
+
+        LOG_DF(
+            "SECURITY",
+            "Status area=%d value=%ld",
+            statusArea,
+            status
+        );
     }
+
 
 public:
 
-    // ------------------------------------------------------------
+    // ============================================================
     // SETUP
-    // ------------------------------------------------------------
-    static void Setup(const FrontendConfig::Security& cfg) {
-        SecurityOrchestrator::Setup(&cfg);
-
-        registerSecurityCallbacks();
-
-        LOG_DF("SecurityFrontend", "Security frontend setup completed");
-    }
-
-    // ------------------------------------------------------------
-    // LOOP
-    // ------------------------------------------------------------
-    static bool Loop(unsigned long now) {
-        return SecurityOrchestrator::Loop(now);
-    }
-
+    //
+    // Il source SECURITY viene creato dal
+    // DomoManagerFrontendEngine, insieme agli altri source
+    // dell'EventManager.
+    //
+    // SecurityEngine riceve semplicemente il source già creato.
     // ============================================================
-    // ACCESSORS
-    // ============================================================
-    static SecurityOrchestrator::SystemManager& getSystem() { return SecurityOrchestrator::getSystem(); }
-    static WiredSensorsManager& getWiredSensors() { return SecurityOrchestrator::getWiredSensors(); }
 
-    // ============================================================
-    // COMMANDS
-    // ============================================================
-    static void ApplySecurityCommands(int area) {
-        SecurityOrchestrator::ApplySecurityCommands(area);
-    }
+    static bool Setup(
+        DomoManager& dm,
+        FrontendConfig::Security& cfg,
+        uint8_t source)
+    {
+        manager = &dm;
+        config = &cfg;
+        securitySource = source;
 
-    // ============================================================
-    // DIAGNOSTICA
-    // ============================================================
-    class Diagnostic {
-    public:
-        static void FullReport() {
-            SecurityOrchestrator::Diagnostic::FullReport();
+        initialized = false;
+
+        reportOnChange = cfg.reportOnChange;
+
+        statusPublished = false;
+        lastPublishedStatus = 0;
+        lastPublishedStatusArea = -1;
+        changeFlags =
+            SecurityOrchestrator::CHANGE_NONE;
+
+        if (!cfg.enabled)
+        {
+            LOG_IF(
+                "SECURITY",
+                "Security engine disabled"
+            );
+
+            return false;
         }
-    };
+
+        if (securitySource == 255)
+        {
+            LOG_EF(
+                "SECURITY",
+                "Invalid EventManager source"
+            );
+
+            return false;
+        }
+
+        SecurityOrchestrator::Setup(
+            &cfg
+        );
+
+        DomoManagerAlarmPanel::instance()
+            .setAlarmCallback(
+                AlarmPanelAlarmCallback
+            );
+
+        DomoManagerAlarmPanel::instance()
+            .setEventCallback(
+                AlarmPanelEventCallback
+            );
+
+        initialized = true;
+
+        LOG_IF(
+            "SECURITY",
+            "Security engine initialized "
+            "panelCommandArea=%d "
+            "statusArea=%d "
+            "eventArea=%d "
+            "source=%d "
+            "reportOnChange=%d",
+            cfg.panelCommandArea,
+            cfg.statusArea,
+            cfg.eventArea,
+            securitySource,
+            reportOnChange ? 1 : 0
+        );
+
+        return true;
+    }
+
+
+        // ============================================================
+    // LOOP
+    //
+    // Raccoglie tutti i cambiamenti:
+    //
+    // - reader / sensori
+    // - zone
+    // - stato sistema
+    // - eventi pannello
+    // - comunicazione
+    // - comandi
+    //
+    // Il report viene eseguito una sola volta quando esiste
+    // almeno una variazione.
+    // ============================================================
+
+    static bool Loop(
+        DomoManager& dm,
+        unsigned long now)
+    {
+        if (!initialized)
+            return false;
+
+        if (!config || !config->enabled)
+            return false;
+
+        if (!dm.getPowerOnCycleCompleted())
+            return false;
+
+        const uint8_t changes =
+            SecurityOrchestrator::Loop(now);
+
+        changeFlags |= changes;
+
+        if (changeFlags ==
+            SecurityOrchestrator::CHANGE_NONE)
+        {
+            return false;
+        }
+
+        PublishStatus(now);
+
+        if (reportOnChange &&
+            (changeFlags &
+            (SecurityOrchestrator::CHANGE_ZONE |
+            SecurityOrchestrator::CHANGE_SYSTEM |
+            SecurityOrchestrator::CHANGE_PANEL |
+            SecurityOrchestrator::CHANGE_COMM |
+            SecurityOrchestrator::CHANGE_COMMAND)))
+        {
+            SecurityOrchestrator::
+                Diagnostic::
+                CoreReport();
+        }
+
+        changeFlags =
+            SecurityOrchestrator::CHANGE_NONE;
+
+        return true;
+    }
+
+
+    // ============================================================
+    // FRONTEND COMMAND
+    //
+    // Punto unico di ingresso dei comandi security provenienti
+    // dal frontend.
+    //
+    // Non distingue il chiamante:
+    // HMI / AEE / MQTT devono semplicemente passare:
+    //
+    //     area + value + now
+    //
+    // SecurityEngine stabilisce se l'area appartiene:
+    //
+    // 1) al pannello
+    // 2) a un singolo sensore
+    // 3) a nessun comando security
+    //
+    // ------------------------------------------------------------
+    //
+    // PANEL
+    //     panelCommandArea
+    //          ↓
+    //     ApplyPanelCommand()
+    //
+    // SENSOR
+    //     WiredSensorConfig::cmdArea
+    //          ↓
+    //     ApplySecurityCommand()
+    //
+    // ============================================================
+
+    static bool ApplyCommand(
+        int area,
+        long value,
+        unsigned long now)
+    {
+        (void)now;
+
+
+        if (!initialized)
+            return false;
+
+
+        if (!config)
+            return false;
+
+
+        // --------------------------------------------------------
+        // ALARM PANEL
+        // --------------------------------------------------------
+
+        if (config->panelCommandArea >= 0 &&
+            area == config->panelCommandArea)
+        {
+            const bool handled =
+                SecurityOrchestrator::
+                    ApplyPanelCommand(
+                        area,
+                        value
+                    );
+
+
+            if (handled)
+            {
+                // Il comando ha prodotto una variazione
+                // nello stato del pannello/security.
+                changeFlags |=
+                    SecurityOrchestrator::CHANGE_COMMAND;
+
+
+                LOG_IF(
+                    "SECURITY",
+                    "PANEL CMD area=%d value=%ld",
+                    area,
+                    value
+                );
+            }
+            else
+            {
+                LOG_WF(
+                    "SECURITY",
+                    "Invalid panel command "
+                    "area=%d value=%ld",
+                    area,
+                    value
+                );
+            }
+
+
+            // L'area è riservata al pannello.
+            //
+            // Anche se il valore non è valido, non deve
+            // proseguire nel normale percorso EventManager.
+            return true;
+        }
+
+
+        // --------------------------------------------------------
+        // SINGLE SENSOR
+        // --------------------------------------------------------
+
+        if (SecurityOrchestrator::
+                ApplySecurityCommand(
+                    area,
+                    value
+                ))
+        {
+            // Il comando ha modificato il controllo
+            // di un singolo sensore.
+            changeFlags |=
+                SecurityOrchestrator::CHANGE_COMMAND;
+
+
+            LOG_IF(
+                "SECURITY",
+                "SENSOR CMD area=%d value=%ld",
+                area,
+                value
+            );
+
+
+            return true;
+        }
+
+
+        // --------------------------------------------------------
+        // NOT A SECURITY COMMAND
+        // --------------------------------------------------------
+
+        return false;
+    }
+
+
+    // ============================================================
+    // DIRECT STATUS ACCESS
+    // ============================================================
+
+    static long GetStatus()
+    {
+        if (!initialized)
+            return 0;
+
+
+        return SecurityOrchestrator::
+            getSystem()
+            .getBitmask();
+    }
+
+
+    // ============================================================
+    // EVENT SOURCE
+    // ============================================================
+
+    static uint8_t getSource()
+    {
+        return securitySource;
+    }
+
+
+    // ============================================================
+    // STATE
+    // ============================================================
+
+    static bool enabled()
+    {
+        return initialized &&
+               config &&
+               config->enabled;
+    }
 };
 
 class TaskEngineBase
@@ -3001,42 +3486,12 @@ private:
         DomoManager& manager,
         unsigned long now)
     {
-        // --------------------------------------------------------
-        // WAIT POWER-ON CYCLE
-        // --------------------------------------------------------
-
-        if (!manager.getPowerOnCycleCompleted())
-            return;
-
-
-        // --------------------------------------------------------
-        // SECURITY ENGINE
-        // --------------------------------------------------------
-
-        const bool changed =
-            SecuritySensorEngine::Loop(now);
-
-
-        if (!changed)
-            return;
-
-
-        // --------------------------------------------------------
-        // WRITE SECURITY STATUS
-        // --------------------------------------------------------
-        const auto& cfg =
-            TaskEngineOrchestrator::getCfg();
-        if(cfg.security.statusArea!=-1) {
-            auto& sys =
-                SecurityOrchestrator::getSystem();
-
-
-            manager.forceInternalEvent(
-                cfg.security.statusArea,
-                sys.getBitmask()
-            );
-        }
+        SecurityEngine::Loop(
+            manager,
+            now
+        );
     }
+
 
     // ============================================================
     // TASK: AEE DUMP
@@ -3584,8 +4039,6 @@ protected:
                     );
                 }
 
-                
-
                 if (config.hvac.enabled)
                 {
                     HeatPumpController::Diagnostic::Report(
@@ -3595,10 +4048,14 @@ protected:
 
                 if (config.security.enabled)
                 {
+                    // Diagnostica completa della centrale virtuale
+                    DomoManagerAlarmPanel::instance().diagnostic();
+
+                    // Diagnostica del motore sensori
                     SecurityOrchestrator::Diagnostic::FullReport();
 
-                    SecuritySensorEngine::getSystem()
-                        .DiagnosticReport();
+                    // Stato aggregato
+                    SecurityOrchestrator::getSystem().DiagnosticReport();
                 }
 
                 // ===== ESTENSIONE FRONTEND =====

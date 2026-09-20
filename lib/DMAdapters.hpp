@@ -23,7 +23,7 @@
 
 #include "DMTransport.hpp"
 #include "DMWebAPI.hpp"
-#include "DMRS485Node.hpp"
+//#include "DMRS485Node.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -120,7 +120,7 @@ protected:
     }
 };
 
-
+/*
 class RS485NodeAdapter : public TransportBase {
 private:
     RS485Node node;
@@ -199,7 +199,7 @@ protected:
             pendingCb = nullptr;
         }
     }
-};
+};*/
 
 
 

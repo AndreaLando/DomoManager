@@ -390,10 +390,18 @@ struct FrontendConfig {
 
     struct Security {
         bool enabled = false;
+        bool reportOnChange=true;
         uint32_t intervalMs = 3000;
         const WiredSensorsManager::WiredSensorConfig* sensors;
         size_t count;
-        int statusArea=-1;
+        
+        // Stato aggregato security
+        int statusArea = -1;
+
+        // Comandi Alarm Panel
+        int panelCommandArea = -1;
+        int eventArea = -1;
+        
         uint32_t startupInhibitMs = 10000;   // <--- nuovo parametro
     } security;
 

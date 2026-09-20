@@ -29,7 +29,11 @@
 class HeatPumpController {
 public:
     enum class Mode { OFF, MANUAL, HEATING, COOLING, AUTO, DEFROST };
-    enum class FanSpeed { LOW, MEDIUM, HIGH };
+    enum class FanSpeed {
+        LOW_SPEED,
+        MEDIUM_SPEED,
+        HIGH_SPEED
+    };
 
     struct HVACTime {
         uint8_t dayOfWeek;

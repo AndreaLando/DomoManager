@@ -22,12 +22,19 @@
 
 class ToggleSignal {
 public:
-    ToggleSignal() : _oldStatus(0) {}
+    ToggleSignal()
+        : _oldStatus(0),
+          _toggleValue(0)
+    {}
 
     inline uint8_t getOldValue() const {
         return _oldStatus;
     }
 
+    // ============================================================
+    // TOGGLE NORMALE
+    // NON TOCCATO
+    // ============================================================
     inline bool change(bool statusIn, long &value) {
         // Se non c’è variazione → niente toggle
         if (_oldStatus == statusIn)
@@ -37,7 +44,27 @@ public:
 
         // Toggle solo sul fronte di salita
         if (statusIn) {
-            value ^= 1;   // toggle più veloce di (value==0?1:0)
+            value ^= 1;
+            return true;
+        }
+
+        return false;
+    }
+
+    // ============================================================
+    // TOGGLE SENZA AreaToWrite
+    // Stato mantenuto internamente
+    // ============================================================
+    inline bool changeRoute(bool statusIn, long &value) {
+        if (_oldStatus == statusIn)
+            return false;
+
+        _oldStatus = statusIn;
+
+        // Toggle solo sul fronte di salita
+        if (statusIn) {
+            _toggleValue ^= 1;
+            value = _toggleValue;
             return true;
         }
 
@@ -45,7 +72,8 @@ public:
     }
 
 private:
-    uint8_t _oldStatus;   // 1 byte invece di 4
+    uint8_t _oldStatus;
+    long _toggleValue;
 };
 
 
@@ -84,6 +112,7 @@ public:
         _Q = false;
     }
 
+    // Compatibilità con il vecchio codice
     inline void Start() {
         Start(millis());
     }
@@ -94,10 +123,13 @@ public:
     }
 
     inline float ET(uint32_t now) const {
-        if (!_running) return 0.0f;
+        if (!_running)
+            return 0.0f;
+
         return (now - _startMillis) / _scale;
     }
 
+    // Compatibilità con il vecchio codice
     inline float ET() const {
         return ET(millis());
     }
@@ -120,34 +152,38 @@ protected:
             case Minutes:      return 60000.0f;
             case Hours:        return 3600000.0f;
         }
+
         return 1.0f;
     }
 };
 
 
-
 //---------------------------------------------------------
-// TON — On‑Delay Timer
+// TON — On-Delay Timer
 //---------------------------------------------------------
 class TON : public TimerBase {
 public:
     TON(float preset = 0, TimeFMT fmt = Milliseconds)
-        : TimerBase(preset, fmt) {}
+        : TimerBase(preset, fmt)
+    {}
 
+    // Vecchia API
     inline void Run(bool in) {
-        if (in) {
-            if (!_running) Start();
-            _Q = (ET() >= _preset);
-        } else {
-            Stop();
-        }
+        Run(in, millis());
     }
 
+    // API con timestamp esplicito
     inline void Run(bool in, uint32_t now) {
+
         if (in) {
-            if (!_running) Start(now);
+
+            if (!_running)
+                Start(now);
+
             _Q = (ET(now) >= _preset);
+
         } else {
+
             Stop();
         }
     }

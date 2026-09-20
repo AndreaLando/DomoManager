@@ -117,6 +117,8 @@ DEFINE_AREA(AREA_CUCINA_ESTRATTORE_BIT, 236)
 DEFINE_AREA(AREA_MEAN_TEMPS, 237)
 DEFINE_AREA(AREA_MEAN_HUMS, 238)
 DEFINE_AREA(AREA_SECURITY_STATUS, 239)
+DEFINE_AREA(AREA_SECURITY_EVT_AREA, 240)
+DEFINE_AREA(AREA_SECURITY_CMD_AREA, 241)
 
 // ************ PHISICAL DEVICES *******************************
 arduino::IPAddress WaveShareP1_Addr=IPAddress(192, 168, 12, 203);
@@ -126,7 +128,6 @@ arduino::IPAddress WaveShareCantina_Addr=IPAddress(192, 168, 12, 205);
 static const DomoManagerConfig::Devices mainDevicesConfig = {
     {
         // --- P1 ---
-        
         { "Lettore consumi - Quadro P1", WaveShareP1_Addr, 1, "LE_01MQ",
           { 10, 11, 12, 13, 14 }, 3, Low
         },
@@ -177,7 +178,6 @@ static const DomoManagerConfig::Devices mainDevicesConfig = {
         },
 
         // --- PT ---
-    
         { "Sensore Corrente - Quadro cucina PT", WaveSharePT_Addr, 1, "CTR4A01",
           { SENSORE_CUCINA_CORRENTE }, 3, Low
         },
@@ -674,7 +674,7 @@ static const char* AUTOMATION_JSON = R"json(
 DomoManagerConfig makeDomoConfig() {
     DomoManagerConfig cfg;   // usa tutti i default della struct
 
-    cfg.hmi.enabled = false;   // opzionale, è già default
+    cfg.hmi.enabled = true;   // opzionale, è già default
     cfg.hmi.port = 502;        // default
     cfg.hmi.pollingMs = 250;   // default
     cfg.hmi.maxClients = 1;
@@ -723,7 +723,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     // ============================
 
     // PIR CUCINA
-    { "Cucina",
+    { "PIR Cucina", "Cucina",
         {
             SensorChannel(-1, RT_DELAY, SensorChannelType::RT),
             SensorChannel(-1, INITIAL_DELAY,      SensorChannelType::H24)
@@ -736,7 +736,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     },
 
     // Porta Cucina
-    { "Cucina",
+    { "Porta Cucina","Cucina",
         { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_DOOR_ALM) != 0; }
@@ -745,7 +745,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     },
 
     // Flood Cucina
-    { "Cucina",
+    { "Allagamento Cucina", "Cucina",
         { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_FLOOD_ALM) != 0; }
@@ -754,7 +754,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     },
 
     // Smoke Cucina
-    { "Cucina",
+    { "Fumo Cucina", "Cucina",
         { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_SMOKE_ALM) != 0; }
@@ -765,7 +765,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     // ============================
     // CAMERA
     // ============================
-    { "Camera",
+    { "PIR Camera", "Camera",
         {
             SensorChannel(-1, RT_DELAY, SensorChannelType::RT),
             SensorChannel(-1, INITIAL_DELAY,      SensorChannelType::H24)
@@ -778,7 +778,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     },
 
     // Finestre Camera
-    { "Camera",
+    { "Finestra Camera", "Camera",
         { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CAMERA_WIN1_ALM) != 0; }
@@ -786,7 +786,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
         SensorCategory::WINDOW
     },
 
-    { "Camera",
+    { "Vasistas Dx. Camera", "Camera",
         { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CAMERA_WIN2_ALM) != 0; }
@@ -794,7 +794,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
         SensorCategory::WINDOW
     },
 
-    { "Camera",
+    { "Vasistas Sx. Camera", "Camera",
         { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CAMERA_WIN3_ALM) != 0; }
@@ -803,7 +803,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     },
 
     // Smoke Camera
-    { "Camera",
+    { "Fumo Camera", "Camera",
         { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CAMERA_SMOKE_ALM) != 0; }
@@ -814,7 +814,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     // ============================
     // BAGNO
     // ============================
-    { "Bagno",
+    { "Allagamento Bagno", "Bagno",
         { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_BAGNO_FLOOD_ALM) != 0; }
@@ -822,7 +822,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
         SensorCategory::FLOOD
     },
 
-    { "Bagno",
+    { "PIR Bagno", "Bagno",
         {
             SensorChannel(-1, RT_DELAY, SensorChannelType::RT),
             SensorChannel(-1, INITIAL_DELAY,      SensorChannelType::H24)
@@ -837,7 +837,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     // ============================
     // INGRESSO
     // ============================
-    { "Ingresso",
+    { "Porta Ingresso", "Ingresso",
         { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_INGRESSO_DOOR_ALM) != 0; }
@@ -1153,7 +1153,7 @@ static const FrontendConfig::MQTT::Client MQTT_CLIENTS[] =
 {
     {
         true,
-        IPAddress(192, 168, 12, 101), //212
+        IPAddress(192, 168, 12, 212), //101
         1883,
         FrontendConfig::MQTT::Client::Backend::ZIGBEE2MQTT,
         "SMHub",

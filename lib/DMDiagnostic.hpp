@@ -94,130 +94,6 @@ public:
     }
 };
 
-class HotStandbyDiagnostic {
-public:
-
-    /* ============================================================
-       1. STATO GENERALE
-       ============================================================ */
-    static void ReportStatus(HotStandbyManager& hs) {
-        Serial.println("\n===== HOT-STANDBY STATUS =====");
-
-        Serial.print("Role: ");
-        Serial.println(hs.isMaster ? "MASTER" : "SLAVE");
-
-        Serial.print("Last heartbeat sent: ");
-        Serial.print(hs.getLastHeartbeat());
-        Serial.println(" ms ago");
-
-        Serial.print("Last peer heartbeat: ");
-        Serial.print(hs.getLastPeerHeartbeat());
-        Serial.println(" ms ago");
-
-        Serial.print("Heartbeat timeout: ");
-        Serial.print(hs.getHeartbeatTimeout());
-        Serial.println(" ms");
-
-        Serial.print("StateSync interval: ");
-        Serial.print(hs.getStateSyncInterval());
-        Serial.println(" ms");
-
-        Serial.print("ProcessData interval: ");
-        Serial.print(hs.getProcessDataInterval());
-        Serial.println(" ms");
-
-        Serial.print("TimestampSync interval: ");
-        Serial.print(hs.getTimestampSyncInterval());
-        Serial.println(" ms");
-    }
-
-    /* ============================================================
-       2. STATE SYNC
-       ============================================================ */
-    static void ReportStateSync(HotStandbyManager& hs) {
-        Serial.println("\n===== HOT-STANDBY STATE SYNC =====");
-
-        Serial.print("Last StateSync sent: ");
-        Serial.print(hs.getLastStateSync());
-        Serial.println(" ms ago");
-
-        Serial.print("StateSync size: ");
-        Serial.print(hs.getStateDataLen());
-        Serial.println(" bytes");
-
-        if (hs.getStateDataLen() == 0)
-            Serial.println("WARNING: No state data being replicated.");
-    }
-
-    /* ============================================================
-       3. PROCESS DATA
-       ============================================================ */
-    static void ReportProcessData(HotStandbyManager& hs) {
-        Serial.println("\n===== HOT-STANDBY PROCESS DATA =====");
-
-        Serial.print("Last ProcessData sent: ");
-        Serial.print(hs.getLastProcessDataSync());
-        Serial.println(" ms ago");
-
-        Serial.print("ProcessData size: ");
-        Serial.print(hs.getProcessDataLen());
-        Serial.println(" bytes");
-
-        if (hs.getProcessDataLen() == 0)
-            Serial.println("WARNING: No process data being replicated.");
-    }
-
-    /* ============================================================
-       4. TIMESTAMP SYNC
-       ============================================================ */
-    static void ReportTimestampSync(HotStandbyManager& hs) {
-        Serial.println("\n===== HOT-STANDBY TIMESTAMP SYNC =====");
-
-        Serial.print("Last TimestampSync: ");
-        Serial.print(hs.getLastTimestampSync());
-        Serial.println(" ms ago");
-
-        Serial.print("Epoch offset: ");
-        Serial.println(hs.getEpochOffset());
-    }
-
-    /* ============================================================
-       5. RS485 DIAGNOSTIC
-       ============================================================ */
-    static void ReportRS485(HotStandbyManager& hs) {
-        Serial.println("\n===== HOT-STANDBY RS485 =====");
-
-        Serial.print("Is master: ");
-        Serial.println(hs.isMaster ? "YES" : "NO");
-
-        Serial.print("Awaiting ACK: ");
-        Serial.println(hs.getNode().isAwaitingAck() ? "YES" : "NO");
-
-        Serial.print("Retry count: ");
-        Serial.println(hs.getNode().getRetryCount());
-
-        Serial.print("Last send time: ");
-        Serial.print(hs.getNode().getLastSendTime());
-        Serial.println(" ms ago");
-    }
-
-    /* ============================================================
-       6. FULL REPORT
-       ============================================================ */
-    static void FullReport(HotStandbyManager& hs) {
-        #if HOTSTANDBY_ENABLED
-            ReportStatus(hs);
-            ReportStateSync(hs);
-            ReportProcessData(hs);
-            ReportTimestampSync(hs);
-            ReportRS485(hs);
-        #else
-            Serial.println("Hot-standby disabilitato (HOTSTANDBY_ENABLED=0)");
-        #endif
-        
-    }
-};
-
 class Diagnostic {
 public:
     // ============================================================
@@ -682,7 +558,8 @@ public:
 
         #if HOTSTANDBY_ENABLED
             if (cfg.reportHotStandby)
-                HotStandbyDiagnostic::FullReport(manager.getHotStandby());
+                //HotStandbyDiagnostic::FullReport(manager.getHotStandby());
+                manager.getHotStandby().FullReport();
         #else
             Serial.println("Hot-standby disabilitato (HOTSTANDBY_ENABLED=0)");
         #endif

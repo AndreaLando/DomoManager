@@ -15,10 +15,7 @@
 
    ============================================================================ */
 
-//Modbus Client, uso libreria ARDUINO
-#include <ArduinoRS485.h> // ArduinoModbus depends on the ArduinoRS485 library
 #include <ArduinoModbus.h>
-
 #include <Arduino.h>
 
 #include "DMPLC.h"
@@ -45,10 +42,17 @@ private:
         WRITE
     };
 
+    
     struct ClientStepState
     {
         ClientStep step = ClientStep::READ;
+
+        // Istante dell'ultima READ completata per questo IP.
+        // Deve essere per-IP e non una reference statica al parametro
+        // locale di RunClient().
+        unsigned long lastReadTime = 0;
     };
+
 
     std::vector<ClientStepState> clientStates;
 
@@ -898,7 +902,6 @@ public:
     // ============================================================
     // RUN CLIENT
     // ============================================================
-
     ClientState RunClient(
         ModbusTCPClient& modbusClient,
         short ipIndex,
@@ -930,16 +933,18 @@ public:
         ClientStep& step =
             clientState.step;
 
-        static unsigned long& lastReadTime = now;
 
-         // --------------------------------------------------------
+        // --------------------------------------------------------
         // CONNESSIONE MODBUS PERSISTENTE
         // --------------------------------------------------------
+
         static PersistentModbusConnection conn(modbusClient);
+
 
         // --------------------------------------------------------
         // SOCKET MANAGER CONTEXT
         // --------------------------------------------------------
+
         if (net)
         {
             conn.setSocketContext(
@@ -950,13 +955,15 @@ public:
             );
         }
 
+
         auto& ip =
             ipManager->GetIps()[ipIndex];
 
 
         // --------------------------------------------------------
         // ENSURE CONNECTION
-        // -------------------------------------------------------      
+        // --------------------------------------------------------
+
         profiler.begin(
             PROF_ENSURE,
             ipIndex,
@@ -969,7 +976,7 @@ public:
                 *ipManager,
                 port,
                 now
-          );
+            );
 
         profiler.end(
             PROF_ENSURE,
@@ -977,9 +984,11 @@ public:
             millis()
         );
 
+
         // --------------------------------------------------------
         // WAITING
         // --------------------------------------------------------
+
         if (ensureResult ==
             PersistentModbusConnection::EnsureResult::WAITING)
         {
@@ -988,9 +997,11 @@ public:
             return ClientState::WAITING;
         }
 
+
         // --------------------------------------------------------
         // FAILED
         // --------------------------------------------------------
+
         if (ensureResult ==
             PersistentModbusConnection::EnsureResult::FAILED)
         {
@@ -1017,9 +1028,11 @@ public:
             return ClientState::ERROR;
         }
 
+
         // ========================================================
         // READ
         // ========================================================
+
         if (step == ClientStep::READ)
         {
             timing.startDevice(now);
@@ -1044,6 +1057,7 @@ public:
                 millis()
             );
 
+
             if (!readOk)
             {
                 step = ClientStep::READ;
@@ -1059,8 +1073,21 @@ public:
                 return ClientState::DEVICE_ERROR;
             }
 
+
             conn.touch(now);
-            lastReadTime = now;
+
+            // ----------------------------------------------------
+            // FIX:
+            // salva il tempo della READ nello stato dell'IP.
+            //
+            // NON usare:
+            // static unsigned long& lastReadTime = now;
+            //
+            // perché 'now' è un parametro locale della funzione.
+            // ----------------------------------------------------
+
+            clientState.lastReadTime = now;
+
 
             // ----------------------------------------------------
             // PROCESS BUFFER
@@ -1104,17 +1131,20 @@ public:
                 }
             }
 
+
             if (somethingChangedNeeded &&
                 somethingChanged)
             {
                 somethingChanged();
             }
 
+
             profiler.end(
                 PROF_PROCESS,
                 ipIndex,
                 millis()
             );
+
 
             // Passa alla WRITE.
             step = ClientStep::WRITE;
@@ -1157,6 +1187,7 @@ public:
                 millis()
             );
 
+
             if (!writeOk)
             {
                 // Il ciclo corrente è terminato con errore.
@@ -1175,18 +1206,27 @@ public:
                 return ClientState::DEVICE_ERROR;
             }
 
+
             timing.endDevice(
                 now,
                 ipIndex
             );
 
+
+            // ----------------------------------------------------
+            // FIX:
+            // usa il timestamp appartenente all'IP corrente.
+            // ----------------------------------------------------
+
             ipManager->setLastCycleDuration(
                 ipIndex,
-                now - lastReadTime
+                now - clientState.lastReadTime
             );
+
 
             conn.touch(now);
             step = ClientStep::READ;
+
 
             if (net)
             {
@@ -1196,8 +1236,14 @@ public:
                 );
             }
 
+
             return ClientState::CYCLE_OK;
         }
+
+
+        // --------------------------------------------------------
+        // STATO IMPOSSIBILE
+        // --------------------------------------------------------
 
         if (net)
         {
@@ -1209,6 +1255,7 @@ public:
 
         return ClientState::ERROR;
     }
+
 
     // ============================================================
     // AREA MAP DIAGNOSTICS
