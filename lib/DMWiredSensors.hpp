@@ -102,22 +102,72 @@ public:
 // -------------------------------------------------------------
 //  Sensor
 // -------------------------------------------------------------
-class Sensor {
+class Sensor
+{
 public:
+
+    // ============================================================
+    // SENSOR OUTPUTS
+    // ============================================================
+    //
+    // Uscite LOGICHE già post-processate dal sensore.
+    //
+    // rt
+    //     uscita del canale RT
+    //
+    // h24
+    //     uscita H24 complessiva:
+    //     H24 OR MASK
+    //
+    // ============================================================
+
+    struct SensorOutputs
+    {
+        bool rt  = false;
+        bool h24 = false;
+
+        // Uscite memorizzate
+        bool rtMem = false;
+        bool h24Mem = false;
+    };
+
+
     std::vector<SensorChannel> channels;
-    std::unordered_map<SensorChannelType, SensorChannel*> lookup;
 
-    std::array<SensorChannel*, 4> channelByType{};
+    std::unordered_map<
+        SensorChannelType,
+        SensorChannel*
+    > lookup;
 
-    bool _engage = false;
-    bool _disabled = false;
-    bool alarmOut = false;
+    std::array<
+        SensorChannel*,
+        4
+    > channelByType{};
+
+    bool _engageRT = false;
+    bool _engageH24 = false;
+
+    bool _disabled = true;
+
 
     unsigned long startupInhibitMs = 2000;
-    TON startupInhibit =
-        TON(startupInhibitMs, TimerBase::Milliseconds);
 
-    Sensor(std::initializer_list<SensorChannel> list)
+    TON startupInhibit =
+        TON(
+            startupInhibitMs,
+            TimerBase::Milliseconds
+        );
+
+
+    SensorOutputs outputs;
+
+
+    // ============================================================
+    // CONSTRUCTOR
+    // ============================================================
+
+    Sensor(
+        std::initializer_list<SensorChannel> list)
         : channels(list)
     {
         channelByType.fill(nullptr);
@@ -130,18 +180,46 @@ public:
                 static_cast<size_t>(ch.type);
 
             if (index < channelByType.size())
+            {
                 channelByType[index] = &ch;
+            }
         }
     }
 
-    void SetStartupInhibit(unsigned long ms)
+
+    // ============================================================
+    // OUTPUT ACCESS
+    // ============================================================
+
+    const SensorOutputs& Outputs() const
+    {
+        return outputs;
+    }
+
+
+    // ============================================================
+    // STARTUP INHIBIT
+    // ============================================================
+
+    void SetStartupInhibit(
+        unsigned long ms)
     {
         startupInhibitMs = ms;
+
         startupInhibit =
-            TON(ms, TimerBase::Milliseconds);
+            TON(
+                ms,
+                TimerBase::Milliseconds
+            );
     }
 
-    SensorChannel* Get(SensorChannelType type)
+
+    // ============================================================
+    // CHANNEL ACCESS
+    // ============================================================
+
+    SensorChannel* Get(
+        SensorChannelType type)
     {
         const size_t index =
             static_cast<size_t>(type);
@@ -152,7 +230,9 @@ public:
         return channelByType[index];
     }
 
-    const SensorChannel* Get(SensorChannelType type) const
+
+    const SensorChannel* Get(
+        SensorChannelType type) const
     {
         const size_t index =
             static_cast<size_t>(type);
@@ -163,16 +243,35 @@ public:
         return channelByType[index];
     }
 
-    void Engage(bool mode)
+
+    // ============================================================
+    // ENGAGE
+    // ============================================================
+
+    void EngageRT(bool mode)
     {
-        _engage = mode;
+        _engageRT = mode;
     }
 
-    void Enable(bool mode)
+    void EngageH24(bool mode)
+    {
+        _engageH24 = mode;
+    }
+
+    // ============================================================
+    // ENABLE
+    // ============================================================
+
+    void Enable(
+        bool mode)
     {
         if (mode)
         {
             startupInhibit.Run(true);
+
+            // Uscite correnti azzerate.
+            outputs.rt  = false;
+            outputs.h24 = false;
         }
         else
         {
@@ -182,20 +281,43 @@ public:
                 ch.mem = false;
                 ch.lastDebounced = false;
             }
+
+            // Sensore disabilitato:
+            // nessuna uscita e nessuna memoria.
+            outputs.rt    = false;
+            outputs.h24   = false;
+            outputs.rtMem = false;
+            outputs.h24Mem = false;
         }
 
         _disabled = !mode;
     }
+
+
+    // ============================================================
+    // STATE
+    // ============================================================
 
     bool IsEnabled() const
     {
         return !_disabled;
     }
 
-    bool IsEngaged() const
+
+    bool IsEngagedRT() const
     {
-        return _engage;
+        return _engageRT;
     }
+
+    bool IsEngagedH24() const
+    {
+        return _engageH24;
+    }
+
+
+    // ============================================================
+    // RESET
+    // ============================================================
 
     void Reset()
     {
@@ -205,9 +327,24 @@ public:
             ch.mem = false;
             ch.lastDebounced = false;
         }
+
+        outputs.rt     = false;
+        outputs.h24    = false;
+        outputs.rtMem  = false;
+        outputs.h24Mem = false;
     }
 
-    bool ChannelAlarm(SensorChannelType type) const
+
+    // ============================================================
+    // CHANNEL ALARM
+    // ============================================================
+    //
+    // Questo è lo stato già elaborato del singolo canale.
+    //
+    // ============================================================
+
+    bool ChannelAlarm(
+        SensorChannelType type) const
     {
         const size_t index =
             static_cast<size_t>(type);
@@ -222,11 +359,32 @@ public:
             return false;
 
         return
-            (ch->timer.Q() &&
-             !ch->inhibit &&
-             startupInhibit.Q())
+            (
+                ch->timer.Q() &&
+                !ch->inhibit &&
+                startupInhibit.Q()
+            )
             ||
             ch->mem;
+    }
+
+
+    // ============================================================
+    // RUN
+    // ============================================================
+    bool ChannelOutput(
+        SensorChannelType type) const
+    {
+        const SensorChannel* ch =
+            Get(type);
+
+        if (!ch)
+            return false;
+
+        return
+            ch->timer.Q() &&
+            !ch->inhibit &&
+            startupInhibit.Q();
     }
 
     bool Run(
@@ -234,96 +392,206 @@ public:
         size_t count,
         unsigned long now)
     {
-        const bool oldAlarmOut = alarmOut;
+        const SensorOutputs oldOutputs =
+            outputs;
 
         bool readerChanged = false;
-        bool tempAlarm = false;
-        bool tempMem = false;
+
+
+        // ========================================================
+        // STARTUP INHIBIT
+        // ========================================================
 
         startupInhibit.Run(
             true,
             now
         );
 
+
         const bool inhibit =
             !startupInhibit.Q();
 
-        if (!_disabled)
+
+        // ========================================================
+        // SENSOR DISABLED
+        // ========================================================
+
+        if (_disabled)
         {
-            const size_t channelCount =
-                channels.size();
-
-            for (size_t i = 0;
-                 i < channelCount;
-                 ++i)
+            for (auto& ch : channels)
             {
-                SensorChannel& ch =
-                    channels[i];
+                ch.timer.Run(false);
+                ch.mem = false;
+                ch.lastDebounced = false;
+            }
 
-                const bool raw =
-                    (i < count)
+            outputs.rt     = false;
+            outputs.h24    = false;
+            outputs.rtMem  = false;
+            outputs.h24Mem = false;
+
+            return
+                readerChanged ||
+                oldOutputs.rt     != outputs.rt ||
+                oldOutputs.h24    != outputs.h24 ||
+                oldOutputs.rtMem  != outputs.rtMem ||
+                oldOutputs.h24Mem != outputs.h24Mem;
+        }
+
+
+        // ========================================================
+        // CHANNEL LOOP
+        // ========================================================
+
+        const size_t channelCount =
+            channels.size();
+
+
+        for (size_t i = 0;
+            i < channelCount;
+            ++i)
+        {
+            SensorChannel& ch =
+                channels[i];
+
+
+            const bool raw =
+                (i < count)
                     ? inputs[i]
                     : false;
 
-                const bool debounced =
-                    ch.debounce.update(
-                        raw,
-                        now
-                    );
 
-                if (debounced != ch.lastDebounced)
-                {
-                    ch.lastDebounced =
-                        debounced;
-
-                    readerChanged = true;
-                }
-
-                if (inhibit)
-                {
-                    ch.timer.Stop();
-                    ch.mem = false;
-                    continue;
-                }
-
-                if (!debounced)
-                {
-                    ch.timer.Stop();
-                    ch.mem = false;
-                    continue;
-                }
-
-                ch.timer.Run(
-                    true,
+            const bool debounced =
+                ch.debounce.update(
+                    raw,
                     now
                 );
 
-                if (ch.timer.Q() &&
-                    !ch.inhibit)
-                {
-                    tempAlarm = true;
 
-                    if (_engage)
-                        ch.mem = true;
-                }
+            // ----------------------------------------------------
+            // READER STATE CHANGE
+            // ----------------------------------------------------
 
-                if (ch.mem)
-                    tempMem = true;
+            if (debounced !=
+                ch.lastDebounced)
+            {
+                ch.lastDebounced =
+                    debounced;
+
+                readerChanged = true;
             }
-        }
-        else
-        {
-            for (auto& ch : channels)
+
+
+            // ----------------------------------------------------
+            // STARTUP INHIBIT
+            // ----------------------------------------------------
+
+            if (inhibit)
+            {
+                ch.timer.Stop();
                 ch.mem = false;
+
+                continue;
+            }
+
+
+            // ----------------------------------------------------
+            // INPUT NOT ACTIVE
+            // ----------------------------------------------------
+
+            if (!debounced)
+            {
+                ch.timer.Stop();
+
+                // NON cancelliamo le output memories del sensore.
+                //
+                // La memoria rtMem/h24Mem viene cancellata
+                // solo da Reset() o Disable().
+                continue;
+            }
+
+
+            // ----------------------------------------------------
+            // TIMER
+            // ----------------------------------------------------
+
+            ch.timer.Run(
+                true,
+                now
+            );
         }
 
-        alarmOut =
-            tempAlarm ||
-            tempMem;
+
+        // ========================================================
+        // POST PROCESS
+        // ========================================================
+        //
+        // QUI vengono generate le uscite correnti del sensore.
+        //
+        // RT:
+        //     uscita corrente RT
+        //
+        // H24:
+        //     uscita corrente H24 OR MASK
+        //
+        // ========================================================
+
+        outputs.rt =
+            ChannelOutput(
+                SensorChannelType::RT
+            );
+
+
+        outputs.h24 =
+            ChannelOutput(
+                SensorChannelType::H24
+            )
+            ||
+            ChannelOutput(
+                SensorChannelType::MASK
+            );
+
+
+        // ========================================================
+        // OUTPUT MEMORY
+        // ========================================================
+        //
+        // La memoria viene impostata SOLO sul fronte di salita
+        // dell'uscita e SOLO quando il sensore è engaged.
+        //
+        // RT
+        //     RT 0 -> 1 + engaged -> rtMem = 1
+        //
+        // H24
+        //     H24 0 -> 1 + engaged -> h24Mem = 1
+        //
+        // H24 comprende già MASK.
+        //
+        // ========================================================
+
+        if (_engageRT &&
+            outputs.rt)
+        {
+            outputs.rtMem = true;
+        }
+
+        if (_engageH24 &&
+            outputs.h24)
+        {
+            outputs.h24Mem = true;
+        }
+
+
+        // ========================================================
+        // RESULT
+        // ========================================================
 
         return
             readerChanged ||
-            (oldAlarmOut != alarmOut);
+            oldOutputs.rt     != outputs.rt ||
+            oldOutputs.h24    != outputs.h24 ||
+            oldOutputs.rtMem  != outputs.rtMem ||
+            oldOutputs.h24Mem != outputs.h24Mem;
     }
 };
 
@@ -466,97 +734,618 @@ public:
 // -------------------------------------------------------------
 //  ZoneManager
 // -------------------------------------------------------------
-class ZoneManager {
+class ZoneManager
+{
 public:
+
     using ZoneName = std::string;
 
+
+    // ============================================================
+    // ZONE INFO
+    // ============================================================
+    //
+    // Una zona contiene:
+    //   - i sensori associati
+    //   - area di status HMI
+    //   - stato ENABLED
+    //   - stato ENGAGED
+    //
+    // enabled  = la zona partecipa alla sicurezza
+    // engaged  = la zona consente l'ingaggio degli allarmi
+    //
+    // ============================================================
+
+    struct ZoneInfo
+    {
+        std::vector<Sensor*> sensors;
+
+        int statusArea = -1;
+
+        bool enabled = true;
+        bool engaged = false;
+    };
+
+
+    // ============================================================
+    // REGISTRY
+    // ============================================================
+
     std::vector<Sensor*> sensors;
-    std::unordered_map<ZoneName, std::vector<Sensor*>> zones;
 
-    // Track last alarm state per channel type
-    std::unordered_map<SensorChannelType, bool> lastState;
+    std::unordered_map<
+        ZoneName,
+        ZoneInfo
+    > zones;
+
 
     // ============================================================
-    // LAST SENSOR STATE
+    // SENSOR -> ZONE
+    // ============================================================
     //
-    // Stato precedente dello stato di allarme di ogni singolo
-    // sensore per ogni tipo di canale.
+    // Un sensore può appartenere:
+    //   - ad una zona
+    //   - a nessuna zona
     //
-    // Questo evita il problema dello stato globale per tipo:
-    // se A è attivo e B entra in allarme, B genera comunque
-    // il proprio evento.
+    // La presenza nella mappa identifica l'appartenenza ad una
+    // zona. Se il sensore non è presente -> sensore unzoned.
+    //
     // ============================================================
 
-    // Track snoozed alarms per channel type
-    std::unordered_map<SensorChannelType, bool> snoozed;
+    std::unordered_map<
+        Sensor*,
+        ZoneName
+    > sensorZones;
+
+
+    // ============================================================
+    // LAST ALARM STATE PER TYPE
+    // ============================================================
+
+    std::unordered_map<
+        SensorChannelType,
+        bool
+    > lastState;
+
+
+    // ============================================================
+    // SNOOZED ALARMS PER TYPE
+    // ============================================================
+
+    std::unordered_map<
+        SensorChannelType,
+        bool
+    > snoozed;
+
+
+    // ============================================================
+    // DISPATCHER
+    // ============================================================
 
     AlarmDispatcher dispatcher;
 
 
-    // -------------------------------
-    // Registration
-    // -------------------------------
-    void AddSensor(Sensor* sensor) {
+    // ============================================================
+    // REGISTRATION
+    // ============================================================
+
+    void AddSensor(
+        Sensor* sensor)
+    {
+        if (!sensor)
+            return;
+
+        // Evita registrazioni duplicate
+        for (auto* existing : sensors)
+        {
+            if (existing == sensor)
+                return;
+        }
+
         sensors.push_back(sensor);
     }
 
-    void AddToZone(const ZoneName& zone, Sensor* sensor) {
-        zones[zone].push_back(sensor);
+
+    void AddToZone(
+        const ZoneName& zone,
+        Sensor* sensor)
+    {
+        if (!sensor)
+            return;
+
+        // Stringa vuota = sensore senza zona
+        if (zone.empty())
+            return;
+
+        // Assicura che la zona esista
+        auto& info = zones[zone];
+
+        // Evita duplicati nella zona
+        for (auto* existing : info.sensors)
+        {
+            if (existing == sensor)
+            {
+                sensorZones[sensor] = zone;
+                return;
+            }
+        }
+
+        info.sensors.push_back(sensor);
+
+        // Memorizza l'associazione inversa
+        sensorZones[sensor] = zone;
     }
 
-    const std::vector<Sensor*>& GetZone(const ZoneName& zone) const {
+
+    // ============================================================
+    // SENSOR -> ZONE QUERY
+    // ============================================================
+
+    const ZoneName* GetSensorZone(
+        const Sensor* sensor) const
+    {
+        if (!sensor)
+            return nullptr;
+
+        auto it =
+            sensorZones.find(
+                const_cast<Sensor*>(sensor)
+            );
+
+        if (it == sensorZones.end())
+            return nullptr;
+
+        return &it->second;
+    }
+
+
+    bool IsSensorZoned(
+        const Sensor* sensor) const
+    {
+        return GetSensorZone(sensor) != nullptr;
+    }
+
+
+    // ============================================================
+    // ZONE STATE QUERY
+    // ============================================================
+
+    bool IsZoneEnabled(
+        const ZoneName& zone) const
+    {
+        auto it =
+            zones.find(zone);
+
+        if (it == zones.end())
+            return false;
+
+        return it->second.enabled;
+    }
+
+
+    bool IsZoneEngaged(
+        const ZoneName& zone) const
+    {
+        auto it =
+            zones.find(zone);
+
+        if (it == zones.end())
+            return false;
+
+        return it->second.engaged;
+    }
+
+
+    // ============================================================
+    // EFFECTIVE SENSOR SECURITY STATE
+    // ============================================================
+    //
+    // enabled:
+    //
+    //   sensore unzoned:
+    //       sensor.enabled
+    //
+    //   sensore zonato:
+    //       sensor.enabled && zone.enabled
+    //
+    //
+    // engaged:
+    //
+    //   sensore unzoned:
+    //       sensor.engaged
+    //
+    //   sensore zonato:
+    //       sensor.engaged && zone.engaged
+    //
+    // ============================================================
+
+    bool IsSensorSecurityEnabled(
+        const Sensor* sensor) const
+    {
+        if (!sensor)
+            return false;
+
+        if (!sensor->IsEnabled())
+            return false;
+
+        const ZoneName* zone =
+            GetSensorZone(sensor);
+
+        // Sensore senza zona
+        if (!zone)
+            return true;
+
+        // Sensore appartenente ad una zona
+        return IsZoneEnabled(*zone);
+    }
+
+
+    bool IsSensorSecurityEngaged(
+        const Sensor* sensor,
+        SensorChannelType type) const
+    {
+        if (!sensor)
+            return false;
+
+        bool engaged = false;
+
+        switch (type)
+        {
+            case SensorChannelType::RT:
+                engaged =
+                    sensor->IsEngagedRT();
+                break;
+
+            case SensorChannelType::H24:
+            case SensorChannelType::MASK:
+                engaged =
+                    sensor->IsEngagedH24();
+                break;
+
+            default:
+                return false;
+        }
+
+        if (!engaged)
+            return false;
+
+        const ZoneName* zone =
+            GetSensorZone(sensor);
+
+        if (!zone)
+            return true;
+
+        return IsZoneEngaged(*zone);
+    }
+
+
+    bool IsSensorSecurityAlarm(
+        const Sensor* sensor,
+        SensorChannelType type) const
+    {
+        if (!sensor)
+            return false;
+
+        if (!IsSensorSecurityEnabled(sensor))
+            return false;
+
+        if (!IsSensorSecurityEngaged(
+                sensor,
+                type))
+        {
+            return false;
+        }
+
+        const auto& outputs =
+            sensor->Outputs();
+
+        switch (type)
+        {
+            case SensorChannelType::RT:
+                return outputs.rt;
+
+            case SensorChannelType::H24:
+            case SensorChannelType::MASK:
+                return outputs.h24;
+
+            case SensorChannelType::LEN:
+                return sensor->ChannelAlarm(
+                    SensorChannelType::LEN
+                );
+
+            default:
+                return false;
+        }
+    }
+
+
+    // ============================================================
+    // ZONE STATUS AREA
+    // ============================================================
+
+    bool SetZoneStatusArea(
+        const ZoneName& zone,
+        int statusArea)
+    {
+        if (statusArea < 0)
+            return false;
+
+        auto it =
+            zones.find(zone);
+
+        if (it == zones.end())
+            return false;
+
+        it->second.statusArea =
+            statusArea;
+
+        return true;
+    }
+
+
+    int GetZoneStatusArea(
+        const ZoneName& zone) const
+    {
+        auto it =
+            zones.find(zone);
+
+        if (it == zones.end())
+            return -1;
+
+        return it->second.statusArea;
+    }
+
+
+    // ============================================================
+    // GET ZONE
+    // ============================================================
+
+    const std::vector<Sensor*>& GetZone(
+        const ZoneName& zone) const
+    {
         static const std::vector<Sensor*> empty;
-        auto it = zones.find(zone);
-        return (it != zones.end()) ? it->second : empty;
+
+        auto it =
+            zones.find(zone);
+
+        if (it == zones.end())
+            return empty;
+
+        return it->second.sensors;
     }
 
 
-    // -------------------------------
-    // Alarm Queries
-    // -------------------------------
-    bool ZoneAlarm(const ZoneName& zone) const {
-        for (auto* s : GetZone(zone))
-            if (s->alarmOut)
-                return true;
+    // ============================================================
+    // ENABLE / DISABLE ZONE
+    // ============================================================
+
+    bool EnableZone(
+        const ZoneName& zone,
+        bool mode)
+    {
+        auto it =
+            zones.find(zone);
+
+        if (it == zones.end())
+            return false;
+
+        it->second.enabled =
+            mode;
+
+        return true;
+    }
+
+
+    void EnableAll(
+        bool mode)
+    {
+        for (auto& [zoneName, zoneInfo] : zones)
+        {
+            (void)zoneName;
+
+            zoneInfo.enabled =
+                mode;
+        }
+    }
+
+
+    // ============================================================
+    // ENGAGE / DISENGAGE ZONE
+    // ============================================================
+
+    bool EngageZone(
+        const ZoneName& zone,
+        bool mode)
+    {
+        auto it =
+            zones.find(zone);
+
+        if (it == zones.end())
+            return false;
+
+        it->second.engaged =
+            mode;
+
+        return true;
+    }
+
+
+    void EngageAll(
+        bool mode)
+    {
+        for (auto& [zoneName, zoneInfo] : zones)
+        {
+            (void)zoneName;
+
+            zoneInfo.engaged =
+                mode;
+        }
+    }
+
+
+    // ============================================================
+    // ALARM QUERIES
+    // ============================================================
+
+    bool ZoneAlarm(
+        const ZoneName& zone) const
+    {
+        auto itZone =
+            zones.find(zone);
+
+        if (itZone == zones.end())
+            return false;
+
+        if (!itZone->second.enabled)
+            return false;
+
+        for (auto* sensor : itZone->second.sensors)
+        {
+            if (!sensor)
+                continue;
+
+            if (!sensor->IsEnabled())
+                continue;
+
+            if (!sensor->Outputs().rt &&
+                !sensor->Outputs().h24)
+            {
+                continue;
+            }
+
+            return true;
+        }
+
         return false;
     }
 
-    bool AnyAlarm() const {
-        for (auto* s : sensors)
-            if (s->alarmOut)
-                return true;
+
+    bool AnyAlarm() const
+    {
+        for (auto* sensor : sensors)
+        {
+            if (!sensor)
+                continue;
+
+            if (!IsSensorSecurityEnabled(sensor))
+                continue;
+
+            if (!sensor->Outputs().rt &&
+                !sensor->Outputs().h24)
+            {
+                continue;
+            }
+
+            return true;
+        }
+
         return false;
     }
 
-    bool ZoneAlarmByType(const ZoneName& zone, SensorChannelType type) const {
-        for (auto* s : GetZone(zone))
-            if (s->ChannelAlarm(type))
+
+    bool ZoneAlarmByType(
+        const ZoneName& zone,
+        SensorChannelType type) const
+    {
+        auto itZone =
+            zones.find(zone);
+
+        if (itZone == zones.end())
+            return false;
+
+        if (!itZone->second.enabled)
+            return false;
+
+        for (auto* sensor : itZone->second.sensors)
+        {
+            if (!sensor)
+                continue;
+
+            if (!sensor->IsEnabled())
+                continue;
+
+            const auto& out =
+                sensor->Outputs();
+
+            bool active = false;
+
+            switch (type)
+            {
+                case SensorChannelType::RT:
+                    active = out.rt;
+                    break;
+
+                case SensorChannelType::H24:
+                    active = out.h24;
+                    break;
+
+                default:
+                    active = sensor->ChannelAlarm(type);
+                    break;
+            }
+
+            if (active)
                 return true;
+        }
+
         return false;
     }
 
-    bool AnyAlarmByType(SensorChannelType type) const {
-        for (auto* s : sensors)
-            if (s->ChannelAlarm(type))
-                return true;
+
+    bool AnyAlarmByType(
+        SensorChannelType type) const
+    {
+        for (auto* sensor : sensors)
+        {
+            if (!sensor)
+                continue;
+
+            if (!IsSensorSecurityAlarm(
+                    sensor,
+                    type))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
         return false;
     }
 
-    std::vector<Sensor*> SensorsInAlarm(SensorChannelType type) const {
+
+    std::vector<Sensor*> SensorsInAlarm(
+        SensorChannelType type) const
+    {
         std::vector<Sensor*> out;
-        for (auto* s : sensors)
-            if (s->ChannelAlarm(type))
-                out.push_back(s);
+
+        for (auto* sensor : sensors)
+        {
+            if (!sensor)
+                continue;
+
+            if (!IsSensorSecurityAlarm(
+                    sensor,
+                    type))
+            {
+                continue;
+            }
+
+            out.push_back(sensor);
+        }
+
         return out;
     }
 
 
-    // -------------------------------
-    // New Alarm Detection + Snooze
-    // -------------------------------
+    // ============================================================
+    // NEW ALARM DETECTION + SNOOZE
+    // ============================================================
+
     bool ProcessAllTypes()
     {
-        static const SensorChannelType types[] = {
+        static const SensorChannelType types[] =
+        {
             SensorChannelType::RT,
             SensorChannelType::H24,
             SensorChannelType::MASK,
@@ -565,6 +1354,11 @@ public:
 
         bool changed = false;
 
+
+        // ========================================================
+        // PROCESS EVERY REGISTERED SENSOR
+        // ========================================================
+
         for (SensorChannelType type : types)
         {
             bool current = false;
@@ -572,84 +1366,145 @@ public:
             const bool isSnoozed =
                 snoozed[type];
 
-            for (auto& [zoneName, zoneSensors] : zones)
+
+            for (auto* sensor : sensors)
             {
-                for (auto* sensor : zoneSensors)
+                if (!sensor)
+                    continue;
+
+
+                SensorChannel* ch =
+                    sensor->Get(type);
+
+                if (!ch)
+                    continue;
+
+
+                // ------------------------------------------------
+                // SECURITY STATE
+                // ------------------------------------------------
+
+                const bool sensorCurrent =
+                    IsSensorSecurityAlarm(
+                        sensor,
+                        type
+                    );
+
+
+                if (sensorCurrent)
+                    current = true;
+
+
+                // ------------------------------------------------
+                // PREVIOUS STATE
+                // ------------------------------------------------
+
+                const bool sensorPrevious =
+                    ch->GetLastAlarmState();
+
+
+                if (sensorCurrent ==
+                    sensorPrevious)
                 {
-                    if (!sensor)
+                    continue;
+                }
+
+
+                // ------------------------------------------------
+                // STATE CHANGED
+                // ------------------------------------------------
+
+                changed = true;
+
+                ch->SetLastAlarmState(
+                    sensorCurrent
+                );
+
+
+                // ------------------------------------------------
+                // ZONE NAME
+                // ------------------------------------------------
+
+                const ZoneName* zone =
+                    GetSensorZone(sensor);
+
+                const ZoneName emptyZone;
+
+                const ZoneName& dispatchZone =
+                    zone
+                        ? *zone
+                        : emptyZone;
+
+
+                // ------------------------------------------------
+                // ACTIVATION
+                // ------------------------------------------------
+
+                if (sensorCurrent)
+                {
+                    if (isSnoozed)
                         continue;
-
-                    SensorChannel* ch =
-                        sensor->Get(type);
-
-                    if (!ch)
-                        continue;
-
-                    const bool sensorCurrent =
-                        sensor->ChannelAlarm(type);
-
-                    if (sensorCurrent)
-                        current = true;
-
-                    const bool sensorPrevious = ch->GetLastAlarmState();
-                        
-                    if (sensorCurrent ==
-                        sensorPrevious)
-                    {
-                        continue;
-                    }
-
-                    changed = true;
-
-                    ch->SetLastAlarmState(sensorCurrent);
-
-                    // ------------------------------------------------
-                    // ATTIVAZIONE
-                    // ------------------------------------------------
-
-                    if (sensorCurrent)
-                    {
-                        if (isSnoozed)
-                            continue;
-
-                        std::vector<Sensor*> affected;
-                        affected.push_back(sensor);
-
-                        dispatcher.Dispatch(
-                            zoneName,
-                            type,
-                            affected,
-                            true
-                        );
-
-                        continue;
-                    }
-
-                    // ------------------------------------------------
-                    // RIPRISTINO
-                    // ------------------------------------------------
 
                     std::vector<Sensor*> affected;
-                    affected.push_back(sensor);
+
+                    affected.push_back(
+                        sensor
+                    );
 
                     dispatcher.Dispatch(
-                        zoneName,
+                        dispatchZone,
                         type,
                         affected,
-                        false
+                        true
                     );
+
+                    continue;
                 }
+
+
+                // ------------------------------------------------
+                // RESTORATION
+                // ------------------------------------------------
+
+                std::vector<Sensor*> affected;
+
+                affected.push_back(
+                    sensor
+                );
+
+                dispatcher.Dispatch(
+                    dispatchZone,
+                    type,
+                    affected,
+                    false
+                );
             }
+
+
+            // ----------------------------------------------------
+            // SNOOZE RESET
+            // ----------------------------------------------------
 
             if (!current)
                 snoozed[type] = false;
+
+
+            // ----------------------------------------------------
+            // SAVE GLOBAL TYPE STATE
+            // ----------------------------------------------------
 
             lastState[type] =
                 current;
         }
 
+
         return changed;
     }
+
+
+    // ============================================================
+    // NEW ALARM BY TYPE
+    // ============================================================
 
     bool NewAlarmByType(
         SensorChannelType type)
@@ -684,84 +1539,95 @@ public:
             return false;
 
 
-        for (auto& [zoneName, zoneSensors] : zones)
+        // --------------------------------------------------------
+        // DISPATCH ALL ACTIVE EFFECTIVE SENSORS
+        // --------------------------------------------------------
+
+        for (auto* sensor : sensors)
         {
-            for (auto* sensor : zoneSensors)
+            if (!sensor)
+                continue;
+
+
+            if (!IsSensorSecurityAlarm(
+                    sensor,
+                    type))
             {
-                if (!sensor)
-                    continue;
-
-
-                if (!sensor->ChannelAlarm(type))
-                    continue;
-
-
-                std::vector<Sensor*> affected;
-
-                affected.push_back(
-                    sensor
-                );
-
-
-                dispatcher.Dispatch(
-                    zoneName,
-                    type,
-                    affected,
-                    true
-                );
+                continue;
             }
+
+
+            const ZoneName* zone =
+                GetSensorZone(sensor);
+
+            const ZoneName emptyZone;
+
+            const ZoneName& dispatchZone =
+                zone
+                    ? *zone
+                    : emptyZone;
+
+
+            std::vector<Sensor*> affected;
+
+            affected.push_back(
+                sensor
+            );
+
+
+            dispatcher.Dispatch(
+                dispatchZone,
+                type,
+                affected,
+                true
+            );
         }
 
 
         return true;
     }
 
-    void Snooze(SensorChannelType type) {
+
+    // ============================================================
+    // SNOOZE
+    // ============================================================
+
+    void Snooze(
+        SensorChannelType type)
+    {
         snoozed[type] = true;
     }
 
 
-    // -------------------------------
-    // Reset
-    // -------------------------------
-    void ResetZone(const ZoneName& zone) {
-        for (auto* s : GetZone(zone))
-            s->Reset();
-    }
+    // ============================================================
+    // RESET
+    // ============================================================
 
-    void ResetAll() {
-        for (auto* s : sensors)
-            s->Reset();
-    }
+    void ResetZone(
+        const ZoneName& zone)
+    {
+        for (auto* sensor : GetZone(zone))
+        {
+            if (!sensor)
+                continue;
 
-
-    // -------------------------------
-    // Enable / Disable
-    // -------------------------------
-    void EnableZone(const ZoneName& zone, bool mode) {
-        for (auto* s : GetZone(zone))
-            s->Enable(mode);
-    }
-
-    void EnableAll(bool mode) {
-        for (auto* s : sensors)
-            s->Enable(mode);
+            sensor->Reset();
+        }
     }
 
 
-    // -------------------------------
-    // Engage / Disengage
-    // -------------------------------
-    void EngageZone(const ZoneName& zone, bool mode) {
-        for (auto* s : GetZone(zone))
-            s->Engage(mode);
-    }
+    void ResetAll()
+    {
+        for (auto* sensor : sensors)
+        {
+            if (!sensor)
+                continue;
 
-    void EngageAll(bool mode) {
-        for (auto* s : sensors)
-            s->Engage(mode);
+            sensor->Reset();
+        }
     }
 };
+
 
 // -------------------------------------------------------------
 //  GLOBAL CONFIG
@@ -776,53 +1642,239 @@ public:
         std::initializer_list<std::function<bool()>> readers;
         SensorCategory category;
         int cmdArea = -1;
+        int statusArea = -1;
     };
 
     using ConfigType = WiredSensorConfig;
 
-    void Init(const ConfigType* cfg, size_t count) {
+private:
+    ZoneManager zones;
+    std::vector<Sensor*> sensors;
+
+    const ConfigType* config = nullptr;
+    size_t configCount = 0;
+
+    // mappe generate automaticamente
+    std::unordered_map<std::string, std::vector<Sensor*>> zoneMap;
+
+    // ---------------------------------------------------------
+    // ORDINE STABILE DELLE ZONE
+    // ---------------------------------------------------------
+
+    std::vector<std::string> zoneNames;
+
+    // =============================================================
+    // INIT COMUNE
+    // =============================================================
+
+    void initInternal(
+        const ConfigType* cfg,
+        size_t count,
+        uint32_t startupInhibitMs)
+    {
         config = cfg;
         configCount = count;
 
         sensors.reserve(count);
+        zoneNames.reserve(count);
 
-        for (size_t i = 0; i < count; i++) {
-            Sensor* s = new Sensor(cfg[i].channels);
-            sensors.push_back(s);
+        if (!cfg || count == 0)
+        {
+            LOG_DF(
+                "WiredSensors",
+                "Init: nessun sensore configurato"
+            );
 
-            // registra nel ZoneManager
-            zones.AddSensor(s);
-            zones.AddToZone(cfg[i].zone, s);
-
-            // costruzione automatica della mappa zone → sensori
-            zoneMap[cfg[i].zone].push_back(s);
+            return;
         }
 
-        LOG_DF("WiredSensors", "Init: configurati %u sensori", (unsigned)count);
+
+        // ============================================================
+        // CREATE SENSORS
+        // ============================================================
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            const auto& c =
+                cfg[i];
+
+
+            // --------------------------------------------------------
+            // SENSOR
+            // --------------------------------------------------------
+
+            Sensor* s =
+                new Sensor(c.channels);
+
+            if (startupInhibitMs != 0)
+            {
+                s->SetStartupInhibit(
+                    startupInhibitMs
+                );
+            }
+
+            sensors.push_back(s);
+
+
+            // --------------------------------------------------------
+            // ZONE MANAGER
+            // --------------------------------------------------------
+
+            zones.AddSensor(s);
+
+
+            // --------------------------------------------------------
+            // OPTIONAL ZONE
+            // --------------------------------------------------------
+            //
+            // nullptr oppure stringa vuota =
+            // sensore senza zona.
+            //
+            // In questo caso:
+            //   - non viene creato alcun oggetto zona
+            //   - non viene inserito nella zoneMap
+            //   - non viene inserito nello zoneNames
+            //
+            // Il sensore rimane comunque registrato globalmente.
+            //
+            // --------------------------------------------------------
+
+            const char* zone =
+                c.zone;
+
+
+            if (zone &&
+                zone[0] != '\0')
+            {
+                const std::string zoneName =
+                    zone;
+
+
+                // ----------------------------------------------------
+                // ZONE MANAGER
+                // ----------------------------------------------------
+
+                zones.AddToZone(
+                    zoneName,
+                    s
+                );
+
+
+                // ----------------------------------------------------
+                // ZONE MAP
+                // ----------------------------------------------------
+
+                zoneMap[zoneName].push_back(
+                    s
+                );
+
+
+                // ----------------------------------------------------
+                // STABLE ZONE INDEX
+                // ----------------------------------------------------
+
+                if (std::find(
+                        zoneNames.begin(),
+                        zoneNames.end(),
+                        zoneName
+                    ) == zoneNames.end())
+                {
+                    zoneNames.push_back(
+                        zoneName
+                    );
+                }
+            }
+        }
+
+
+        // ============================================================
+        // INIT REPORT
+        // ============================================================
+
+        if (startupInhibitMs != 0)
+        {
+            LOG_DF(
+                "WiredSensors",
+                "Init: configurati %u sensori "
+                "(startup inhibit=%u ms)",
+                (unsigned)count,
+                (unsigned)startupInhibitMs
+            );
+        }
+        else
+        {
+            LOG_DF(
+                "WiredSensors",
+                "Init: configurati %u sensori",
+                (unsigned)count
+            );
+        }
+
+
+        // ============================================================
+        // OPTIONAL DIAGNOSTIC
+        // ============================================================
+
+        size_t zonedSensors = 0;
+        size_t unzonedSensors = 0;
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            const auto& c =
+                cfg[i];
+
+            if (c.zone &&
+                c.zone[0] != '\0')
+            {
+                ++zonedSensors;
+            }
+            else
+            {
+                ++unzonedSensors;
+            }
+        }
+
+        LOG_DF(
+            "WiredSensors",
+            "Init: zoned=%u | unzoned=%u | zones=%u",
+            (unsigned)zonedSensors,
+            (unsigned)unzonedSensors,
+            (unsigned)zoneNames.size()
+        );
     }
 
-    void Init(const ConfigType* cfg, size_t count, uint32_t startupInhibitMs) {
-        config = cfg;
-        configCount = count;
 
-        sensors.reserve(count);
+public:
+     // =============================================================
+    // INIT STANDARD
+    // =============================================================
 
-        for (size_t i = 0; i < count; i++) {
-            Sensor* s = new Sensor(cfg[i].channels);
+    void Init(
+        const ConfigType* cfg,
+        size_t count)
+    {
+        initInternal(
+            cfg,
+            count,
+            0
+        );
+    }
 
-            // 🔥 applica startup inhibit globale
-            s->SetStartupInhibit(startupInhibitMs);
 
-            sensors.push_back(s);
+    // =============================================================
+    // INIT CON STARTUP INHIBIT
+    // =============================================================
 
-            zones.AddSensor(s);
-            zones.AddToZone(cfg[i].zone, s);
-            zoneMap[cfg[i].zone].push_back(s);
-        }
-
-        LOG_DF("WiredSensors",
-            "Init: configurati %u sensori (startup inhibit=%u ms)",
-            (unsigned)count, startupInhibitMs);
+    void Init(
+        const ConfigType* cfg,
+        size_t count,
+        uint32_t startupInhibitMs)
+    {
+        initInternal(
+            cfg,
+            count,
+            startupInhibitMs
+        );
     }
 
     // --- Aggregate state computed from wired sensors
@@ -837,15 +1889,24 @@ public:
         bool tamper = false;
     };
 
-    bool Process(uint32_t now)
+    struct ProcessResult
     {
         bool changed = false;
+        bool zoneChanged = false;
+    };
+
+        ProcessResult Process(uint32_t now)
+    {
+        ProcessResult result;
 
         const ConfigType* cfg =
             config;
 
         const size_t count =
             configCount;
+
+        if (!cfg || count == 0)
+            return result;
 
         for (size_t i = 0; i < count; ++i)
         {
@@ -873,10 +1934,20 @@ public:
                 continue;
 
             if (s->Run(tmp, n, now))
-                changed = true;
+            {
+                result.changed = true;
+
+                // Se il sensore appartiene a una zona,
+                // anche la zona deve essere considerata variata.
+                if (cfg[i].zone &&
+                    cfg[i].zone[0] != '\0')
+                {
+                    result.zoneChanged = true;
+                }
+            }
         }
 
-        return changed;
+        return result;
     }
 
     // --- Compute aggregated state from current sensors
@@ -884,83 +1955,268 @@ public:
     {
         AggregateState st;
 
-        const ConfigType* cfg = config;
-        const size_t count = configCount;
+        const ConfigType* cfg =
+            config;
+
+        const size_t count =
+            configCount;
+
+
+        // ============================================================
+        // VALIDATION
+        // ============================================================
 
         if (!cfg || count == 0)
             return st;
 
+
+        // ============================================================
+        // SENSOR LOOP
+        // ============================================================
+
         for (size_t i = 0; i < count; ++i)
         {
-            const ConfigType& c = cfg[i];
-            Sensor* s = sensors[i];
+            const ConfigType& c =
+                cfg[i];
+
+            Sensor* s =
+                sensors[i];
+
 
             if (!s)
                 continue;
 
+
+            // ========================================================
+            // SENSOR ENABLE
+            // ========================================================
+
+            if (!s->IsEnabled())
+                continue;
+
+
+            // ========================================================
+            // OPTIONAL ZONE LOOKUP
+            // ========================================================
+            //
+            // Il sensore può essere:
+            //
+            //   - associato ad una zona
+            //   - senza zona
+            //
+            // Un sensore senza zona non viene escluso.
+            //
+            // ========================================================
+
+            const ZoneManager::ZoneInfo* zoneInfo =
+                nullptr;
+
+
+            if (c.zone &&
+                c.zone[0] != '\0')
+            {
+                auto itZone =
+                    zones.zones.find(
+                        c.zone
+                    );
+
+                if (itZone == zones.zones.end())
+                    continue;
+
+
+                zoneInfo =
+                    &itZone->second;
+            }
+
+
+            // ========================================================
+            // EFFECTIVE SECURITY ENABLE
+            // ========================================================
+            //
+            // Sensore zonato:
+            //
+            //   sensor.enabled && zone.enabled
+            //
+            // Sensore unzoned:
+            //
+            //   sensor.enabled
+            //
+            // ========================================================
+
+            if (zoneInfo &&
+                !zoneInfo->enabled)
+            {
+                continue;
+            }
+
+
+            // ========================================================
+            // NOTE
+            // ========================================================
+            //
+            // NON controlliamo più:
+            //
+            //   s->IsEngaged()
+            //   zoneInfo->engaged
+            //
+            // L'engage viene usato dal sensore per determinare
+            // quando può impostare le proprie mem:
+            //
+            //   outputs.rtMem
+            //   outputs.h24Mem
+            //
+            // Una volta memorizzato l'allarme, la centrale deve
+            // poterlo vedere anche se successivamente l'engage
+            // corrente cambia.
+            //
+            // ========================================================
+
+
+            // ========================================================
+            // CATEGORY
+            // ========================================================
+
             switch (c.category)
             {
+                // ====================================================
+                // PIR
+                // ====================================================
+
                 case SensorCategory::PIR:
                 {
-                    // Movimento → Intrusione
-                    if (s->ChannelAlarm(SensorChannelType::RT))
+                    // ------------------------------------------------
+                    // RT MEM
+                    //
+                    // Intrusione ordinaria memorizzata
+                    // ------------------------------------------------
+
+                    if (s->Outputs().rtMem)
+                    {
                         st.intrusion = true;
+                    }
 
-                    // Tamper PIR → Intrusione H24
-                    if (s->ChannelAlarm(SensorChannelType::H24))
+
+                    // ------------------------------------------------
+                    // H24 MEM
+                    //
+                    // H24 / MASK memorizzato
+                    // ------------------------------------------------
+
+                    if (s->Outputs().h24Mem)
+                    {
                         st.intrusionH24 = true;
+                    }
 
-                    // Anti-mask PIR → Mask
-                    if (s->ChannelAlarm(SensorChannelType::MASK))
+
+                    // ------------------------------------------------
+                    // MASK
+                    //
+                    // Stato corrente anti-mask
+                    // ------------------------------------------------
+
+                    if (s->ChannelAlarm(
+                            SensorChannelType::MASK))
+                    {
                         st.mask = true;
+                    }
 
                     break;
                 }
+
+
+                // ====================================================
+                // WINDOW
+                // ====================================================
 
                 case SensorCategory::WINDOW:
                 {
-                    if (s->alarmOut)
+                    if (s->Outputs().rt ||
+                        s->Outputs().h24)
+                    {
                         st.windowsOpen = true;
+                    }
 
                     break;
                 }
+
+
+                // ====================================================
+                // DOOR
+                // ====================================================
 
                 case SensorCategory::DOOR:
                 {
-                    if (s->alarmOut)
+                    if (s->Outputs().rt ||
+                        s->Outputs().h24)
+                    {
                         st.doorsOpen = true;
+                    }
 
                     break;
                 }
+
+
+                // ====================================================
+                // FLOOD
+                // ====================================================
 
                 case SensorCategory::FLOOD:
                 {
-                    if (s->alarmOut)
+                    if (s->Outputs().rt ||
+                        s->Outputs().h24)
+                    {
                         st.flood = true;
+                    }
 
                     break;
                 }
+
+
+                // ====================================================
+                // SMOKE
+                // ====================================================
 
                 case SensorCategory::SMOKE:
                 {
-                    if (s->alarmOut)
+                    if (s->Outputs().rt ||
+                        s->Outputs().h24)
+                    {
                         st.smoke = true;
+                    }
 
                     break;
                 }
+
+
+                // ====================================================
+                // TAMPER
+                // ====================================================
 
                 case SensorCategory::TAMPER:
                 {
-                    if (s->alarmOut)
+                    if (s->Outputs().rt ||
+                        s->Outputs().h24)
+                    {
                         st.tamper = true;
+                    }
 
                     break;
                 }
+
+
+                // ====================================================
+                // UNKNOWN / NOT HANDLED
+                // ====================================================
 
                 default:
                     break;
             }
         }
+
+
+        // ============================================================
+        // RETURN EFFECTIVE AGGREGATE
+        // ============================================================
 
         return st;
     }
@@ -981,8 +2237,43 @@ public:
         return v.empty() ? nullptr : v[0];
     }
 
+    const char* GetZoneName(size_t index) const
+    {
+        if (index >= zoneNames.size())
+            return nullptr;
+
+        return zoneNames[index].c_str();
+    }
+
+    int GetZoneIndex(const char* zone) const
+    {
+        if (!zone)
+            return -1;
+
+        for (size_t i = 0; i < zoneNames.size(); ++i)
+        {
+            if (zoneNames[i] == zone)
+                return static_cast<int>(i);
+        }
+
+        return -1;
+    }
+
+    size_t GetZoneCount() const
+    {
+        return zoneNames.size();
+    }
+
     // accesso al ZoneManager interno
-    ZoneManager& Zones() { return zones; }
+    ZoneManager& Zones()
+    {
+        return zones;
+    }
+
+    const ZoneManager& Zones() const
+    {
+        return zones;
+    }
 
     // accesso diretto ai sensori
     Sensor* GetSensor(size_t i) { return sensors[i]; }
@@ -991,134 +2282,350 @@ public:
 
     size_t Count() const { return configCount; }
     const ConfigType* GetConfig() const { return config; }
-
-private:
-    ZoneManager zones;
-    std::vector<Sensor*> sensors;
-
-    const ConfigType* config = nullptr;
-    size_t configCount = 0;
-
-    // mappe generate automaticamente
-    std::unordered_map<std::string, std::vector<Sensor*>> zoneMap;
 };
 
-class AlarmBitmaskManager {
+class AlarmBitmaskManager
+{
 public:
-    using AlarmCallback = void (*)(uint64_t newMask,
-                                   uint64_t currentMask,
-                                   uint64_t memMask,
-                                   size_t bitIndex,
-                                   size_t sensorIndex,
-                                   SensorChannelType type);
 
-    struct SignalInfo {
+    using AlarmCallback = void (*)(
+        uint64_t newMask,
+        uint64_t currentMask,
+        uint64_t memMask,
+        size_t bitIndex,
+        size_t sensorIndex,
+        SensorChannelType type
+    );
+
+
+    struct SignalInfo
+    {
         size_t sensorIndex;
         SensorChannelType type;
     };
 
-    // --- BITMASKS ---
-    uint64_t currentMask = 0;
-    uint64_t memMask     = 0;
-    uint64_t newMask     = 0;
+
+    // =========================================================
+    // MASK
+    // =========================================================
+
+    uint64_t currentMask  = 0;
+    uint64_t previousMask = 0;
+    uint64_t memMask      = 0;
+    uint64_t newMask      = 0;
+
 
     bool engage = false;
 
-    // --- CALLBACK ---
+
+    // =========================================================
+    // CALLBACK
+    // =========================================================
+
     AlarmCallback onNewAlarm = nullptr;
 
-    // --- MAPPATURA BIT → SEGNALE ---
+
+    // =========================================================
+    // MAP
+    // bit -> sensor + channel
+    // =========================================================
+
     std::vector<SignalInfo> map;
 
-    // ---------------------------------------------------------
-    // INIT: costruisce la mappa bitIndex → (sensore, canale)
-    // ---------------------------------------------------------
-    void BuildMap(WiredSensorsManager& ws) {
+
+    // =========================================================
+    // BUILD MAP
+    // =========================================================
+
+    bool BuildMap(WiredSensorsManager& ws)
+    {
         map.clear();
 
-        for (size_t i = 0; i < ws.Count(); i++) {
-            Sensor* s = ws.GetSensor(i);
-
-            for (auto& ch : s->channels) {
-                map.push_back({ i, ch.type });
-            }
-        }
-    }
-
-    // ---------------------------------------------------------
-    // ENGAGE
-    // ---------------------------------------------------------
-    void SetEngage(bool mode) {
-        engage = mode;
-    }
-
-    // ---------------------------------------------------------
-    // RESET
-    // ---------------------------------------------------------
-    void ResetMemory() {
-        memMask = 0;
-        Update();   // ricalcola newMask
-    }
-
-    // ---------------------------------------------------------
-    // CALCOLO BITMASK ATTUALE
-    // ---------------------------------------------------------
-    void ComputeCurrent(WiredSensorsManager& ws)
-    {
-        currentMask = 0;
+        currentMask  = 0;
+        previousMask = 0;
+        memMask      = 0;
+        newMask      = 0;
 
         size_t bit = 0;
 
-        for (size_t i = 0; i < ws.Count(); ++i)
+        for (size_t sensorIndex = 0;
+            sensorIndex < ws.Count();
+            ++sensorIndex)
         {
             Sensor* s =
-                ws.GetSensor(i);
+                ws.GetSensor(sensorIndex);
 
             if (!s)
                 continue;
 
-            for (auto& ch : s->channels)
+            for (const auto& ch : s->channels)
             {
-                if (ch.IsActive())
+                if (bit >= 64)
                 {
-                    currentMask |=
-                        (uint64_t(1) << bit);
+                    LOG_EF(
+                        "AlarmBitmaskManager",
+                        "Too many alarm channels: maximum is 64"
+                    );
+
+                    map.clear();
+
+                    return false;
                 }
+
+                map.push_back({
+                    sensorIndex,
+                    ch.type
+                });
 
                 ++bit;
             }
         }
 
-        Update();
+        return true;
     }
 
-    // ---------------------------------------------------------
-    // CALLBACK + MEMORIZZAZIONE
-    // ---------------------------------------------------------
-    void Update() {
-        if (engage) {
-            memMask |= currentMask;
+
+    // =========================================================
+    // ENGAGE
+    // =========================================================
+
+    void SetEngage(bool mode)
+    {
+        engage = mode;
+    }
+
+
+    bool IsEngaged() const
+    {
+        return engage;
+    }
+
+
+    // =========================================================
+    // RESET MEMORY
+    // =========================================================
+
+    void ResetMemory()
+    {
+        memMask = 0;
+    }
+
+    // =========================================================
+    // RESET SELECTED MEMORY
+    //
+    // Cancella dalla memoria solo i bit specificati.
+    //
+    // Gli altri allarmi memorizzati rimangono invariati.
+    // =========================================================
+
+    void ResetMemory(
+        uint64_t mask)
+    {
+        memMask &=
+            ~mask;
+    }
+    
+    // =========================================================
+    // CURRENT MASK
+    // =========================================================
+
+    bool ComputeCurrent(
+        WiredSensorsManager& ws)
+    {
+        const uint64_t oldCurrent =
+            currentMask;
+
+        currentMask = 0;
+
+
+        // -----------------------------------------------------
+        // CURRENT MASK
+        // -----------------------------------------------------
+        //
+        // Il canale entra nel CURRENT MASK solo se è
+        // effettivamente attivo nella SECURITY LOGIC:
+        //
+        //   Sensor ENABLED
+        //   +
+        //   Zone ENABLED     (se il sensore è zonato)
+        //   +
+        //   Sensor ENGAGED
+        //   +
+        //   Zone ENGAGED     (se il sensore è zonato)
+        //   +
+        //   ChannelAlarm()
+        //
+        // Il mapping bit -> sensor/channel resta invariato.
+        // -----------------------------------------------------
+
+        auto& zoneManager =
+            ws.Zones();
+
+
+        for (size_t bit = 0;
+            bit < map.size();
+            ++bit)
+        {
+            const auto& info =
+                map[bit];
+
+
+            Sensor* s =
+                ws.GetSensor(
+                    info.sensorIndex
+                );
+
+
+            if (!s)
+                continue;
+
+
+            if (!zoneManager.IsSensorSecurityAlarm(
+                    s,
+                    info.type))
+            {
+                continue;
+            }
+
+
+            currentMask |=
+                (uint64_t(1) << bit);
         }
 
-        uint64_t oldNewMask = newMask;
-        newMask = currentMask & ~memMask;
 
-        // callback per ogni nuovo bit
-        if (newMask != 0 && newMask != oldNewMask) {
-            if (onNewAlarm) {
-                for (size_t bit = 0; bit < map.size(); bit++) {
-                    if (newMask & (uint64_t(1) << bit)) {
-                        auto& info = map[bit];
-                        onNewAlarm(newMask, currentMask, memMask,
-                                   bit, info.sensorIndex, info.type);
-                    }
-                }
+        // -----------------------------------------------------
+        // NEW = fronte di salita
+        // -----------------------------------------------------
+
+        newMask =
+            currentMask &
+            ~previousMask;
+
+
+        // -----------------------------------------------------
+        // MEMORY
+        // -----------------------------------------------------
+
+        if (engage)
+        {
+            memMask |=
+                newMask;
+        }
+
+
+        // -----------------------------------------------------
+        // SAVE CURRENT
+        // -----------------------------------------------------
+
+        previousMask =
+            currentMask;
+
+
+        // -----------------------------------------------------
+        // CALLBACK
+        // -----------------------------------------------------
+
+        if (newMask != 0 && onNewAlarm)
+        {
+            for (size_t bitIndex = 0;
+                bitIndex < map.size();
+                ++bitIndex)
+            {
+                const uint64_t bitMask =
+                    (uint64_t(1) << bitIndex);
+
+
+                if (!(newMask & bitMask))
+                    continue;
+
+
+                const auto& info =
+                    map[bitIndex];
+
+
+                onNewAlarm(
+                    newMask,
+                    currentMask,
+                    memMask,
+                    bitIndex,
+                    info.sensorIndex,
+                    info.type
+                );
             }
         }
+
+
+        return
+            oldCurrent != currentMask;
     }
 
-    void SetCallback(AlarmCallback cb) {
+
+    // =========================================================
+    // CALLBACK
+    // =========================================================
+
+    void SetCallback(
+        AlarmCallback cb)
+    {
         onNewAlarm = cb;
+    }
+
+    void ReportMap(
+        const WiredSensorsManager& ws) const
+    {
+        LOG_IF(
+            "AlarmBitmaskManager",
+            "===== ALARM BITMAP ====="
+        );
+
+        for (size_t bit = 0;
+            bit < map.size();
+            ++bit)
+        {
+            const auto& info =
+                map[bit];
+
+            const auto* cfg =
+                ws.GetConfig();
+
+            const char* name = "?";
+            const char* zone = "?";
+
+            if (cfg &&
+                info.sensorIndex < ws.Count())
+            {
+                name =
+                    cfg[info.sensorIndex].name
+                        ? cfg[info.sensorIndex].name
+                        : "?";
+
+                zone =
+                    cfg[info.sensorIndex].zone
+                        ? cfg[info.sensorIndex].zone
+                        : "?";
+            }
+
+            LOG_IF(
+                "AlarmBitmaskManager",
+                "bit=%u sensor=%u name=%s zone=%s type=%u",
+                (unsigned)bit,
+                (unsigned)info.sensorIndex,
+                name,
+                zone,
+                (unsigned)info.type
+            );
+        }
+
+        LOG_IF(
+            "AlarmBitmaskManager",
+            "Total bits: %u",
+            (unsigned)map.size()
+        );
+
+        LOG_IF(
+            "AlarmBitmaskManager",
+            "========================"
+        );
     }
 };
 

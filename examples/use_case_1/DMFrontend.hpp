@@ -855,17 +855,155 @@ private:
     // ============================================================
     // SECURITY EVENT
     // ============================================================
-
+   
     static void SecurityEventCallback(
         const EventManager::Event& event)
     {
-        (void)event;
+        if (!Manager)
+            return;
 
-        // Il SecurityEngine genera gli eventi security e li pubblica
-        // sull'EventManager usando securitySource.
+        if (!config.security.enabled)
+            return;
+
+        const auto& security =
+            config.security;
+
+        const unsigned long now =
+            Manager->getTimeManager().nowMs();
+
+        // --------------------------------------------------------
+        // SECURITY PANEL COMMAND
+        // --------------------------------------------------------
+
+        if (security.panelCommandArea >= 0 &&
+            event.area == security.panelCommandArea)
+        {
+            SecurityEngine::ApplyCommand(
+                event.area,
+                event.value,
+                now
+            );
+
+            return;
+        }
+
+        // --------------------------------------------------------
+        // SECURITY SENSOR COMMAND
+        // --------------------------------------------------------
+
+        if (security.sensors)
+        {
+            for (size_t i = 0;
+                i < security.count;
+                ++i)
+            {
+                if (security.sensors[i].cmdArea < 0)
+                    continue;
+
+                if (event.area !=
+                    security.sensors[i].cmdArea)
+                {
+                    continue;
+                }
+
+                SecurityEngine::ApplyCommand(
+                    event.area,
+                    event.value,
+                    now
+                );
+
+                return;
+            }
+        }
+    }
+
+    // ============================================================
+    // SECURITY ALARM CALLBACK
+    //
+    // Riceve lo stato dell'allarme dal SecurityEngine.
+    //
+    // NON gestisce il protocollo EventManager.
+    // NON modifica SecurityOrchestrator.
+    //
+    // Decide esclusivamente cosa fare con l'uscita fisica.
+    //
+    // ============================================================
+
+    static void SecurityAlarmCallback(
+        bool engaged,
+        bool active,
+        uint64_t currentAlarmMask,
+        uint64_t effectiveAlarmMask)
+    {
+        if (!Manager)
+            return;
+
+
+        if (!config.security.enabled)
+            return;
+
+
+        LOG_IF(
+            "SECURITY",
+            "ALARM CALLBACK "
+            "engaged=%d "
+            "active=%d "
+            "currentMask=0x%016llX "
+            "effectiveMask=0x%016llX",
+            engaged ? 1 : 0,
+            active ? 1 : 0,
+            static_cast<unsigned long long>(
+                currentAlarmMask
+            ),
+            static_cast<unsigned long long>(
+                effectiveAlarmMask
+            )
+        );
+
+
+        // ========================================================
+        // CENTRALE DISARMATA
         //
-        // Questo callback non deve ripubblicare l'evento, altrimenti
-        // si rischia un loop.
+        // Nessuna uscita di allarme.
+        // ========================================================
+
+        if (!engaged)
+        {
+            // TODO:
+            // relay alarm OFF
+            // relay sirena OFF
+
+            return;
+        }
+
+
+        // ========================================================
+        // CENTRALE ARMATA + ALLARME EFFETTIVO
+        // ========================================================
+
+        if (active)
+        {
+            // TODO:
+            // relay alarm ON
+            // relay sirena ON
+
+            return;
+        }
+
+
+        // ========================================================
+        // CENTRALE ARMATA + NESSUN ALLARME EFFETTIVO
+        //
+        // Può essere:
+        //
+        // - nessun allarme
+        // - allarme silenziato
+        //
+        // ========================================================
+
+        // TODO:
+        // relay alarm OFF
+        // relay sirena OFF
     }
 
     // ============================================================
@@ -1663,6 +1801,11 @@ public:
                     config.security,
                     (uint8_t)securitySource
                 );
+
+                // ============================================================ 
+                // SECURITY ALARM CALLBACK 
+                // ============================================================ 
+                SecurityEngine::setAlarmCallback( SecurityAlarmCallback );
             }
              
         #endif

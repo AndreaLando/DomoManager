@@ -2656,6 +2656,51 @@ public:
 class SecurityEngine
 {
 private:
+
+    // ============================================================
+    // LAST ALARM CALLBACK STATE
+    //
+    // La callback viene notificata solo quando cambia lo stato
+    // security osservabile dal frontend.
+    //
+    // ============================================================
+
+    static inline bool alarmCallbackStateValid = false;
+
+    static inline bool lastAlarmEngaged = false;
+    static inline bool lastAlarmActive = false;
+
+    static inline uint64_t lastCurrentAlarmMask = 0;
+    static inline uint64_t lastEffectiveAlarmMask = 0;
+
+
+    // ============================================================
+    // SECURITY ALARM CALLBACK
+    //
+    // Callback verso il frontend.
+    //
+    // SecurityEngine NON conosce relay, sirene o altre uscite.
+    //
+    // Il frontend riceve:
+    //
+    // engaged           = centrale armata
+    // active            = esiste un allarme effettivo
+    // currentAlarmMask  = allarmi attualmente presenti
+    // effectiveAlarmMask= allarmi non silenziati
+    //
+    // ============================================================
+
+    using AlarmCallback =
+        void (*)(
+            bool engaged,
+            bool active,
+            uint64_t currentAlarmMask,
+            uint64_t effectiveAlarmMask
+        );
+
+    static inline AlarmCallback alarmCallback = nullptr;
+
+    static inline bool hmiInitialSyncPending = true;
     static inline bool reportOnChange = false;
 
     // ============================================================
@@ -2697,10 +2742,6 @@ private:
 
     static inline uint8_t changeFlags =
         SecurityOrchestrator::CHANGE_NONE;
-
-    static inline long lastPublishedStatus = 0;
-    static inline int lastPublishedStatusArea = -1;
-    static inline bool statusPublished = false;
 
     // ============================================================
     // SECURITY EVENT ENCODER
@@ -2869,75 +2910,630 @@ private:
         );
     }
 
-    // ============================================================
-    // STATUS
-    //
-    // SecurityOrchestrator -> DM statusArea
-    //
-    // Lo stato pubblicato è il bitmask aggregato del sistema
-    // security.
-    // ============================================================
 
-    static void PublishStatus(
-        unsigned long now)
+    static void UpdateSecurityHmi(bool force = false)
     {
-        (void)now;
-
-        if (!initialized)
+        if (!initialized || !config || !manager)
             return;
 
-        if (!manager)
-            return;
 
-        if (!config)
-            return;
+        const uint8_t changes =
+            changeFlags;
 
-        const int statusArea =
-            config->statusArea;
 
-        if (statusArea < 0)
-            return;
-
-        const long status =
-            SecurityOrchestrator::
-                getSystem()
-                .getBitmask();
-
-        // --------------------------------------------------------
-        // Nessuna variazione reale dello status:
-        // non serve ripubblicarlo.
-        // --------------------------------------------------------
-
-        if (statusPublished &&
-            lastPublishedStatus == status &&
-            lastPublishedStatusArea == statusArea)
+        if (changes == SecurityOrchestrator::CHANGE_NONE &&
+            !force)
         {
             return;
         }
 
-        manager->forceInternalEvent(
-            statusArea,
-            status
-        );
 
-        lastPublishedStatus =
-            status;
+        auto& buffer =
+            manager->getBuffer();
 
-        lastPublishedStatusArea =
-            statusArea;
+        auto& hmi =
+            SecurityHmiInterface::instance();
 
-        statusPublished = true;
 
-        LOG_DF(
-            "SECURITY",
-            "Status area=%d value=%ld",
-            statusArea,
-            status
+        // ============================================================
+        // SENSORI
+        // ============================================================
+        //
+        // SENSOR STATUS AREA
+        //
+        // bit  0 = RT active
+        // bit  1 = RT alarm
+        //
+        // bit  2 = H24 active
+        // bit  3 = H24 alarm
+        //
+        // bit  4 = LEN active
+        // bit  5 = LEN alarm
+        //
+        // bit  6 = MASK active
+        // bit  7 = MASK alarm
+        //
+        // bit  8 = RT inhibit
+        // bit  9 = H24 inhibit
+        // bit 10 = LEN inhibit
+        // bit 11 = MASK inhibit
+        //
+        // bit 12 = alarmOut
+        //
+        // bit 13 = ESCLUSO
+        //          true  = sensor disabled
+        //          false = sensor enabled
+        //
+        // bit 14 = RT_MEM
+        // bit 15 = H24_MEM
+        //
+        // ============================================================
+
+        if (force ||
+            (changes &
+            (SecurityOrchestrator::CHANGE_SENSOR |
+            SecurityOrchestrator::CHANGE_COMMAND)))
+        {
+            auto& ws =
+                SecurityOrchestrator::getWiredSensors();
+
+            const auto* cfg =
+                ws.GetConfig();
+
+
+            if (cfg)
+            {
+                for (size_t i = 0;
+                    i < ws.Count();
+                    ++i)
+                {
+                    const int area =
+                        cfg[i].statusArea;
+
+
+                    if (area < 0)
+                        continue;
+
+
+                    SecurityHmiInterface::SensorState state;
+
+
+                    if (!hmi.getSensorState(
+                            i,
+                            state))
+                    {
+                        continue;
+                    }
+
+
+                    long value = 0;
+
+
+                    // ------------------------------------------------
+                    // CHANNELS
+                    // ------------------------------------------------
+
+                    for (size_t b = 0;
+                        b < 4;
+                        ++b)
+                    {
+                        bitWrite(
+                            value,
+                            b,
+                            state.active[b]
+                        );
+
+
+                        bitWrite(
+                            value,
+                            4 + b,
+                            state.alarm[b]
+                        );
+
+
+                        bitWrite(
+                            value,
+                            8 + b,
+                            state.inhibit[b]
+                        );
+                    }
+
+
+                    // ------------------------------------------------
+                    // SENSOR ALARM OUTPUT
+                    // ------------------------------------------------
+
+                    bitWrite(
+                        value,
+                        12,
+                        state.alarmOut
+                    );
+
+
+                    // ------------------------------------------------
+                    // SENSOR EXCLUDED
+                    // ------------------------------------------------
+
+                    bitWrite(
+                        value,
+                        13,
+                        !state.enabled
+                    );
+
+
+                    // ------------------------------------------------
+                    // SENSOR MEMORY
+                    // ------------------------------------------------
+
+                    bitWrite(
+                        value,
+                        14,
+                        state.rtMem
+                    );
+
+
+                    bitWrite(
+                        value,
+                        15,
+                        state.h24Mem
+                    );
+
+
+                    // ------------------------------------------------
+                    // WRITE
+                    // ------------------------------------------------
+
+                    if (force ||
+                        buffer.getValueFast(area) != value)
+                    {
+                        manager->forceInternalEvent(
+                            area,
+                            value
+                        );
+                    }
+                }
+            }
+        }
+
+
+        // ============================================================
+        // ZONE
+        // ============================================================
+        //
+        // bit 0 = ALLARME RT
+        // bit 1 = ALLARME H24
+        // bit 2 = ANOMALIA
+        // bit 3 = ESCLUSA
+        // bit 4 = MEM RT
+        // bit 5 = MEM H24
+        //
+        // ============================================================
+
+        if (force ||
+            (changes &
+            SecurityOrchestrator::CHANGE_ZONE))
+        {
+            auto& ws =
+                SecurityOrchestrator::getWiredSensors();
+
+            auto& zones =
+                ws.Zones();
+
+
+            for (size_t i = 0;
+                i < ws.GetZoneCount();
+                ++i)
+            {
+                const char* zoneName =
+                    ws.GetZoneName(i);
+
+
+                if (!zoneName)
+                    continue;
+
+
+                const int area =
+                    zones.GetZoneStatusArea(
+                        zoneName
+                    );
+
+
+                if (area < 0)
+                    continue;
+
+
+                SecurityHmiInterface::ZoneState state;
+
+
+                if (!hmi.getZoneState(
+                        i,
+                        state))
+                {
+                    continue;
+                }
+
+
+                long value = 0;
+
+
+                bitWrite(
+                    value,
+                    0,
+                    state.alarm
+                );
+
+
+                bitWrite(
+                    value,
+                    1,
+                    state.alarmH24
+                );
+
+
+                bitWrite(
+                    value,
+                    2,
+                    state.trouble
+                );
+
+
+                bitWrite(
+                    value,
+                    3,
+                    state.bypassed
+                );
+
+
+                bitWrite(
+                    value,
+                    4,
+                    state.rtMem
+                );
+
+
+                bitWrite(
+                    value,
+                    5,
+                    state.h24Mem
+                );
+
+
+                if (force ||
+                    buffer.getValueFast(area) != value)
+                {
+                    manager->forceInternalEvent(
+                        area,
+                        value
+                    );
+                }
+            }
+        }
+
+
+        // ============================================================
+        // SISTEMA / CENTRALE
+        // ============================================================
+        //
+        // STATUS AREA
+        //
+        // bit 0  ... 6  = system bitmask
+        // bit 7         = connected
+        // bit 8         = communicationFault
+        // bit 9         = channelSupervised
+        // bit 10        = ready
+        // bit 11        = globalTamper
+        // bit 12        = globalTrouble
+        //
+        // ARM STATE
+        //
+        // armState viene scritto su una seconda area dedicata.
+        //
+        // ============================================================
+
+        if (force ||
+            (changes &
+            (SecurityOrchestrator::CHANGE_SYSTEM |
+            SecurityOrchestrator::CHANGE_PANEL  |
+            SecurityOrchestrator::CHANGE_COMM   |
+            SecurityOrchestrator::CHANGE_COMMAND)))
+        {
+            SecurityHmiInterface::PanelState state;
+
+
+            if (hmi.getPanelState(
+                    state,
+                    0))
+            {
+                // ====================================================
+                // STATUS AREA
+                // ====================================================
+
+                const int statusArea =
+                    config->statusArea;
+
+
+                if (statusArea >= 0)
+                {
+                    long value =
+                        static_cast<long>(
+                            state.systemBitmask
+                        );
+
+
+                    // ------------------------------------------------
+                    // PANEL STATUS
+                    // ------------------------------------------------
+
+                    bitWrite(
+                        value,
+                        7,
+                        state.connected
+                    );
+
+
+                    bitWrite(
+                        value,
+                        8,
+                        state.communicationFault
+                    );
+
+
+                    bitWrite(
+                        value,
+                        9,
+                        state.channelSupervised
+                    );
+
+
+                    bitWrite(
+                        value,
+                        10,
+                        state.ready
+                    );
+
+
+                    bitWrite(
+                        value,
+                        11,
+                        state.globalTamper
+                    );
+
+
+                    bitWrite(
+                        value,
+                        12,
+                        state.globalTrouble
+                    );
+
+                    bitWrite(
+                        value,
+                        13,
+                        state.readyForArm
+                    );
+
+                    if (force ||
+                        buffer.getValueFast(statusArea) != value)
+                    {
+                        manager->forceInternalEvent(
+                            statusArea,
+                            value
+                        );
+                    }
+                }
+
+
+                // ====================================================
+                // ARM STATE AREA
+                // ====================================================
+                //
+                // Valore diretto:
+                //
+                // 0 = DISARMED
+                // 1 = ARMED_STAY
+                // 2 = ARMED_AWAY
+                // 3 = ARMED_NIGHT
+                // 4 = ARMED_PARTIAL
+                // 5 = NOT_READY
+                // 6 = UNKNOWN
+                //
+                // ====================================================
+
+                const int armStateArea =
+                    config->armStateArea;
+
+
+                if (armStateArea >= 0)
+                {
+                    const long armState =
+                        static_cast<long>(
+                            static_cast<uint8_t>(
+                                state.armState
+                            )
+                        );
+
+
+                    if (force ||
+                        buffer.getValueFast(armStateArea) != armState)
+                    {
+                        manager->forceInternalEvent(
+                            armStateArea,
+                            armState
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ============================================================
+    // UPDATE ALARM CALLBACK
+    //
+    // Legge lo stato corrente della centrale e degli allarmi.
+    //
+    // La callback viene chiamata solo se registrata.
+    //
+    // ============================================================
+
+
+    static void UpdateAlarmCallback()
+    {
+        if (!initialized)
+            return;
+
+        if (!alarmCallback)
+            return;
+
+
+        // ============================================================
+        // PANEL STATE
+        // ============================================================
+
+        SecurityHmiInterface::PanelState panelState;
+
+        auto& hmi =
+            SecurityHmiInterface::instance();
+
+
+        if (!hmi.getPanelState(
+                panelState,
+                0))
+        {
+            return;
+        }
+
+
+        // ============================================================
+        // ENGAGED
+        // ============================================================
+
+        const bool engaged =
+            panelState.armState !=
+                AlarmPanelInterface::ArmState::DISARMED;
+
+
+        // ============================================================
+        // CURRENT ALARM MASK
+        // ============================================================
+
+        const uint64_t currentAlarmMask =
+            SecurityOrchestrator::
+                getCurrentAlarmMask();
+
+
+        // ============================================================
+        // EFFECTIVE ALARM MASK
+        //
+        // Tiene conto degli allarmi silenziati.
+        // ============================================================
+
+        const uint64_t effectiveAlarmMask =
+            DomoManagerAlarmPanel::instance()
+                .getEffectiveAlarmMask();
+
+
+        // ============================================================
+        // ACTIVE
+        // ============================================================
+
+        const bool active =
+            effectiveAlarmMask != 0;
+
+
+        // ============================================================
+        // CHECK CHANGE
+        //
+        // La callback NON deve essere chiamata ad ogni Loop().
+        // ============================================================
+
+        const bool changed =
+            !alarmCallbackStateValid ||
+            engaged != lastAlarmEngaged ||
+            active != lastAlarmActive ||
+            currentAlarmMask != lastCurrentAlarmMask ||
+            effectiveAlarmMask != lastEffectiveAlarmMask;
+
+
+        if (!changed)
+        {
+            return;
+        }
+
+
+        // ============================================================
+        // SAVE STATE
+        //
+        // IMPORTANTE:
+        // salvare prima della callback evita problemi se il frontend
+        // provoca indirettamente un nuovo ciclo security.
+        // ============================================================
+
+        alarmCallbackStateValid = true;
+
+        lastAlarmEngaged =
+            engaged;
+
+        lastAlarmActive =
+            active;
+
+        lastCurrentAlarmMask =
+            currentAlarmMask;
+
+        lastEffectiveAlarmMask =
+            effectiveAlarmMask;
+
+        // ============================================================
+        // CALLBACK
+        // ============================================================
+
+        alarmCallback(
+            engaged,
+            active,
+            currentAlarmMask,
+            effectiveAlarmMask
         );
     }
 
-
 public:
+    // ============================================================
+    // SET ALARM CALLBACK
+    //
+    // Il frontend registra qui la propria callback.
+    //
+    // Esempio:
+    //
+    // SecurityEngine::setAlarmCallback(
+    //     SecurityAlarmCallback
+    // );
+    //
+    // ============================================================
+
+    static void setAlarmCallback(
+        AlarmCallback callback)
+    {
+        alarmCallback = callback;
+
+        // ------------------------------------------------------------
+        // Una nuova callback deve ricevere il primo stato disponibile.
+        // ------------------------------------------------------------
+
+        alarmCallbackStateValid = false;
+
+        lastAlarmEngaged = false;
+        lastAlarmActive = false;
+
+        lastCurrentAlarmMask = 0;
+        lastEffectiveAlarmMask = 0;
+
+
+        LOG_IF(
+            "SECURITY",
+            "Alarm callback %s",
+            alarmCallback
+                ? "REGISTERED"
+                : "CLEARED"
+        );
+    }
+
 
     // ============================================================
     // SETUP
@@ -2955,18 +3551,25 @@ public:
         uint8_t source)
     {
         manager = &dm;
+
         config = &cfg;
+
         securitySource = source;
 
         initialized = false;
 
-        reportOnChange = cfg.reportOnChange;
+        hmiInitialSyncPending = true;
 
-        statusPublished = false;
-        lastPublishedStatus = 0;
-        lastPublishedStatusArea = -1;
+        reportOnChange =
+            cfg.reportOnChange;
+
         changeFlags =
             SecurityOrchestrator::CHANGE_NONE;
+
+
+        // ============================================================
+        // SECURITY DISABLED
+        // ============================================================
 
         if (!cfg.enabled)
         {
@@ -2978,6 +3581,11 @@ public:
             return false;
         }
 
+
+        // ============================================================
+        // VALID SOURCE
+        // ============================================================
+
         if (securitySource == 255)
         {
             LOG_EF(
@@ -2988,42 +3596,62 @@ public:
             return false;
         }
 
+
+        // ============================================================
+        // ORCHESTRATOR
+        // ============================================================
+
         SecurityOrchestrator::Setup(
             &cfg
         );
+
+
+        // ============================================================
+        // ALARM PANEL CALLBACKS
+        // ============================================================
 
         DomoManagerAlarmPanel::instance()
             .setAlarmCallback(
                 AlarmPanelAlarmCallback
             );
 
+
         DomoManagerAlarmPanel::instance()
             .setEventCallback(
                 AlarmPanelEventCallback
             );
 
+
+        // ============================================================
+        // INITIALIZED
+        // ============================================================
+
         initialized = true;
+
 
         LOG_IF(
             "SECURITY",
             "Security engine initialized "
             "panelCommandArea=%d "
             "statusArea=%d "
+            "armStateArea=%d "
             "eventArea=%d "
             "source=%d "
             "reportOnChange=%d",
             cfg.panelCommandArea,
             cfg.statusArea,
+            cfg.armStateArea,
             cfg.eventArea,
             securitySource,
             reportOnChange ? 1 : 0
         );
 
+
         return true;
     }
 
 
-        // ============================================================
+    // ============================================================
     // LOOP
     //
     // Raccoglie tutti i cambiamenti:
@@ -3052,10 +3680,19 @@ public:
         if (!dm.getPowerOnCycleCompleted())
             return false;
 
+        if (hmiInitialSyncPending)
+        {
+            UpdateSecurityHmi(true);
+
+            hmiInitialSyncPending = false;
+        }
+
         const uint8_t changes =
             SecurityOrchestrator::Loop(now);
 
         changeFlags |= changes;
+
+        UpdateAlarmCallback();
 
         if (changeFlags ==
             SecurityOrchestrator::CHANGE_NONE)
@@ -3063,7 +3700,7 @@ public:
             return false;
         }
 
-        PublishStatus(now);
+        UpdateSecurityHmi();      
 
         if (reportOnChange &&
             (changeFlags &
@@ -3074,8 +3711,8 @@ public:
             SecurityOrchestrator::CHANGE_COMMAND)))
         {
             SecurityOrchestrator::
-                Diagnostic::
-                CoreReport();
+                Diagnostic:: FullReport();
+                //CoreReport();
         }
 
         changeFlags =
@@ -3131,7 +3768,6 @@ public:
         if (!config)
             return false;
 
-
         // --------------------------------------------------------
         // ALARM PANEL
         // --------------------------------------------------------
@@ -3166,7 +3802,7 @@ public:
             {
                 LOG_WF(
                     "SECURITY",
-                    "Invalid panel command "
+                    "Panel command rejected "
                     "area=%d value=%ld",
                     area,
                     value

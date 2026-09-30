@@ -142,13 +142,17 @@ static FrontendConfig mainConfig = [](){
     // --- SECURITY ---
     c.security.enabled    = true;
     c.security.intervalMs = 300;
-    c.security.reportOnChange  = true;  //Abilito la visualizzazione del report ogni volta che cambia un sensore
-    c.security.eventArea = AREA_SECURITY_EVT_AREA;
-    c.security.panelCommandArea = AREA_SECURITY_CMD_AREA;
+    c.security.reportOnChange  = false;                      //Abilito la visualizzazione del report ogni volta che cambia un sensore
+    c.security.eventArea = -1;                              //Non mi interessa accedere al buffer eventi
+    c.security.panelCommandArea = AREA_SECURITY_CMD_AREA;   //Area comandi centralina
+    c.security.statusArea= AREA_SECURITY_STATUS;            //Area stato centralina
     c.security.startupInhibitMs = 10000;
-    c.security.statusArea= AREA_SECURITY_STATUS;
+    
     c.security.sensors = WIRED_SENSOR_CONFIG;
     c.security.count   = sizeof(WIRED_SENSOR_CONFIG) / sizeof(WIRED_SENSOR_CONFIG[0]);
+
+    c.security.zones = SECURITY_ZONE_CONFIG;
+    c.security.zoneCount = sizeof(SECURITY_ZONE_CONFIG) / sizeof(SECURITY_ZONE_CONFIG[0]);
 
     // --- POWER LIMITS ---
     c.power = POWER_PARAMS;

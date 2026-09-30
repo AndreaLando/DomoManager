@@ -388,6 +388,12 @@ struct FrontendConfig {
         float mainPowerHigh;  
     }ps;
 
+    struct SecurityZoneConfig
+    {
+        const char* name;
+        int statusArea = -1;
+    };
+
     struct Security {
         bool enabled = false;
         bool reportOnChange=true;
@@ -395,9 +401,12 @@ struct FrontendConfig {
         const WiredSensorsManager::WiredSensorConfig* sensors;
         size_t count;
         
+        const SecurityZoneConfig* zones = nullptr;
+        size_t zoneCount = 0;
+
         // Stato aggregato security
         int statusArea = -1;
-
+        int armStateArea = -1;
         // Comandi Alarm Panel
         int panelCommandArea = -1;
         int eventArea = -1;

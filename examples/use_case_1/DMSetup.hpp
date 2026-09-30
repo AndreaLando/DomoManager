@@ -112,13 +112,32 @@ DEFINE_AREA(AREA_CAMERA_WIN3_CMD, 232)
 DEFINE_AREA(AREA_BAGNO_FLOOD_CMD, 233)
 DEFINE_AREA(AREA_BAGNO_PIR_CMD, 234)
 
-DEFINE_AREA(AREA_BAGNO_ESTRATTORE_BIT, 235)
-DEFINE_AREA(AREA_CUCINA_ESTRATTORE_BIT, 236)
-DEFINE_AREA(AREA_MEAN_TEMPS, 237)
-DEFINE_AREA(AREA_MEAN_HUMS, 238)
-DEFINE_AREA(AREA_SECURITY_STATUS, 239)
-DEFINE_AREA(AREA_SECURITY_EVT_AREA, 240)
-DEFINE_AREA(AREA_SECURITY_CMD_AREA, 241)
+DEFINE_AREA(AREA_CUCINA_PIR_STATUS, 235)
+DEFINE_AREA(AREA_CUCINA_DOOR_STATUS, 236)
+DEFINE_AREA(AREA_CUCINA_SMOKE_STATUS, 237)
+DEFINE_AREA(AREA_CUCINA_FLOOD_STATUS, 238)
+DEFINE_AREA(AREA_INGRESSO_PIR_STATUS, 239)
+DEFINE_AREA(AREA_INGRESSO_DOOR_STATUS, 240)
+DEFINE_AREA(AREA_CAMERA_SMOKE_STATUS, 241)
+DEFINE_AREA(AREA_CAMERA_PIR_STATUS, 242)
+DEFINE_AREA(AREA_CAMERA_WIN1_STATUS, 243)
+DEFINE_AREA(AREA_CAMERA_WIN2_STATUS, 244)
+DEFINE_AREA(AREA_CAMERA_WIN3_STATUS, 245)
+DEFINE_AREA(AREA_BAGNO_FLOOD_STATUS, 246)
+DEFINE_AREA(AREA_BAGNO_PIR_STATUS, 247)
+
+DEFINE_AREA(AREA_CUCINA_SECURITY_STATUS, 248)
+DEFINE_AREA(AREA_CAMERA_SECURITY_STATUS, 249)
+DEFINE_AREA(AREA_BAGNO_SECURITY_STATUS, 250)
+DEFINE_AREA(AREA_INGRESSO_SECURITY_STATUS, 251)
+
+DEFINE_AREA(AREA_BAGNO_ESTRATTORE_BIT, 252)
+DEFINE_AREA(AREA_CUCINA_ESTRATTORE_BIT, 253)
+DEFINE_AREA(AREA_MEAN_TEMPS, 254)
+DEFINE_AREA(AREA_MEAN_HUMS, 255)
+DEFINE_AREA(AREA_SECURITY_STATUS, 256)
+DEFINE_AREA(AREA_SECURITY_EVT_AREA, 257)
+DEFINE_AREA(AREA_SECURITY_CMD_AREA, 258)
 
 // ************ PHISICAL DEVICES *******************************
 arduino::IPAddress WaveShareP1_Addr=IPAddress(192, 168, 12, 203);
@@ -732,7 +751,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_PIR_ALM) != 0; },
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_PIR_TAMPER) != 0; }
         },
-        SensorCategory::PIR
+        SensorCategory::PIR, AREA_CUCINA_PIR_CMD, AREA_CUCINA_PIR_STATUS
     },
 
     // Porta Cucina
@@ -741,25 +760,25 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_DOOR_ALM) != 0; }
         },
-        SensorCategory::DOOR
+        SensorCategory::DOOR, AREA_CUCINA_DOOR_CMD, AREA_CUCINA_DOOR_STATUS
     },
 
     // Flood Cucina
     { "Allagamento Cucina", "Cucina",
-        { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
+        { SensorChannel(-1, RT_DELAY, SensorChannelType::H24) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_FLOOD_ALM) != 0; }
         },
-        SensorCategory::FLOOD
+        SensorCategory::FLOOD, AREA_CUCINA_FLOOD_CMD, AREA_CUCINA_FLOOD_STATUS
     },
 
     // Smoke Cucina
     { "Fumo Cucina", "Cucina",
-        { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
+        { SensorChannel(-1, RT_DELAY, SensorChannelType::H24) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_SMOKE_ALM) != 0; }
         },
-        SensorCategory::SMOKE
+        SensorCategory::SMOKE, AREA_CUCINA_SMOKE_CMD, AREA_CUCINA_SMOKE_STATUS
     },
 
     // ============================
@@ -774,7 +793,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CAMERA_PIR_ALM) != 0; },
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CAMERA_PIR_TAMPER) != 0; }
         },
-        SensorCategory::PIR
+        SensorCategory::PIR, AREA_CAMERA_PIR_CMD, AREA_CAMERA_PIR_STATUS
     },
 
     // Finestre Camera
@@ -783,7 +802,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CAMERA_WIN1_ALM) != 0; }
         },
-        SensorCategory::WINDOW
+        SensorCategory::WINDOW, AREA_CAMERA_WIN1_CMD, AREA_CAMERA_WIN1_STATUS
     },
 
     { "Vasistas Dx. Camera", "Camera",
@@ -791,7 +810,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CAMERA_WIN2_ALM) != 0; }
         },
-        SensorCategory::WINDOW
+        SensorCategory::WINDOW, AREA_CAMERA_WIN2_CMD, AREA_CAMERA_WIN2_STATUS
     },
 
     { "Vasistas Sx. Camera", "Camera",
@@ -799,27 +818,27 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CAMERA_WIN3_ALM) != 0; }
         },
-        SensorCategory::WINDOW
+        SensorCategory::WINDOW, AREA_CAMERA_WIN3_CMD, AREA_CAMERA_WIN3_STATUS
     },
 
     // Smoke Camera
     { "Fumo Camera", "Camera",
-        { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
+        { SensorChannel(-1, RT_DELAY, SensorChannelType::H24) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CAMERA_SMOKE_ALM) != 0; }
         },
-        SensorCategory::SMOKE
+        SensorCategory::SMOKE, AREA_CAMERA_SMOKE_CMD, AREA_CAMERA_SMOKE_STATUS
     },
 
     // ============================
     // BAGNO
     // ============================
     { "Allagamento Bagno", "Bagno",
-        { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
+        { SensorChannel(-1, RT_DELAY, SensorChannelType::H24) },
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_BAGNO_FLOOD_ALM) != 0; }
         },
-        SensorCategory::FLOOD
+        SensorCategory::FLOOD, AREA_BAGNO_FLOOD_CMD, AREA_BAGNO_FLOOD_STATUS
     },
 
     { "PIR Bagno", "Bagno",
@@ -831,7 +850,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_BAGNO_PIR_ALM) != 0; },
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_BAGNO_PIR_TAMPER) != 0; }
         },
-        SensorCategory::PIR
+        SensorCategory::PIR, AREA_BAGNO_PIR_CMD, AREA_BAGNO_PIR_STATUS
     },
 
     // ============================
@@ -842,8 +861,16 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
         {
             [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_INGRESSO_DOOR_ALM) != 0; }
         },
-        SensorCategory::DOOR
+        SensorCategory::DOOR, AREA_INGRESSO_DOOR_CMD, AREA_INGRESSO_DOOR_STATUS
     }
+};
+
+static const FrontendConfig::SecurityZoneConfig SECURITY_ZONE_CONFIG[] =
+{
+    { "Cucina",   AREA_CUCINA_SECURITY_STATUS },
+    { "Camera",   AREA_CAMERA_SECURITY_STATUS },
+    { "Bagno",    AREA_BAGNO_SECURITY_STATUS },
+    { "Ingresso", AREA_INGRESSO_SECURITY_STATUS }
 };
 
 // ============================================================================
