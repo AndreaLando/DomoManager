@@ -12,12 +12,11 @@
 
    ============================================================================ */
 
-#include "DMUsb.hpp"
+// #include "DMUsb.hpp"
 #include "DMFrontend.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
-
 
 // ======================================================
 // DIAGNOSTICS
@@ -45,8 +44,9 @@ static const DiagnosticConfig diagnosticParams = {
 
 // Watch areas: indices of diagnostic bits to monitor, this stops debugging on SerialMonitor Arduino IDE
 static const int watchAreas[] = {
-    //AREA_CUCINA_FLOOD_ALM,
-    //AREA_BAGNO_FLOOD_ALM    
+    /* aree di test
+    AREA_CUCINA_FLOOD_ALM,
+    AREA_BAGNO_FLOOD_ALM    */
 };
 // ------------------------------------------------------------
 // FRONTEND CONFIG (mainConfig)
@@ -57,13 +57,13 @@ static const int watchAreas[] = {
 static FrontendConfig mainConfig = [](){
     FrontendConfig c;
 
-    c.pins.userButton = BTN_USER;
-    c.pins.leds = LedController::LedPins(
-        LED_D0, //RS485 Read
-        LED_D1, //RS485 Write
-        LED_D2, // HMI, MQTT Read/Write   
-        LED_D3  // Devices in error
-    );
+    c.pins.userButton = DMPlatform::UserButton;
+    c.pins.leds = {
+        DMPlatform::LedD0, // RS485 Read
+        DMPlatform::LedD1, // RS485 Write
+        DMPlatform::LedD2, // HMI, MQTT Read/Write
+        DMPlatform::LedD3  // Devices in error
+    };
 
     // --- NETWORK ---
     c.net.mac     = {0x90, 0xA2, 0xDA, 0x0E, 0x94, 0xB5};
@@ -115,7 +115,7 @@ static FrontendConfig mainConfig = [](){
         return DomoManager::instance->getAverages().groupAverage("Temperature");
     };
     c.hvac.readWindowOpen = [&]() {
-        auto& sys = SecuritySensorEngine::getSystem().info.f;
+        auto& sys = SecurityOrchestrator::getSystem().info.f;
         using SM = SecurityOrchestrator::SystemManager;
 
         return sys[SM::WINDOWS_OPEN].get() ||
@@ -131,21 +131,30 @@ static FrontendConfig mainConfig = [](){
     // --- POWER SUPERVISOR ---
     c.ps.enabled    = false;
     c.ps.intervalMs = 5000;
-    c.ps.mainPower = { GenericSensor::Config::Type::BUFFER, 12, 0.01f };
-    c.ps.i24vOk    = { GenericSensor::Config::Type::DIGITAL, I1 };
-    c.ps.fault     = { GenericSensor::Config::Type::DIGITAL, I2 };
-    c.ps.battery   = { GenericSensor::Config::Type::DIGITAL, I3 };
-    c.ps.i12vOk    = { GenericSensor::Config::Type::DIGITAL, I4 };
+    c.ps.mainPower = { GenericSensor::Config::Type::BUFFER, 12, 0.01f };    //Area di test
+    c.ps.i24vOk    = { GenericSensor::Config::Type::DIGITAL, DMPlatform::I1 };
+    c.ps.fault     = { GenericSensor::Config::Type::DIGITAL, DMPlatform::I2 };
+    c.ps.battery   = { GenericSensor::Config::Type::DIGITAL, DMPlatform::I3 };
+    c.ps.i12vOk    = { GenericSensor::Config::Type::DIGITAL, DMPlatform::I4 };
     c.ps.mainPowerLow  = 215.0f;
     c.ps.mainPowerHigh = 240.0f;
 
     // --- SECURITY ---
     c.security.enabled    = false;
-    c.security.intervalMs = 1500;
+    c.security.intervalMs = 300;
+    c.security.reportOnChange  = false;                      //Abilito la visualizzazione del report ogni volta che cambia un sensore
+    c.security.eventArea = -1;                              //Non mi interessa accedere al buffer eventi
+    c.security.panelCommandArea = -1;   //Area comandi centralina
+    c.security.panelBitCommandArea=-1;  //Area comandi a bit
+    c.security.statusArea=  -1;            // WORD 1 - stato sicurezza    
+    c.security.statusArea2= -1;          // WORD 2 - stato centralina
     c.security.startupInhibitMs = 10000;
-    // c.security.statusArea=AREA_SECURITY_STATUS; Da battezzare
+    
     c.security.sensors = WIRED_SENSOR_CONFIG;
     c.security.count   = sizeof(WIRED_SENSOR_CONFIG) / sizeof(WIRED_SENSOR_CONFIG[0]);
+
+    c.security.zones = SECURITY_ZONE_CONFIG;
+    c.security.zoneCount = sizeof(SECURITY_ZONE_CONFIG) / sizeof(SECURITY_ZONE_CONFIG[0]);
 
     // --- POWER LIMITS ---
     c.power = POWER_PARAMS;
@@ -160,7 +169,7 @@ static FrontendConfig mainConfig = [](){
     c.diagnostic=diagnosticParams;
 
     // --- WATCH ---
-    c.watch.enabled = false;
+    c.watch.enabled = true;
     c.watch.aree = watchAreas;
     c.watch.count = sizeof(watchAreas) / sizeof(watchAreas[0]);
 
@@ -182,12 +191,8 @@ static FrontendConfig mainConfig = [](){
 void setup() {
     Serial.begin(19200);
 
-    //Setup OPTA IO
-    pinMode(I1, INPUT);
-    pinMode(I2, INPUT);
-    pinMode(I3, INPUT);
-    pinMode(I4, INPUT);
-    
+    DMPlatform::SetupPlatformIO();
+
     /* USBConfigLoader::Init([](bool ok){
         if (ok) {
             LOG_I("USB", "USB inizializzato");

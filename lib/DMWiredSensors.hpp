@@ -1878,14 +1878,44 @@ public:
     }
 
     // --- Aggregate state computed from wired sensors
-    struct AggregateState {
+    struct AggregateSignals
+    {
         bool intrusion = false;
+
         bool intrusionH24 = false;
-        bool mask = false;
+
         bool flood = false;
+
         bool smoke = false;
+
         bool windowsOpen = false;
+
         bool doorsOpen = false;
+    };
+
+
+    struct AggregateState
+    {
+        // ============================================================
+        // REALTIME
+        // ============================================================
+
+        AggregateSignals normal;
+
+
+        // ============================================================
+        // MEMORY
+        // ============================================================
+
+        AggregateSignals mem;
+
+
+        // ============================================================
+        // OTHER
+        // ============================================================
+
+        bool mask = false;
+
         bool tamper = false;
     };
 
@@ -1955,6 +1985,7 @@ public:
     {
         AggregateState st;
 
+
         const ConfigType* cfg =
             config;
 
@@ -1998,15 +2029,6 @@ public:
             // ========================================================
             // OPTIONAL ZONE LOOKUP
             // ========================================================
-            //
-            // Il sensore può essere:
-            //
-            //   - associato ad una zona
-            //   - senza zona
-            //
-            // Un sensore senza zona non viene escluso.
-            //
-            // ========================================================
 
             const ZoneManager::ZoneInfo* zoneInfo =
                 nullptr;
@@ -2032,44 +2054,12 @@ public:
             // ========================================================
             // EFFECTIVE SECURITY ENABLE
             // ========================================================
-            //
-            // Sensore zonato:
-            //
-            //   sensor.enabled && zone.enabled
-            //
-            // Sensore unzoned:
-            //
-            //   sensor.enabled
-            //
-            // ========================================================
 
             if (zoneInfo &&
                 !zoneInfo->enabled)
             {
                 continue;
             }
-
-
-            // ========================================================
-            // NOTE
-            // ========================================================
-            //
-            // NON controlliamo più:
-            //
-            //   s->IsEngaged()
-            //   zoneInfo->engaged
-            //
-            // L'engage viene usato dal sensore per determinare
-            // quando può impostare le proprie mem:
-            //
-            //   outputs.rtMem
-            //   outputs.h24Mem
-            //
-            // Una volta memorizzato l'allarme, la centrale deve
-            // poterlo vedere anche se successivamente l'engage
-            // corrente cambia.
-            //
-            // ========================================================
 
 
             // ========================================================
@@ -2085,33 +2075,47 @@ public:
                 case SensorCategory::PIR:
                 {
                     // ------------------------------------------------
-                    // RT MEM
-                    //
-                    // Intrusione ordinaria memorizzata
+                    // REALTIME
                     // ------------------------------------------------
 
-                    if (s->Outputs().rtMem)
+                    if (s->Outputs().rt)
                     {
-                        st.intrusion = true;
+                        st.normal.intrusion = true;
+                    }
+
+
+                    const SensorChannel* h24 =
+                        s->Get(
+                            SensorChannelType::H24
+                        );
+
+
+                    if (h24 &&
+                        h24->IsActive() &&
+                        !h24->IsInhibit())
+                    {
+                        st.normal.intrusionH24 = true;
                     }
 
 
                     // ------------------------------------------------
-                    // H24 MEM
-                    //
-                    // H24 / MASK memorizzato
+                    // MEMORY
                     // ------------------------------------------------
+
+                    if (s->Outputs().rtMem)
+                    {
+                        st.mem.intrusion = true;
+                    }
+
 
                     if (s->Outputs().h24Mem)
                     {
-                        st.intrusionH24 = true;
+                        st.mem.intrusionH24 = true;
                     }
 
 
                     // ------------------------------------------------
                     // MASK
-                    //
-                    // Stato corrente anti-mask
                     // ------------------------------------------------
 
                     if (s->ChannelAlarm(
@@ -2130,10 +2134,25 @@ public:
 
                 case SensorCategory::WINDOW:
                 {
+                    // ------------------------------------------------
+                    // REALTIME
+                    // ------------------------------------------------
+
                     if (s->Outputs().rt ||
                         s->Outputs().h24)
                     {
-                        st.windowsOpen = true;
+                        st.normal.windowsOpen = true;
+                    }
+
+
+                    // ------------------------------------------------
+                    // MEMORY
+                    // ------------------------------------------------
+
+                    if (s->Outputs().rtMem ||
+                        s->Outputs().h24Mem)
+                    {
+                        st.mem.windowsOpen = true;
                     }
 
                     break;
@@ -2146,10 +2165,25 @@ public:
 
                 case SensorCategory::DOOR:
                 {
+                    // ------------------------------------------------
+                    // REALTIME
+                    // ------------------------------------------------
+
                     if (s->Outputs().rt ||
                         s->Outputs().h24)
                     {
-                        st.doorsOpen = true;
+                        st.normal.doorsOpen = true;
+                    }
+
+
+                    // ------------------------------------------------
+                    // MEMORY
+                    // ------------------------------------------------
+
+                    if (s->Outputs().rtMem ||
+                        s->Outputs().h24Mem)
+                    {
+                        st.mem.doorsOpen = true;
                     }
 
                     break;
@@ -2162,10 +2196,25 @@ public:
 
                 case SensorCategory::FLOOD:
                 {
+                    // ------------------------------------------------
+                    // REALTIME
+                    // ------------------------------------------------
+
                     if (s->Outputs().rt ||
                         s->Outputs().h24)
                     {
-                        st.flood = true;
+                        st.normal.flood = true;
+                    }
+
+
+                    // ------------------------------------------------
+                    // MEMORY
+                    // ------------------------------------------------
+
+                    if (s->Outputs().rtMem ||
+                        s->Outputs().h24Mem)
+                    {
+                        st.mem.flood = true;
                     }
 
                     break;
@@ -2178,10 +2227,25 @@ public:
 
                 case SensorCategory::SMOKE:
                 {
+                    // ------------------------------------------------
+                    // REALTIME
+                    // ------------------------------------------------
+
                     if (s->Outputs().rt ||
                         s->Outputs().h24)
                     {
-                        st.smoke = true;
+                        st.normal.smoke = true;
+                    }
+
+
+                    // ------------------------------------------------
+                    // MEMORY
+                    // ------------------------------------------------
+
+                    if (s->Outputs().rtMem ||
+                        s->Outputs().h24Mem)
+                    {
+                        st.mem.smoke = true;
                     }
 
                     break;
@@ -2215,7 +2279,7 @@ public:
 
 
         // ============================================================
-        // RETURN EFFECTIVE AGGREGATE
+        // RETURN
         // ============================================================
 
         return st;
@@ -2568,6 +2632,13 @@ public:
         AlarmCallback cb)
     {
         onNewAlarm = cb;
+    }
+
+    void ClearNewMask(
+        uint64_t mask)
+    {
+        newMask &=
+            ~mask;
     }
 
     void ReportMap(

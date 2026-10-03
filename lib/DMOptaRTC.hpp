@@ -9,7 +9,7 @@
    Contatto:        mail@domo-manager.it
   
    Versione modulo: 1.0.0
-   Ultima modifica: 2026‑03‑24
+   Ultima modifica: 2026‑10‑01
    Note:
                     Prima versione
 
@@ -22,9 +22,8 @@
 
 #include <NTPClient.h>
 #include <WiFi.h>          
-
 #include "DMEthernet.hpp"
-
+#include "DMPlatform.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -335,7 +334,7 @@ public:
             else {
                 LOG_IF("NTP", "NTP via Ethernet → %s", server.c_str());
 
-                if (!Ethernet.hostByName(server.c_str(), ntpIP)) {
+                if (!DMEthernet::hostByName(server.c_str(), ntpIP)) {
                     LOG_WF("NTP", "DNS Ethernet fallito");
                     continue;
                 }
@@ -590,20 +589,39 @@ private:
         // ============================================================
         //  FORCE SET TIME (RTC hardware)
         // ============================================================
-        bool forceSetTime(time_t epoch) {
-            for (int i = 0; i < 20; i++) {
-                set_time(epoch);
-                delay(100);
+        bool forceSetTime(time_t epoch)
+        {
+            for (int i = 0; i < 20; i++)
+            {
+                if (DMPlatform::SetSystemTime(epoch))
+                {
+                    delay(10);
 
-                if (time(nullptr) != 0) {
-                    LOG_IF("OptaRTC", "[RTC] set_time OK dopo %d tentativi", i+1);
-                    return true;
+                    if (time(nullptr) != 0)
+                    {
+                        LOG_IF(
+                            "OptaRTC",
+                            "[RTC] impostazione tempo OK dopo %d tentativi",
+                            i + 1
+                        );
+
+                        return true;
+                    }
                 }
 
-                LOG_WF("OptaRTC", "[RTC] RTC non pronto, retry...");
+                delay(100);
+
+                LOG_WF(
+                    "OptaRTC",
+                    "[RTC] RTC non pronto, retry..."
+                );
             }
 
-            LOG_WF("OptaRTC", "[RTC] ERRORE: impossibile impostare l'RTC hardware");
+            LOG_WF(
+                "OptaRTC",
+                "[RTC] ERRORE: impossibile impostare l'RTC"
+            );
+
             return false;
         }
 

@@ -79,7 +79,7 @@
 //   - non blocca mai il firmware
 //   - acquire() fallisce immediatamente se non c'è spazio
 //
-// Compatibile con NetworkManager esistente.
+// Compatibile con DMNetworkManager esistente.
 // ============================================================
 
 
@@ -147,7 +147,7 @@ public:
     // CONFIGURATION
     // ========================================================
 
-    static constexpr uint8_t MAX_SOCKETS = 4;
+    static constexpr uint8_t MAX_SOCKETS = DMPlatform::MAX_NETWORK_SOCKETS;
 
 
 private:
@@ -921,7 +921,7 @@ private:
 };
 
 
-class NetworkManager {
+class DMNetworkManager { //Nome variato a causa di conflitto con libreria ESP32
 public:
     using ProtocolId = int;
 
@@ -1754,7 +1754,7 @@ class SocketHandle
 private:
     int slot = -1;
 
-    NetworkManager* network = nullptr;
+    DMNetworkManager* network = nullptr;
 
     SocketManager::OwnerId owner = -1;
     int resourceId = -1;
@@ -1767,7 +1767,7 @@ public:
     SocketHandle() = default;
 
     SocketHandle(
-        NetworkManager* net,
+        DMNetworkManager* net,
         SocketManager::OwnerId ownerId,
         int resource,
         SocketManager::SocketKind socketKind =
@@ -1780,7 +1780,7 @@ public:
     }
 
     void setup(
-        NetworkManager* net,
+        DMNetworkManager* net,
         SocketManager::OwnerId ownerId,
         int resource,
         SocketManager::SocketKind socketKind =
@@ -1940,7 +1940,7 @@ public:
 
 
     struct structIP {
-        arduino::IPAddress IP;
+        IPAddress IP;
         int Errors = 0;
         IpState state = IpState::OK;
 
@@ -2051,14 +2051,14 @@ private:
         return "UNKNOWN";
     }
 
-    bool ExistsIp(arduino::IPAddress ip) {
+    bool ExistsIp(IPAddress ip) {
         for (auto& item : IPs)
             if (item.IP == ip)
                 return true;
         return false;
     }
 
-    int GetUsedPriorities(arduino::IPAddress ip,
+    int GetUsedPriorities(IPAddress ip,
                           std::vector<GenericPrgDevice>& prgDevices,
                           std::vector<PriorityMgmt>& items)
     {
@@ -2155,7 +2155,7 @@ public:
     // -------------------------
     // Accesso ai device per IP
     // -------------------------
-    std::vector<int>* GetDevicesByIP(arduino::IPAddress &ip) {
+    std::vector<int>* GetDevicesByIP(IPAddress &ip) {
         uint32_t key = MakeIpKey(ip);
 
         auto it = devicesByIP.find(key);

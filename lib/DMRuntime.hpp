@@ -123,8 +123,8 @@ private:
     DomoManager& manager;
     TimeManager& timeManager;
     DeviceManager& deviceManager;
-    NetworkManager& net;
-    NetworkManager::ProtocolId& networkProtocolId;
+    DMNetworkManager& net;
+    DMNetworkManager::ProtocolId& networkProtocolId;
     IpManager& ipManager;
     Buffer& buffer;
     LedController& leds;
@@ -403,7 +403,7 @@ private:
 
         if (restartIP) {
             LOG_EF("DM", "Tutti gli IP in errore → System Reset");
-            NVIC_SystemReset();
+            DMPlatform::Restart();
         }
     }
 
@@ -961,8 +961,8 @@ public:
         DomoManager& managerRef,
         TimeManager& tm,
         DeviceManager& dm,
-        NetworkManager& network,
-        NetworkManager::ProtocolId& protocolId,
+        DMNetworkManager& network,
+        DMNetworkManager::ProtocolId& protocolId,
         IpManager& ipm,
         Buffer& buf,
         LedController& led,

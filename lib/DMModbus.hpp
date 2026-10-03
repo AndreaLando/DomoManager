@@ -29,7 +29,7 @@
 class ModbusManager
 {
 private:
-    NetworkManager* net = nullptr;
+    DMNetworkManager* net = nullptr;
     int modbusProtocolId = -1;
 
     // ============================================================
@@ -59,7 +59,7 @@ private:
     // ============================================================
     // CONNESSIONE MODBUS PERSISTENTE
     // ============================================================
-    class PersistentModbusConnection
+    /*class PersistentModbusConnection
     {
     private:
 
@@ -90,7 +90,7 @@ private:
         // ========================================================
         struct SocketState
         {
-            NetworkManager* net = nullptr;
+            DMNetworkManager* net = nullptr;
             SocketManager::OwnerId owner = -1;
             bool acquired = false;
         };
@@ -140,7 +140,7 @@ private:
         // ========================================================
 
         void setSocketContext(
-            NetworkManager& networkManager,
+            DMNetworkManager& networkManager,
             SocketManager::OwnerId owner)
         {
             socket.net = &networkManager;
@@ -478,8 +478,482 @@ private:
 
             return EnsureResult::CONNECTED;
         }
-    };
+    };*/
+    class PersistentModbusConnection
+    {
+    private:
 
+        static constexpr unsigned long INACTIVITY = 600;
+        static constexpr unsigned long IP_SWITCH_GUARD_MS = 0;
+
+        // ============================================================
+        // CONNECTION STATE
+        // ============================================================
+
+        struct ConnectionState
+        {
+            IPAddress lastIp = IPAddress(0, 0, 0, 0);
+            bool hasConnection = false;
+            unsigned long lastActivity = 0;
+        };
+
+        // ============================================================
+        // IP SWITCH STATE
+        // ============================================================
+
+        struct SwitchState
+        {
+            unsigned long time = 0;
+            bool waiting = false;
+        };
+
+        // ============================================================
+        // SOCKET STATE
+        // ============================================================
+
+        struct SocketState
+        {
+            DMNetworkManager* net = nullptr;
+            SocketManager::OwnerId owner = -1;
+
+            bool acquired = false;
+
+            // IMPORTANTE:
+            // memorizziamo lo slot realmente assegnato da SocketManager.
+            int slot = -1;
+        };
+
+        ModbusTCPClient& modbusClient;
+
+        ConnectionState connection;
+        SwitchState switchState;
+        SocketState socket;
+
+    public:
+
+        // ============================================================
+        // ENSURE RESULT
+        // ============================================================
+
+        enum class EnsureResult : uint8_t
+        {
+            CONNECTED,
+            WAITING,
+            FAILED
+        };
+
+        enum class ReconnectReason
+        {
+            NONE,
+            NOT_CONNECTED,
+            IP_CHANGED,
+            INACTIVITY
+        };
+
+        // ============================================================
+        // CONSTRUCTOR
+        // ============================================================
+
+        explicit PersistentModbusConnection(
+            ModbusTCPClient& client)
+            : modbusClient(client)
+        {
+        }
+
+        // ============================================================
+        // RESET CONNECTION STATE
+        // ============================================================
+
+        inline void resetConnectionState()
+        {
+            connection.hasConnection = false;
+            connection.lastIp = IPAddress(0, 0, 0, 0);
+            connection.lastActivity = 0;
+        }
+
+        // ============================================================
+        // SOCKET CONTEXT
+        // ============================================================
+
+        void setSocketContext(
+            DMNetworkManager& networkManager,
+            SocketManager::OwnerId owner)
+        {
+            // Il contesto non dovrebbe cambiare durante una
+            // connessione persistente.
+            //
+            // Se però cambia realmente, non possiamo lasciare
+            // lo slot associato al vecchio owner.
+
+            if (socket.acquired &&
+                (socket.net != &networkManager ||
+                socket.owner != owner))
+            {
+                releaseSocket();
+            }
+
+            socket.net = &networkManager;
+            socket.owner = owner;
+        }
+
+        // ============================================================
+        // RELEASE SOCKET
+        // ============================================================
+
+        void releaseSocket()
+        {
+            if (!socket.acquired)
+                return;
+
+            if (!socket.net)
+            {
+                socket.acquired = false;
+                socket.slot = -1;
+                return;
+            }
+
+            if (socket.owner < 0)
+            {
+                socket.acquired = false;
+                socket.slot = -1;
+                return;
+            }
+
+            if (socket.slot < 0)
+            {
+                socket.acquired = false;
+                return;
+            }
+
+            socket.net->sockets().release(
+                socket.owner,
+                socket.slot,
+                SocketManager::SocketKind::TCP_CLIENT
+            );
+
+            socket.acquired = false;
+            socket.slot = -1;
+        }
+
+        // ============================================================
+        // ACQUIRE SOCKET
+        // ============================================================
+
+        bool acquireSocket()
+        {
+            if (!socket.net)
+            {
+                LOG_EF(
+                    "MDB::Socket",
+                    "NetworkManager unavailable"
+                );
+
+                return false;
+            }
+
+            if (socket.owner < 0)
+            {
+                LOG_EF(
+                    "MDB::Socket",
+                    "Modbus socket owner invalid"
+                );
+
+                return false;
+            }
+
+            if (socket.acquired)
+                return true;
+
+            const int slot =
+                socket.net->sockets().acquire(
+                    socket.owner,
+                    0,
+                    SocketManager::SocketKind::TCP_CLIENT
+                );
+
+            if (slot < 0)
+            {
+                LOG_WF(
+                    "MDB::Socket",
+                    "Modbus TCP socket unavailable"
+                );
+
+                return false;
+            }
+
+            socket.slot = slot;
+            socket.acquired = true;
+
+            return true;
+        }
+
+        // ============================================================
+        // TOUCH
+        // ============================================================
+
+        inline void touch(
+            unsigned long now)
+        {
+            connection.lastActivity = now;
+        }
+
+        // ============================================================
+        // RECONNECT REASON
+        // ============================================================
+
+        inline ReconnectReason getReconnectReason(
+            const IPAddress& ip,
+            unsigned long now) const
+        {
+            // La connessione TCP non esiste più.
+            if (!modbusClient.connected())
+                return ReconnectReason::NOT_CONNECTED;
+
+            // Connessione attiva ma verso un IP diverso.
+            if (connection.lastIp != ip)
+                return ReconnectReason::IP_CHANGED;
+
+            // Timeout di inattività.
+            if (now - connection.lastActivity > INACTIVITY)
+                return ReconnectReason::INACTIVITY;
+
+            return ReconnectReason::NONE;
+        }
+
+        // ============================================================
+        // ENSURE CONNECTION
+        // ============================================================
+
+        EnsureResult ensure(
+            int ipIndex,
+            IpManager& ipManager,
+            int port,
+            unsigned long now)
+        {
+            auto& ips = ipManager.GetIps();
+
+            // --------------------------------------------------------
+            // VALID IP INDEX
+            // --------------------------------------------------------
+
+            if (ipIndex < 0 ||
+                static_cast<size_t>(ipIndex) >= ips.size())
+            {
+                LOG_EF(
+                    "MDB::ensure",
+                    "INVALID ipIndex=%d",
+                    ipIndex
+                );
+
+                return EnsureResult::FAILED;
+            }
+
+            // --------------------------------------------------------
+            // SHOULD QUERY
+            // --------------------------------------------------------
+
+            if (!ipManager.ShouldQuery(
+                    ipIndex,
+                    now))
+            {
+                return EnsureResult::FAILED;
+            }
+
+            // ========================================================
+            // ATTESA DOPO CAMBIO IP
+            // ========================================================
+
+            if (switchState.waiting)
+            {
+                if (now - switchState.time <
+                    IP_SWITCH_GUARD_MS)
+                {
+                    return EnsureResult::WAITING;
+                }
+
+                switchState.waiting = false;
+            }
+
+            // --------------------------------------------------------
+            // IP CORRENTE
+            // --------------------------------------------------------
+
+            auto& ipStruct = ips[ipIndex];
+
+            const IPAddress ip =
+                ipStruct.IP;
+
+            // --------------------------------------------------------
+            // RECONNECT REASON
+            // --------------------------------------------------------
+
+            const ReconnectReason reason =
+                getReconnectReason(
+                    ip,
+                    now
+                );
+
+            // ========================================================
+            // CONNESSIONE VALIDA
+            // ========================================================
+
+            if (reason == ReconnectReason::NONE)
+            {
+                connection.hasConnection = true;
+
+                if (!socket.acquired)
+                {
+                    if (!acquireSocket())
+                    {
+                        connection.hasConnection = false;
+
+                        return EnsureResult::FAILED;
+                    }
+                }
+
+                if (ipStruct.state !=
+                    IpManager::IpState::OK)
+                {
+                    ipManager.ReportSuccess(
+                        ipIndex
+                    );
+                }
+
+                return EnsureResult::CONNECTED;
+            }
+
+            // ========================================================
+            // CAMBIO IP
+            // ========================================================
+
+            if (reason == ReconnectReason::IP_CHANGED)
+            {
+                if (modbusClient.connected())
+                    modbusClient.stop();
+
+                resetConnectionState();
+
+                releaseSocket();
+
+                // Non riconnettere nello stesso giro.
+                switchState.time = now;
+                switchState.waiting = true;
+
+                return EnsureResult::WAITING;
+            }
+
+            // ========================================================
+            // INACTIVITY
+            // ========================================================
+
+            if (reason == ReconnectReason::INACTIVITY)
+            {
+                if (modbusClient.connected())
+                    modbusClient.stop();
+
+                resetConnectionState();
+
+                releaseSocket();
+            }
+
+            // ========================================================
+            // NOT CONNECTED
+            // ========================================================
+
+            if (reason == ReconnectReason::NOT_CONNECTED)
+            {
+                resetConnectionState();
+
+                // La connessione potrebbe essere caduta
+                // esternamente: il socket manager deve
+                // essere riallineato.
+                releaseSocket();
+            }
+
+            // ========================================================
+            // ACQUIRE PRIMA DEL CONNECT
+            // ========================================================
+
+            if (!acquireSocket())
+            {
+                connection.hasConnection = false;
+
+                return EnsureResult::FAILED;
+            }
+
+            // ========================================================
+            // CONNECT
+            // ========================================================
+
+            const unsigned long start =
+                millis();
+
+            const bool connected =
+                modbusClient.begin(
+                    ip,
+                    port
+                );
+
+            const unsigned long duration =
+                millis() - start;
+
+            // --------------------------------------------------------
+            // Log solo in caso di connect lento
+            // --------------------------------------------------------
+
+            if (duration > 100)
+            {
+                LOG_WF(
+                    "MDB::CONNECT",
+                    "ip=%s result=%d duration=%lu ms",
+                    ip.toString().c_str(),
+                    connected,
+                    duration
+                );
+            }
+
+            // ========================================================
+            // CONNECT FALLITO
+            // ========================================================
+
+            if (!connected)
+            {
+                resetConnectionState();
+
+                releaseSocket();
+
+                ipManager.ReportError(
+                    ipIndex,
+                    now
+                );
+
+                return EnsureResult::FAILED;
+            }
+
+            // ========================================================
+            // CONNECT SUCCESS
+            // ========================================================
+
+            connection.lastIp =
+                ip;
+
+            connection.lastActivity =
+                now;
+
+            connection.hasConnection =
+                true;
+
+            if (ipStruct.state !=
+                IpManager::IpState::OK)
+            {
+                ipManager.ReportSuccess(
+                    ipIndex
+                );
+            }
+
+            return EnsureResult::CONNECTED;
+        }
+    };
 
     // ============================================================
     // AREA → DEVICE MAP
@@ -789,7 +1263,7 @@ public:
         IpManager& ipManager,
         AnalogThresholdManager& tresholds,
         SomethingChangedFn sc,
-        NetworkManager& netManager,
+        DMNetworkManager& netManager,
         int modbusId)
     {
         this->m_ledController = &ledsController;
@@ -846,37 +1320,37 @@ public:
     // STATE MAPPING
     // ============================================================
 
-    inline NetworkManager::Protocol::State
+    inline DMNetworkManager::Protocol::State
     mapClientState(ClientState state)
     {
         using CS =
             ModbusManager::ClientState;
 
-        using PS =
-            NetworkManager::Protocol::State;
+        using ProtocolState  =
+            DMNetworkManager::Protocol::State;
 
         switch (state)
         {
             case CS::CYCLE_OK:
-                return PS::CYCLE_OK;
+                return ProtocolState::CYCLE_OK;
 
             case CS::DEVICE_ERROR:
-                return PS::DEVICE_ERROR;
+                return ProtocolState::DEVICE_ERROR;
 
             case CS::ERROR:
-                return PS::ERROR;
+                return ProtocolState::ERROR;
 
             case CS::WAITING:
-                return PS::WAITING;
+                return ProtocolState::WAITING;
 
             case CS::WRITE_DONE:
-                return PS::WRITE_DONE;
+                return ProtocolState::WRITE_DONE;
 
             case CS::READ_DONE:
-                return PS::READ_DONE;
+                return ProtocolState::READ_DONE;
 
             default:
-                return PS::ERROR;
+                return ProtocolState::ERROR;
         }
     }
 
@@ -1021,7 +1495,7 @@ public:
             {
                 net->updateProtocolState(
                     modbusProtocolId,
-                    NetworkManager::Protocol::State::ERROR
+                    DMNetworkManager::Protocol::State::ERROR
                 );
             }
 
@@ -1066,7 +1540,7 @@ public:
                 {
                     net->updateProtocolState(
                         modbusProtocolId,
-                        NetworkManager::Protocol::State::DEVICE_ERROR
+                        DMNetworkManager::Protocol::State::DEVICE_ERROR
                     );
                 }
 
@@ -1153,7 +1627,7 @@ public:
             {
                 net->updateProtocolState(
                     modbusProtocolId,
-                    NetworkManager::Protocol::State::READ_DONE
+                    DMNetworkManager::Protocol::State::READ_DONE
                 );
             }
 
@@ -1199,7 +1673,7 @@ public:
                 {
                     net->updateProtocolState(
                         modbusProtocolId,
-                        NetworkManager::Protocol::State::DEVICE_ERROR
+                        DMNetworkManager::Protocol::State::DEVICE_ERROR
                     );
                 }
 
@@ -1232,7 +1706,7 @@ public:
             {
                 net->updateProtocolState(
                     modbusProtocolId,
-                    NetworkManager::Protocol::State::CYCLE_OK
+                    DMNetworkManager::Protocol::State::CYCLE_OK
                 );
             }
 
@@ -1249,7 +1723,7 @@ public:
         {
             net->updateProtocolState(
                 modbusProtocolId,
-                NetworkManager::Protocol::State::ERROR
+                DMNetworkManager::Protocol::State::ERROR
             );
         }
 
@@ -1371,7 +1845,7 @@ private:
 
     inline bool DeviceWrite(
         ModbusTCPClient& modbusClient,
-        arduino::IPAddress ip,
+        IPAddress ip,
         unsigned long now)
     {
         return DeviceManagement_Write(
@@ -1392,7 +1866,7 @@ private:
     bool DeviceManagement_Write(
         LedController* ledsController,
         ModbusTCPClient& modbusTCPCli,
-        arduino::IPAddress ip,
+        IPAddress ip,
         Buffer& buffer,
         std::vector<GenericPrgDevice>& prgDevices,
         unsigned long now)

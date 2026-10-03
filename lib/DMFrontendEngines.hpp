@@ -26,6 +26,7 @@
 #include "DMFrontendOrchestrators.hpp"
 #include "DMIntrospection.hpp"
 #include "DMIntrusion.hpp"
+#include "DMPlatformNetwork.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -397,13 +398,13 @@ private:
     class DomoBridgePacer : public IBridgePacer
     {
     private:
-        NetworkManager& network;
-        NetworkManager::ProtocolId protocolId;
+        DMNetworkManager& network;
+        DMNetworkManager::ProtocolId protocolId;
 
     public:
         DomoBridgePacer(
-            NetworkManager& n,
-            NetworkManager::ProtocolId id)
+            DMNetworkManager& n,
+            DMNetworkManager::ProtocolId id)
             : network(n),
               protocolId(id)
         {}
@@ -446,8 +447,8 @@ public:
 
 
     void setupPacer(
-        NetworkManager& network,
-        NetworkManager::ProtocolId protocolId)
+        DMNetworkManager& network,
+        DMNetworkManager::ProtocolId protocolId)
     {
         delete pacer;
 
@@ -466,37 +467,44 @@ public:
 
     static constexpr size_t MAX_MQTT_CLIENTS = 4;
 
+
     struct ModbusTCP
     {
-        EthernetClient client;
-        ModbusTCPClient modbus{client};
+        DMPlatform::Network::TCPClient client;
+
+        ModbusTCPClient modbus{
+            client
+        };
     };
+
 
     struct MQTT
     {
-        EthernetClient client;
+        DMPlatform::Network::TCPClient client;
+
         PubSubClient pubSub;
+
 
         MQTT()
             : client(),
-            pubSub()
+              pubSub()
         {
-            pubSub.setClient(client);
+            pubSub.setClient(
+                client
+            );
         }
     };
 
 
     explicit FrontendNetwork(
-        size_t mqttClientCount
-    )
+        size_t mqttClientCount)
     {
         _mqttClientCount =
             mqttClientCount;
 
-        if (
-            _mqttClientCount >
-            MAX_MQTT_CLIENTS
-        )
+
+        if (_mqttClientCount >
+            MAX_MQTT_CLIENTS)
         {
             _mqttClientCount =
                 MAX_MQTT_CLIENTS;
@@ -510,7 +518,8 @@ public:
     }
 
 
-    MQTT& mqtt(size_t index)
+    MQTT& mqtt(
+        size_t index)
     {
         return _mqtt[index];
     }
@@ -556,23 +565,12 @@ public:
         long value
     );
 
-    // ========================================================
-    // RUNTIME MAPPING
-    // ========================================================
-
-    struct RuntimeMapping
-    {
-        uint8_t clientIndex;
-
-        const FrontendConfig::MQTT::Client* client;
-        const FrontendConfig::MQTT::Device* device;
-        const FrontendConfig::MQTT::Mapping* mapping;
-
-        long lastRaw;
-
-        bool dirty;
-        bool initialized;
-    };
+    typedef void (*CommandReceivedCallback)(
+        uint8_t clientIndex,
+        const FrontendConfig::MQTT::Device* device,
+        const FrontendConfig::MQTT::Mapping* mapping,
+        long value
+    );
 
     // ========================================================
     // RUNTIME CLIENT
@@ -595,7 +593,119 @@ public:
         SocketHandle socket;
     };
 
+    // ========================================================
+    // RUNTIME MAPPING
+    // ========================================================
+    struct RuntimeCommandState
+    {
+        long value;
+        unsigned long timestamp;
+        bool initialized;
+
+        RuntimeCommandState()
+            : value(0)
+            , timestamp(0)
+            , initialized(false)
+        {
+        }
+    };
+
+
+    struct RuntimeMapping
+    {
+        uint8_t clientIndex;
+
+        const FrontendConfig::MQTT::Client* client;
+        const FrontendConfig::MQTT::Device* device;
+        const FrontendConfig::MQTT::Mapping* mapping;
+
+        RuntimeClient* runtimeClient;
+
+        RuntimeCommandState command;
+
+        long lastRaw;
+
+        bool dirty;
+        bool initialized;
+    };
+
 private:
+    static uint16_t dirtyMappings[MAX_MAPPINGS];
+    static uint16_t dirtyCount;
+
+    static void EnqueueDirty(
+        uint16_t mappingIndex
+    )
+    {
+        RuntimeMapping* mappings =
+            getMappings();
+
+        RuntimeMapping& rm =
+            mappings[mappingIndex];
+
+        /*
+        * Già schedulato.
+        */
+        if (rm.dirty)
+            return;
+
+        if (dirtyCount >= MAX_MAPPINGS)
+        {
+            LOG_WF(
+                "MQTT",
+                "Dirty queue piena"
+            );
+
+            return;
+        }
+
+        rm.dirty = true;
+
+        dirtyMappings[
+            dirtyCount++
+        ] = mappingIndex;
+    }
+
+    static bool IsDuplicateCommand(
+        const FrontendConfig::MQTT::Mapping* mapping,
+        long value
+    )
+    {
+        RuntimeMapping* mappings =
+            getMappings();
+
+        for (size_t i = 0;
+            i < mappingCount;
+            ++i)
+        {
+            RuntimeMapping& rm =
+                mappings[i];
+
+            if (rm.mapping != mapping)
+                continue;
+
+            if (!rm.command.initialized)
+            {
+                rm.command.initialized = true;
+                rm.command.value = value;
+                rm.command.timestamp = millis();
+
+                return false;
+            }
+
+            if (rm.command.value == value)
+            {
+                return true;
+            }
+
+            rm.command.value = value;
+            rm.command.timestamp = millis();
+
+            return false;
+        }
+
+        return false;
+    }
 
     // ========================================================
     // STORAGE STATICO COMPATIBILE CON VECCHIO GCC
@@ -632,10 +742,11 @@ private:
 
     static unsigned long lastLoop;
 
-    static NetworkManager* networkManager;
-    static NetworkManager::ProtocolId mqttProtocolId;
+    static DMNetworkManager* networkManager;
+    static DMNetworkManager::ProtocolId mqttProtocolId;
     static uint8_t mqttSource;
 
+    static CommandReceivedCallback commandReceivedCallback;
 public:
 
     // ========================================================
@@ -644,11 +755,11 @@ public:
 
     static void Setup(
         DomoManager& dm,
-        NetworkManager& netManager,
+        DMNetworkManager& netManager,
         FrontendNetwork& network,
         size_t mqttClientCount,
         const FrontendConfig::MQTT& cfg,
-        NetworkManager::ProtocolId protocol,
+        DMNetworkManager::ProtocolId protocol,
         uint8_t eventSource
     )
     {
@@ -661,6 +772,8 @@ public:
         manager = &dm;
         networkManager = &netManager;
         configuration = &cfg;
+
+        commandReceivedCallback = nullptr;
 
         mqttProtocolId = protocol;
         mqttSource = eventSource;
@@ -690,6 +803,7 @@ public:
 
         clientCount = 0;
         mappingCount = 0;
+        dirtyCount = 0;
 
         /*
         * ------------------------------------------------------------
@@ -920,6 +1034,8 @@ public:
             ++clientCount;
         }
 
+        BindRuntimeMappings();
+
         /*
         * ------------------------------------------------------------
         * Runtime initial values
@@ -1083,8 +1199,8 @@ public:
             getMappings();
 
         for (size_t i = 0;
-             i < mappingCount;
-             ++i)
+            i < mappingCount;
+            ++i)
         {
             RuntimeMapping& rm =
                 mappings[i];
@@ -1095,30 +1211,14 @@ public:
             if (rm.mapping->area != area)
                 continue;
 
-            /*
-             * Questo log può diventare molto rumoroso.
-             * Manteniamo solo il log di debug/evento già previsto
-             * dal tuo motore.
-             */
-            LOG_IF(
-                "MQTT",
-                "PublishEvent MATCH client=%u device=%s field=%s area=%d value=%ld",
-                (unsigned)rm.clientIndex,
-                rm.device && rm.device->id
-                    ? rm.device->id
-                    : "?",
-                rm.mapping && rm.mapping->field
-                    ? rm.mapping->field
-                    : "?",
-                rm.mapping->area,
-                value
-            );
-
             if (!CanWrite(rm.mapping))
                 continue;
 
             rm.lastRaw = value;
-            rm.dirty = true;
+
+            EnqueueDirty(
+                (uint16_t)i
+            );
         }
     }
 
@@ -1133,31 +1233,79 @@ public:
         long value
     )
     {
-        if (!manager)
+        if (!mapping)
             return;
 
-        if (!mapping)
+        /*
+        * Elimina eventi consecutivi identici.
+        *
+        * Molti telecomandi Zigbee e Zigbee2MQTT
+        * possono pubblicare ripetutamente lo stesso
+        * comando a breve distanza.
+        */
+        RuntimeMapping* mappings =
+            getMappings();
+
+        for (size_t i = 0;
+            i < mappingCount;
+            ++i)
+        {
+            RuntimeMapping& rm =
+                mappings[i];
+
+            if (rm.mapping != mapping)
+                continue;
+
+            if (
+                rm.command.initialized
+                &&
+                rm.command.value == value
+            )
+            {
+                return;
+            }
+
+            rm.command.initialized =
+                true;
+
+            rm.command.value =
+                value;
+
+            rm.command.timestamp =
+                millis();
+
+            break;
+        }
+
+        /*
+        * Callback utente.
+        */
+        if (commandReceivedCallback)
+        {
+            commandReceivedCallback(
+                clientIndex,
+                device,
+                mapping,
+                value
+            );
+        }
+
+        if (!manager)
             return;
 
         if (!CanRead(mapping))
             return;
 
         /*
-         * MQTT -> sistema domotico.
-         *
-         * IMPORTANTE:
-         * qui MQTTEngine finisce.
-         *
-         * DomoManager viene usato esclusivamente
-         * dal FrontendEngine.
-         */
+        * MQTT -> sistema domotico.
+        */
         manager->forceEvent(
             mapping->area,
             value,
             mqttSource
         );
 
-        LOG_IF(
+        LOG_DF(
             "MQTT",
             "CMD client=%u device=%s field=%s area=%d value=%ld",
             (unsigned)clientIndex,
@@ -1206,11 +1354,55 @@ public:
         return &getMappings()[index];
     }
 
+
+    // ========================================================
+    // SETTER
+    // ========================================================
+
+    static void setCommandReceivedCallback(
+        CommandReceivedCallback callback
+    )
+    {
+        commandReceivedCallback = callback;
+    }
 private:
 
     // ========================================================
     // BUILD RUNTIME MAPPINGS
     // ========================================================
+    static void BindRuntimeMappings()
+    {
+        RuntimeClient* clients =
+            getClients();
+
+        RuntimeMapping* mappings =
+            getMappings();
+
+        for (size_t m = 0;
+            m < mappingCount;
+            ++m)
+        {
+            RuntimeMapping& rm =
+                mappings[m];
+
+            rm.runtimeClient =
+                nullptr;
+
+            for (size_t c = 0;
+                c < clientCount;
+                ++c)
+            {
+                if (clients[c].index ==
+                    rm.clientIndex)
+                {
+                    rm.runtimeClient =
+                        &clients[c];
+
+                    break;
+                }
+            }
+        }
+    }
 
     static void BuildRuntimeMappings(
         const FrontendConfig::MQTT& cfg
@@ -1224,13 +1416,6 @@ private:
         if (!cfg.clients)
             return;
 
-        /*
-        * ============================================================
-        * CLIENT
-        * ============================================================
-        *
-        * Ogni Client possiede direttamente il proprio array di Device.
-        */
         for (size_t c = 0;
             c < cfg.clientCount;
             ++c)
@@ -1244,11 +1429,6 @@ private:
             if (!client.devices)
                 continue;
 
-            /*
-            * ========================================================
-            * DEVICE
-            * ========================================================
-            */
             for (size_t d = 0;
                 d < client.deviceCount;
                 ++d)
@@ -1256,11 +1436,6 @@ private:
                 const FrontendConfig::MQTT::Device& device =
                     client.devices[d];
 
-                /*
-                * ====================================================
-                * MAPPING
-                * ====================================================
-                */
                 for (size_t m = 0;
                     m < FrontendConfig::MQTT::Device::MAX_MAPPINGS;
                     ++m)
@@ -1268,17 +1443,9 @@ private:
                     const FrontendConfig::MQTT::Mapping& mapping =
                         device.mappings[m];
 
-                    /*
-                    * Mapping non configurato.
-                    *
-                    * Il campo è nullptr quando lo slot non viene usato.
-                    */
                     if (!mapping.field)
                         continue;
 
-                    /*
-                    * Limite storage runtime.
-                    */
                     if (mappingCount >= MAX_MAPPINGS)
                     {
                         LOG_IF(
@@ -1305,15 +1472,33 @@ private:
                     rm.mapping =
                         &mapping;
 
-                    rm.lastRaw = 0;
-                    rm.dirty = false;
-                    rm.initialized = false;
+                    rm.runtimeClient =
+                        nullptr;
+
+                    /*
+                    * Runtime stato comandi MQTT.
+                    */
+                    rm.command =
+                        RuntimeCommandState();
+
+                    /*
+                    * Runtime publish.
+                    */
+                    rm.lastRaw =
+                        0;
+
+                    rm.dirty =
+                        false;
+
+                    rm.initialized =
+                        false;
 
                     ++mappingCount;
                 }
             }
         }
     }
+
 
     // ========================================================
     // INIZIALIZZAZIONE VALORI
@@ -1349,66 +1534,82 @@ private:
 
     static void PublishDirty()
     {
-        RuntimeClient* clients =
-            getClients();
-
         RuntimeMapping* mappings =
             getMappings();
 
-        for (size_t i = 0;
-             i < mappingCount;
-             ++i)
+        uint16_t writePos = 0;
+
+        for (
+            uint16_t i = 0;
+            i < dirtyCount;
+            ++i
+        )
         {
+            const uint16_t mappingIndex =
+                dirtyMappings[i];
+
             RuntimeMapping& rm =
-                mappings[i];
+                mappings[mappingIndex];
 
-            if (!rm.dirty)
-                continue;
+            RuntimeClient* rc =
+                rm.runtimeClient;
 
-            for (size_t c = 0;
-                 c < clientCount;
-                 ++c)
+            if (!rc)
             {
-                RuntimeClient& rc =
-                    clients[c];
+                dirtyMappings[
+                    writePos++
+                ] = mappingIndex;
 
-                if (rc.index != rm.clientIndex)
-                    continue;
+                continue;
+            }
 
-                if (!rc.initialized)
-                    break;
+            if (!rc->initialized)
+            {
+                dirtyMappings[
+                    writePos++
+                ] = mappingIndex;
 
-                if (!rc.mqtt)
-                    break;
+                continue;
+            }
 
-                /*
-                 * PublishDirty() non deve tentare connessioni.
-                 *
-                 * Se il client è offline,
-                 * il mapping resta dirty e verrà riprovato
-                 * quando MQTT tornerà connesso.
-                 */
-                //if (!rc.mqtt->connected())
-                //    break;
-                // Se si usa connected, con 2 client si pianta
-                if (rc.mqtt->state() != 0)
-                    break;
+            if (!rc->mqtt)
+            {
+                dirtyMappings[
+                    writePos++
+                ] = mappingIndex;
 
-                if (
-                    rc.mqtt->publishMapping(
-                        rm.device,
-                        rm.mapping,
-                        rm.lastRaw
-                    )
+                continue;
+            }
+
+            if (rc->mqtt->state() != 0)
+            {
+                dirtyMappings[
+                    writePos++
+                ] = mappingIndex;
+
+                continue;
+            }
+
+            if (
+                rc->mqtt->publishMapping(
+                    rm.device,
+                    rm.mapping,
+                    rm.lastRaw
                 )
-                {
-                    rm.dirty = false;
-                    rm.initialized = true;
-                }
-
-                break;
+            )
+            {
+                rm.dirty = false;
+                rm.initialized = true;
+            }
+            else
+            {
+                dirtyMappings[
+                    writePos++
+                ] = mappingIndex;
             }
         }
+
+        dirtyCount = writePos;
     }
 
     // ========================================================
@@ -1460,9 +1661,18 @@ size_t MQTTEngine::mappingCount = 0;
 
 unsigned long MQTTEngine::lastLoop = 0;
 
-NetworkManager* MQTTEngine::networkManager = nullptr;
-NetworkManager::ProtocolId MQTTEngine::mqttProtocolId = -1;
+DMNetworkManager* MQTTEngine::networkManager = nullptr;
+DMNetworkManager::ProtocolId MQTTEngine::mqttProtocolId = -1;
 uint8_t MQTTEngine::mqttSource = 255;
+
+MQTTEngine::CommandReceivedCallback
+    MQTTEngine::commandReceivedCallback = nullptr;
+
+uint16_t MQTTEngine::dirtyMappings[
+    MQTTEngine::MAX_MAPPINGS
+];
+
+uint16_t MQTTEngine::dirtyCount = 0;
 
 // ============================================================
 //  WebAPIEngine — wrapper industriale per DeviceMessageEngine
@@ -1556,10 +1766,10 @@ public:
 //   2. Poll dei client
 //   3. Sincronizzazione Buffer <-> HMI
 //
-// NON esegue direttamente Modbus RTU.
 // Le modifiche HMI finiscono nel Buffer e seguono
 // il normale percorso DomoManager -> NetworkManager -> RTU.
 // ============================================================
+
 
 class HMIEngine
 {
@@ -1595,47 +1805,98 @@ public:
         if (!_running)
             return;
 
+
+        const int area =
+            event.area;
+
+
+        // ----------------------------------------------------
+        // VALIDATE AREA
+        // ----------------------------------------------------
+
+        if (area < 0 ||
+            area >= static_cast<int>(_registerCount))
+        {
+            LOG_WF(
+                "HMIEngine",
+                "PushEvent ignored: invalid area=%d "
+                "registerCount=%u",
+                area,
+                (unsigned)_registerCount
+            );
+
+            return;
+        }
+
+
+        const uint16_t value =
+            static_cast<uint16_t>(
+                event.value
+            );
+
+
+        // ====================================================
+        // PROPAGATE EVENT TO ALL CONNECTED HMI CLIENTS
+        // ====================================================
+
         for (uint8_t client = 0;
              client < _maxClients;
              ++client)
         {
-            if (!_context.clients[client] ||
-                !_context.clients[client].connected())
+            DMPlatform::Network::TCPClient& tcpClient =
+                _context.clients[client];
+
+
+            if (!tcpClient)
                 continue;
 
-            if (event.area < 0 ||
-                event.area >= _registerCount)
-            {
+
+            if (!tcpClient.connected())
                 continue;
-            }
 
-            const uint16_t value =
-                static_cast<uint16_t>(
-                    event.value
-                );
 
-            const bool ok =
-                _context.modbusServers[client]
-                    .holdingRegisterWrite(
-                        event.area,
-                        value
-                    );
+            ModbusTCPServer& server =
+                _context.modbusServers[client];
 
-            if (!ok)
-            {
-                LOG_WF(
-                    "HMIEngine",
-                    "PushEvent FAIL: client=%u area=%d value=%u",
-                    client,
-                    event.area,
+
+            // ------------------------------------------------
+            // ArduinoModbus:
+            //
+            // 1 = SUCCESS
+            // 0 = FAILURE
+            // ------------------------------------------------
+
+            const int result =
+                server.holdingRegisterWrite(
+                    area,
                     value
                 );
 
+
+            if (result != 1)
+            {
+                LOG_WF(
+                    "HMIEngine",
+                    "PushEvent FAIL: "
+                    "client=%u area=%d value=%u result=%d",
+                    (unsigned)client,
+                    area,
+                    (unsigned)value,
+                    result
+                );
+
                 continue;
             }
 
-            // Allinea la shadow al valore scritto internamente.
-            _registerShadow[client][event.area] =
+
+            // ------------------------------------------------
+            // Allinea shadow alla scrittura interna.
+            //
+            // Evita che SyncHMIToBuffer() interpreti questa
+            // scrittura come modifica proveniente dall'HMI.
+            // ------------------------------------------------
+
+            _registerShadow[client][area] =
                 value;
         }
     }
@@ -1658,6 +1919,24 @@ private:
     bool _running = false;
 
 
+    // ========================================================
+    // PROTOCOL
+    // ========================================================
+
+    DMNetworkManager::ProtocolId _protocolId = -1;
+
+
+    // ========================================================
+    // PENDING HMI UPDATE
+    // ========================================================
+    //
+    // Conservato dal modello originale.
+    //
+    // Attualmente non viene prodotto da SyncHMIToBuffer(),
+    // ma rimane disponibile per eventuali percorsi futuri.
+    //
+    // ========================================================
+
     struct PendingHMIUpdate
     {
         int area;
@@ -1666,18 +1945,25 @@ private:
     };
 
 
-    std::vector<PendingHMIUpdate>
-        pendingUpdates;
+    std::vector<
+        PendingHMIUpdate
+    > pendingUpdates;
 
 
-    // Stato ultimo valore noto dei Holding Register
-    // per ogni client.
+    // ========================================================
+    // HOLDING REGISTER SHADOW
+    // ========================================================
+
     uint16_t _registerCount = 0;
 
     std::vector<
         std::vector<uint16_t>
     > _registerShadow;
 
+
+    // ========================================================
+    // EVENT SOURCE
+    // ========================================================
 
     uint8_t _eventSource = 0;
 
@@ -1686,16 +1972,11 @@ private:
     // NETWORK MANAGER
     // ========================================================
 
-    NetworkManager* _networkManager = nullptr;
+    DMNetworkManager* _networkManager = nullptr;
 
 
     // ========================================================
     // SOCKET OWNER
-    //
-    // UN SOLO owner per tutto HMI.
-    //
-    // Viene creato esternamente da NetworkManager::
-    // registerProtocol().
     // ========================================================
 
     SocketManager::OwnerId _socketOwner = -1;
@@ -1703,33 +1984,55 @@ private:
 
     // ========================================================
     // SOCKET RESOURCE IDS
+    // ========================================================
     //
-    // Gli owner non sono stringhe.
+    // Sono resource ID LOGICI del SocketManager.
     //
-    // Le differenti risorse HMI vengono distinte tramite
-    // resourceId.
     // ========================================================
 
-    static constexpr int SOCKET_RESOURCE_SERVER = 0;
+    static constexpr int SOCKET_RESOURCE_SERVER =
+        0;
 
-    static constexpr int SOCKET_RESOURCE_MODBUS_BASE = 1000;
 
-    static constexpr int SOCKET_RESOURCE_CLIENT_BASE = 2000;
+    static constexpr int SOCKET_RESOURCE_MODBUS_BASE =
+        1000;
+
+
+    static constexpr int SOCKET_RESOURCE_CLIENT_BASE =
+        2000;
+
+
+    // ========================================================
+    // RESOURCE STATE
+    // ========================================================
+
+    uint8_t _reservedModbusResources = 0;
+
+    bool _serverResourceAcquired = false;
 
 
     // ========================================================
     // NETWORK CONTEXT
+    // ========================================================
     //
-    // Contesto PRIVATO HMI.
+    // Nessun riferimento diretto a EthernetServer /
+    // EthernetClient.
+    //
+    // Tutto passa da DMPlatform::Network.
+    //
     // ========================================================
 
     struct Context
     {
-        EthernetServer server;
+        DMPlatform::Network::TCPServer* server = nullptr;
 
-        std::vector<EthernetClient> clients;
+        std::vector<
+            DMPlatform::Network::TCPClient
+        > clients;
 
-        std::vector<ModbusTCPServer> modbusServers;
+        std::vector<
+            ModbusTCPServer
+        > modbusServers;
     };
 
 
@@ -1737,7 +2040,7 @@ private:
 
 
     // ========================================================
-    // SOCKET RESOURCE ID
+    // RESOURCE ID HELPERS
     // ========================================================
 
     static int modbusResourceId(
@@ -1774,6 +2077,7 @@ private:
             return false;
         }
 
+
         if (_socketOwner < 0)
         {
             LOG_EF(
@@ -1784,26 +2088,39 @@ private:
             return false;
         }
 
+
         const int slot =
-            _networkManager->sockets().acquire(
-                _socketOwner,
-                SOCKET_RESOURCE_SERVER,
-                SocketManager::SocketKind::TCP_SERVER
-            );
+            _networkManager
+                ->sockets()
+                .acquire(
+                    _socketOwner,
+                    SOCKET_RESOURCE_SERVER,
+                    SocketManager::SocketKind::TCP_SERVER
+                );
+
 
         if (slot < 0)
         {
             LOG_WF(
                 "HMIEngine",
-                "HMI TCP listener socket unavailable"
+                "HMI TCP listener resource unavailable"
             );
 
             return false;
         }
 
+
+        _serverResourceAcquired =
+            true;
+
+
         return true;
     }
 
+
+    // ========================================================
+    // MODBUS RESOURCE ACQUIRE
+    // ========================================================
 
     bool acquireModbusSocket(
         uint8_t index)
@@ -1818,6 +2135,7 @@ private:
             return false;
         }
 
+
         if (_socketOwner < 0)
         {
             LOG_EF(
@@ -1828,30 +2146,42 @@ private:
             return false;
         }
 
+
         const int resourceId =
             modbusResourceId(index);
 
+
         const int slot =
-            _networkManager->sockets().acquire(
-                _socketOwner,
-                resourceId,
-                SocketManager::SocketKind::TCP_SERVER
-            );
+            _networkManager
+                ->sockets()
+                .acquire(
+                    _socketOwner,
+                    resourceId,
+                    SocketManager::SocketKind::TCP_SERVER
+                );
+
 
         if (slot < 0)
         {
             LOG_WF(
                 "HMIEngine",
-                "HMI Modbus server socket unavailable: index=%u",
-                index
+                "HMI Modbus resource unavailable: "
+                "index=%u resource=%d",
+                (unsigned)index,
+                resourceId
             );
 
             return false;
         }
 
+
         return true;
     }
 
+
+    // ========================================================
+    // CLIENT RESOURCE ACQUIRE
+    // ========================================================
 
     bool acquireClientSocket(
         uint8_t index)
@@ -1866,6 +2196,7 @@ private:
             return false;
         }
 
+
         if (_socketOwner < 0)
         {
             LOG_EF(
@@ -1876,33 +2207,41 @@ private:
             return false;
         }
 
+
         const int resourceId =
             clientResourceId(index);
 
+
         const int slot =
-            _networkManager->sockets().acquire(
-                _socketOwner,
-                resourceId,
-                SocketManager::SocketKind::TCP_CLIENT
-            );
+            _networkManager
+                ->sockets()
+                .acquire(
+                    _socketOwner,
+                    resourceId,
+                    SocketManager::SocketKind::TCP_CLIENT
+                );
+
 
         if (slot < 0)
         {
             LOG_WF(
                 "HMIEngine",
-                "HMI client socket unavailable: client=%u",
-                index
+                "HMI client resource unavailable: "
+                "client=%u resource=%d",
+                (unsigned)index,
+                resourceId
             );
 
             return false;
         }
+
 
         return true;
     }
 
 
     // ========================================================
-    // SOCKET RELEASE
+    // SERVER RESOURCE RELEASE
     // ========================================================
 
     void releaseServerSocket()
@@ -1910,16 +2249,32 @@ private:
         if (!_networkManager)
             return;
 
+
         if (_socketOwner < 0)
             return;
 
-        _networkManager->sockets().release(
-            _socketOwner,
-            SOCKET_RESOURCE_SERVER,
-            SocketManager::SocketKind::TCP_SERVER
-        );
+
+        if (!_serverResourceAcquired)
+            return;
+
+
+        _networkManager
+            ->sockets()
+            .release(
+                _socketOwner,
+                SOCKET_RESOURCE_SERVER,
+                SocketManager::SocketKind::TCP_SERVER
+            );
+
+
+        _serverResourceAcquired =
+            false;
     }
 
+
+    // ========================================================
+    // MODBUS RESOURCE RELEASE
+    // ========================================================
 
     void releaseModbusSocket(
         uint8_t index)
@@ -1927,16 +2282,24 @@ private:
         if (!_networkManager)
             return;
 
+
         if (_socketOwner < 0)
             return;
 
-        _networkManager->sockets().release(
-            _socketOwner,
-            modbusResourceId(index),
-            SocketManager::SocketKind::TCP_SERVER
-        );
+
+        _networkManager
+            ->sockets()
+            .release(
+                _socketOwner,
+                modbusResourceId(index),
+                SocketManager::SocketKind::TCP_SERVER
+            );
     }
 
+
+    // ========================================================
+    // CLIENT RESOURCE RELEASE
+    // ========================================================
 
     void releaseClientSocket(
         uint8_t index)
@@ -1944,19 +2307,47 @@ private:
         if (!_networkManager)
             return;
 
+
         if (_socketOwner < 0)
             return;
 
-        _networkManager->sockets().release(
-            _socketOwner,
-            clientResourceId(index),
-            SocketManager::SocketKind::TCP_CLIENT
-        );
+
+        _networkManager
+            ->sockets()
+            .release(
+                _socketOwner,
+                clientResourceId(index),
+                SocketManager::SocketKind::TCP_CLIENT
+            );
     }
 
 
     // ========================================================
-    // RELEASE ALL HMI SOCKETS
+    // RELEASE MODBUS RESOURCES
+    // ========================================================
+
+    void releaseModbusResources(
+        uint8_t count)
+    {
+        if (count > _maxClients)
+            count = _maxClients;
+
+
+        for (uint8_t i = 0;
+             i < count;
+             ++i)
+        {
+            releaseModbusSocket(i);
+        }
+
+
+        _reservedModbusResources =
+            0;
+    }
+
+
+    // ========================================================
+    // RELEASE ALL HMI RESOURCES
     // ========================================================
 
     void releaseAllSockets()
@@ -1964,12 +2355,265 @@ private:
         if (!_networkManager)
             return;
 
+
         if (_socketOwner < 0)
             return;
 
-        _networkManager->sockets().releaseOwner(
-            _socketOwner
+
+        _networkManager
+            ->sockets()
+            .releaseOwner(
+                _socketOwner
+            );
+
+
+        _serverResourceAcquired =
+            false;
+
+
+        _reservedModbusResources =
+            0;
+    }
+
+
+    // ========================================================
+    // RESET REGISTER SHADOW
+    // ========================================================
+
+    void resetRegisterShadow()
+    {
+        _registerShadow.clear();
+
+
+        _registerShadow.resize(
+            _maxClients
         );
+
+
+        for (uint8_t client = 0;
+             client < _maxClients;
+             ++client)
+        {
+            _registerShadow[client].assign(
+                _registerCount,
+                0
+            );
+        }
+    }
+
+
+    // ========================================================
+    // DESTROY TCP SERVER OBJECT
+    // ========================================================
+    //
+    // Il lifecycle del transport è incapsulato in:
+    //
+    //     DMPlatform::Network
+    //
+    // ========================================================
+
+    void destroyServerObject()
+    {
+        if (_context.server == nullptr)
+            return;
+
+
+        DMPlatform::Network::DestroyTCPServer(
+            _context.server
+        );
+    }
+
+
+    // ========================================================
+    // CREATE TCP SERVER
+    // ========================================================
+
+    bool createServer()
+    {
+        if (_context.server != nullptr)
+        {
+            LOG_EF(
+                "HMIEngine",
+                "HMI TCP server object already exists"
+            );
+
+            return false;
+        }
+
+
+        _context.server =
+            DMPlatform::Network::CreateTCPServer(
+                _config.port
+            );
+
+
+        if (_context.server == nullptr)
+        {
+            LOG_EF(
+                "HMIEngine",
+                "Unable to create TCP server: port=%u",
+                (unsigned)_config.port
+            );
+
+            return false;
+        }
+
+
+        if (!DMPlatform::Network::StartTCPServer(
+                *_context.server
+            ))
+        {
+            LOG_EF(
+                "HMIEngine",
+                "Unable to start HMI TCP listener: port=%u",
+                (unsigned)_config.port
+            );
+
+
+            destroyServerObject();
+
+            return false;
+        }
+
+
+        return true;
+    }
+
+
+    // ========================================================
+    // CLEANUP MODBUS SERVERS
+    // ========================================================
+
+    void cleanupModbusServers(
+        uint8_t count)
+    {
+        const uint8_t available =
+            static_cast<uint8_t>(
+                _context.modbusServers.size()
+            );
+
+
+        if (count > available)
+            count = available;
+
+
+        for (uint8_t i = 0;
+             i < count;
+             ++i)
+        {
+            _context.modbusServers[i].end();
+        }
+    }
+
+
+    // ========================================================
+    // INITIALIZE MODBUS SERVERS
+    // ========================================================
+
+    bool initializeModbusServers()
+    {
+        uint8_t initializedServers = 0;
+
+
+        for (uint8_t i = 0;
+             i < _maxClients;
+             ++i)
+        {
+            ModbusTCPServer& server =
+                _context.modbusServers[i];
+
+
+            // =================================================
+            // MODBUS BEGIN
+            // =================================================
+            //
+            // ArduinoModbus:
+            //
+            //     1 = success
+            //     0 = failure
+            //
+            // =================================================
+
+            const int beginResult =
+                server.begin();
+
+
+            if (beginResult != 1)
+            {
+                LOG_EF(
+                    "HMIEngine",
+                    "Modbus TCP server initialization failed: "
+                    "index=%u result=%d",
+                    (unsigned)i,
+                    beginResult
+                );
+
+
+                cleanupModbusServers(
+                    initializedServers
+                );
+
+
+                return false;
+            }
+
+
+            // =================================================
+            // HOLDING REGISTERS
+            // =================================================
+            //
+            // ArduinoModbus implementation used on OPTA:
+            //
+            //     1 = success
+            //     0 = failure
+            //
+            // =================================================
+
+            const int result =
+                server.configureHoldingRegisters(
+                    0,
+                    static_cast<int>(
+                        _registerCount
+                    )
+                );
+
+
+            if (result != 1)
+            {
+                LOG_EF(
+                    "HMIEngine",
+                    "Holding register configuration failed: "
+                    "index=%u count=%u result=%d",
+                    (unsigned)i,
+                    (unsigned)_registerCount,
+                    result
+                );
+
+
+                server.end();
+
+
+                cleanupModbusServers(
+                    initializedServers
+                );
+
+
+                return false;
+            }
+
+
+            ++initializedServers;
+        }
+
+
+        LOG_IF(
+            "HMIEngine",
+            "HMI Modbus contexts initialized: count=%u",
+            (unsigned)initializedServers
+        );
+
+
+        return true;
     }
 
 
@@ -1981,77 +2625,87 @@ private:
     {
         _activeClients = 0;
 
+        _reservedModbusResources = 0;
+
+        _serverResourceAcquired = false;
+
+
+        // ====================================================
+        // LOGICAL CLIENT SLOTS
+        // ====================================================
+
         _context.clients.clear();
+
         _context.modbusServers.clear();
 
-
-        // ----------------------------------------------------
-        // Dynamic client slots
-        // ----------------------------------------------------
 
         _context.clients.resize(
             _maxClients
         );
+
 
         _context.modbusServers.resize(
             _maxClients
         );
 
 
-        // ----------------------------------------------------
-        // HMI TCP LISTENER
-        // ----------------------------------------------------
+        // ====================================================
+        // SERVER RESOURCE
+        // ====================================================
 
         if (!acquireServerSocket())
         {
             LOG_WF(
                 "HMIEngine",
-                "Unable to reserve HMI TCP listener socket"
+                "Unable to reserve HMI TCP listener resource"
             );
 
             return false;
         }
 
 
-        _context.server.begin(
-            _config.port
-        );
+        // ====================================================
+        // PHYSICAL TCP SERVER
+        // ====================================================
+
+        if (!createServer())
+        {
+            LOG_WF(
+                "HMIEngine",
+                "Unable to create HMI TCP listener"
+            );
 
 
-        // ----------------------------------------------------
-        // MODBUS TCP SERVERS
-        // ----------------------------------------------------
+            releaseServerSocket();
 
-        uint8_t initializedServers = 0;
+            return false;
+        }
+
+
+        // ====================================================
+        // MODBUS LOGICAL RESOURCES
+        // ====================================================
 
         for (uint8_t i = 0;
              i < _maxClients;
              ++i)
         {
-            // -----------------------------------------------
-            // Reserve socket
-            // -----------------------------------------------
-
             if (!acquireModbusSocket(i))
             {
                 LOG_WF(
                     "HMIEngine",
-                    "Unable to reserve Modbus server socket: index=%u",
-                    i
+                    "Unable to reserve HMI Modbus resource: "
+                    "index=%u",
+                    (unsigned)i
                 );
 
-                // cleanup già inizializzati
-                for (uint8_t j = 0;
-                     j < initializedServers;
-                     ++j)
-                {
-                    _context.modbusServers[j].end();
 
-                    releaseModbusSocket(j);
-                }
+                releaseModbusResources(
+                    _reservedModbusResources
+                );
 
 
-                _context.server.end();
+                destroyServerObject();
 
                 releaseServerSocket();
 
@@ -2059,67 +2713,232 @@ private:
             }
 
 
-            // -----------------------------------------------
-            // Start Modbus server
-            // -----------------------------------------------
-
-            if (!_context.modbusServers[i].begin())
-            {
-                LOG_EF(
-                    "HMIEngine",
-                    "Modbus TCP server %d initialization failed",
-                    i
-                );
-
-
-                releaseModbusSocket(i);
-
-
-                // cleanup server precedenti
-                for (uint8_t j = 0;
-                     j < initializedServers;
-                     ++j)
-                {
-                    _context.modbusServers[j].end();
-
-                    releaseModbusSocket(j);
-                }
-
-
-                _context.server.end();
-
-                releaseServerSocket();
-
-                return false;
-            }
-
-
-            _context.modbusServers[i]
-                .configureHoldingRegisters(
-                    0x00,
-                    _registerCount
-                );
-
-
-            ++initializedServers;
+            ++_reservedModbusResources;
         }
+
+
+        // ====================================================
+        // MODBUS CONTEXTS
+        // ====================================================
+
+        if (!initializeModbusServers())
+        {
+            LOG_EF(
+                "HMIEngine",
+                "Unable to initialize HMI Modbus contexts"
+            );
+
+
+            cleanupModbusServers(
+                _maxClients
+            );
+
+
+            releaseModbusResources(
+                _reservedModbusResources
+            );
+
+
+            destroyServerObject();
+
+            releaseServerSocket();
+
+            return false;
+        }
+
+
+        // ====================================================
+        // SUCCESS
+        // ====================================================
+
+        const unsigned socketDemand =
+            1u +
+            (
+                2u *
+                static_cast<unsigned>(
+                    _maxClients
+                )
+            );
 
 
         LOG_IF(
             "HMIEngine",
-            "HMI Modbus TCP started: port=%d maxClients=%d",
-            _config.port,
-            _maxClients
+            "HMI Modbus TCP started: "
+            "port=%u maxClients=%u registers=%u "
+            "socketDemand=%u",
+            (unsigned)_config.port,
+            (unsigned)_maxClients,
+            (unsigned)_registerCount,
+            socketDemand
         );
 
 
         if (_networkManager)
         {
-            _networkManager->sockets().dump();
+            _networkManager
+                ->sockets()
+                .dump();
         }
 
 
         return true;
+    }
+
+
+    // ========================================================
+    // CLEANUP DISCONNECTED CLIENTS
+    // ========================================================
+
+    void cleanupDisconnectedClients()
+    {
+        for (uint8_t i = 0;
+             i < _maxClients;
+             ++i)
+        {
+            DMPlatform::Network::TCPClient& client =
+                _context.clients[i];
+
+
+            if (!client)
+                continue;
+
+
+            if (client.connected())
+                continue;
+
+
+            LOG_IF(
+                "HMIEngine",
+                "HMI client %u disconnected",
+                (unsigned)i
+            );
+
+
+            DMPlatform::Network::Stop(
+                client
+            );
+
+
+            releaseClientSocket(
+                i
+            );
+
+
+            if (_activeClients > 0)
+            {
+                --_activeClients;
+            }
+        }
+    }
+
+
+    // ========================================================
+    // ACCEPT NEW CLIENT
+    // ========================================================
+
+    void acceptNewClient()
+    {
+        if (_context.server == nullptr)
+            return;
+
+
+        DMPlatform::Network::TCPClient newClient =
+            DMPlatform::Network::AcceptTCPClient(
+                *_context.server
+            );
+
+
+        if (!newClient)
+            return;
+
+
+        // ====================================================
+        // FIND FREE LOGICAL SLOT
+        // ====================================================
+
+        for (uint8_t i = 0;
+             i < _maxClients;
+             ++i)
+        {
+            DMPlatform::Network::TCPClient& slot =
+                _context.clients[i];
+
+
+            if (slot &&
+                slot.connected())
+            {
+                continue;
+            }
+
+
+            // ------------------------------------------------
+            // SocketManager = tracking/resource accounting.
+            //
+            // Preserviamo la semantica originale:
+            // un failure di acquire non forza il disconnect
+            // del TCP client.
+            // ------------------------------------------------
+
+            const bool tracked =
+                acquireClientSocket(i);
+
+
+            if (!tracked)
+            {
+                LOG_WF(
+                    "HMIEngine",
+                    "HMI client %u accepted without "
+                    "SocketManager resource tracking",
+                    (unsigned)i
+                );
+            }
+
+
+            // ------------------------------------------------
+            // Salva il client nello slot stabile.
+            // ------------------------------------------------
+
+            slot =
+                newClient;
+
+
+            // ------------------------------------------------
+            // Associa il client al Modbus context.
+            // ------------------------------------------------
+
+            _context.modbusServers[i].accept(
+                slot
+            );
+
+
+            ++_activeClients;
+
+
+            LOG_IF(
+                "HMIEngine",
+                "HMI client %u connected - active=%u",
+                (unsigned)i,
+                (unsigned)_activeClients
+            );
+
+
+            return;
+        }
+
+
+        // ====================================================
+        // NO LOGICAL SLOT
+        // ====================================================
+
+        LOG_WF(
+            "HMIEngine",
+            "HMI connection rejected: logical slots full"
+        );
+
+
+        DMPlatform::Network::Stop(
+            newClient
+        );
     }
 
 
@@ -2129,108 +2948,14 @@ private:
 
     void ProcessConnections()
     {
-        // ====================================================
-        // 1. CLEANUP
-        // ====================================================
+        cleanupDisconnectedClients();
 
-        for (uint8_t i = 0;
-            i < _maxClients;
-            ++i)
-        {
-            if (_context.clients[i] &&
-                !_context.clients[i].connected())
-            {
-                LOG_IF(
-                    "HMIEngine",
-                    "HMI client %d disconnected",
-                    i
-                );
-
-                _context.clients[i].stop();
-
-                // ------------------------------------------------
-                // Il SocketManager gestisce internamente il fatto
-                // che la risorsa possa essere/non essere tracciata.
-                // ------------------------------------------------
-
-                releaseClientSocket(i);
-
-                if (_activeClients > 0)
-                    --_activeClients;
-            }
-        }
-
-
-        // ====================================================
-        // 2. ACCEPT
-        // ====================================================
-
-        EthernetClient newClient =
-            _context.server.accept();
-
-        if (!newClient)
-            return;
-
-
-        // ====================================================
-        // 3. FIND FREE LOGICAL SLOT
-        // ====================================================
-
-        for (uint8_t i = 0;
-            i < _maxClients;
-            ++i)
-        {
-            if (!_context.clients[i] ||
-                !_context.clients[i].connected())
-            {
-                // ------------------------------------------------
-                // Il client TCP è già stato accettato.
-                //
-                // Il SocketManager è solo tracking/diagnostica:
-                // se siamo a 4/4 NON chiudiamo il client.
-                // ------------------------------------------------
-
-                acquireClientSocket(i);
-
-                _context.clients[i] =
-                    newClient;
-
-
-                _context.modbusServers[i].accept(
-                    _context.clients[i]
-                );
-
-
-                ++_activeClients;
-
-
-                LOG_IF(
-                    "HMIEngine",
-                    "HMI client %d connected - active=%d",
-                    i,
-                    _activeClients
-                );
-
-
-                return;
-            }
-        }
-
-
-        // ====================================================
-        // 4. NO LOGICAL SLOT
-        // ====================================================
-
-        LOG_WF(
-            "HMIEngine",
-            "HMI connection rejected: slots full"
-        );
-
-        newClient.stop();
+        acceptNewClient();
     }
 
+
     // ========================================================
-    // POLL
+    // MODBUS POLL
     // ========================================================
 
     void Poll()
@@ -2239,17 +2964,25 @@ private:
              i < _maxClients;
              ++i)
         {
-            if (_context.clients[i] &&
-                _context.clients[i].connected())
-            {
-                _context.modbusServers[i].poll();
-            }
+            DMPlatform::Network::TCPClient& client =
+                _context.clients[i];
+
+
+            if (!client)
+                continue;
+
+
+            if (!client.connected())
+                continue;
+
+
+            _context.modbusServers[i].poll();
         }
     }
 
 
     // ========================================================
-    // HMI -> BUFFER
+    // PENDING UPDATE CONSUMER
     // ========================================================
 
     bool consumePendingUpdate(
@@ -2257,7 +2990,8 @@ private:
         int area,
         long value)
     {
-        for (auto it = pendingUpdates.begin();
+        for (auto it =
+                 pendingUpdates.begin();
              it != pendingUpdates.end();
              ++it)
         {
@@ -2265,15 +2999,22 @@ private:
                 it->area == area &&
                 it->value == value)
             {
-                pendingUpdates.erase(it);
+                pendingUpdates.erase(
+                    it
+                );
 
                 return true;
             }
         }
 
+
         return false;
     }
 
+
+    // ========================================================
+    // HMI -> EVENT MANAGER
+    // ========================================================
 
     void SyncHMIToBuffer(
         DomoManager& manager,
@@ -2282,35 +3023,58 @@ private:
         (void)now;
 
 
-        if (!manager.getEventManager().size())
-            return;
-
+        // ----------------------------------------------------
+        // La rilevazione della modifica HMI è indipendente
+        // dalla coda corrente dell'EventManager.
+        // ----------------------------------------------------
 
         for (uint8_t client = 0;
              client < _maxClients;
              ++client)
         {
-            if (!_context.clients[client] ||
-                !_context.clients[client].connected())
+            DMPlatform::Network::TCPClient& tcpClient =
+                _context.clients[client];
+
+
+            if (!tcpClient)
                 continue;
 
 
-            auto& server =
+            if (!tcpClient.connected())
+                continue;
+
+
+            ModbusTCPServer& server =
                 _context.modbusServers[client];
 
 
-            for (int area = 0;
+            for (uint16_t area = 0;
                  area < _registerCount;
                  ++area)
             {
-                const uint16_t value =
+                const long rawValue =
                     server.holdingRegisterRead(
-                        area
+                        static_cast<int>(area)
                     );
 
 
                 // ------------------------------------------------
-                // Nessuna variazione
+                // -1 = failure
+                // >=0 = valid value
+                // ------------------------------------------------
+
+                if (rawValue < 0)
+                    continue;
+
+
+                const uint16_t value =
+                    static_cast<uint16_t>(
+                        rawValue
+                    );
+
+
+                // ------------------------------------------------
+                // Nessuna modifica.
                 // ------------------------------------------------
 
                 if (_registerShadow[client][area] ==
@@ -2321,7 +3085,7 @@ private:
 
 
                 // ------------------------------------------------
-                // Modifica reale dal pannello HMI
+                // Aggiorna prima la shadow.
                 // ------------------------------------------------
 
                 _registerShadow[client][area] =
@@ -2329,11 +3093,11 @@ private:
 
 
                 // ------------------------------------------------
-                // HMI -> EventManager
+                // HMI -> EventManager.
                 // ------------------------------------------------
 
                 manager.getEventManager().push(
-                    area,
+                    static_cast<int>(area),
                     value,
                     _eventSource
                 );
@@ -2354,10 +3118,13 @@ public:
           _activeClients(0),
           _loopEnabled(false),
           _running(false),
+          _protocolId(-1),
           _registerCount(0),
           _eventSource(0),
           _networkManager(nullptr),
           _socketOwner(-1),
+          _reservedModbusResources(0),
+          _serverResourceAcquired(false),
           _context()
     {
     }
@@ -2365,23 +3132,21 @@ public:
 
     // ========================================================
     // SETUP
-    //
-    // networkManager:
-    //     NetworkManager proprietario del SocketManager.
-    //
-    // socketOwner:
-    //     OwnerId creato da NetworkManager::registerProtocol().
     // ========================================================
 
     void Setup(
         const DomoManagerConfig::HMI& cfg,
-        NetworkManager& networkManager,
+        DMNetworkManager& networkManager,
         SocketManager::OwnerId socketOwner,
-        NetworkManager::ProtocolId protocol,
+        DMNetworkManager::ProtocolId protocol,
         uint8_t maxClients,
         uint16_t registerCount,
         uint8_t eventSource)
     {
+        // ----------------------------------------------------
+        // Network references
+        // ----------------------------------------------------
+
         _networkManager =
             &networkManager;
 
@@ -2390,7 +3155,8 @@ public:
             socketOwner;
 
 
-        (void)protocol;
+        _protocolId =
+            protocol;
 
 
         // ----------------------------------------------------
@@ -2417,6 +3183,10 @@ public:
             eventSource;
 
 
+        // ----------------------------------------------------
+        // Runtime state
+        // ----------------------------------------------------
+
         _activeClients =
             0;
 
@@ -2429,31 +3199,24 @@ public:
             false;
 
 
-        // ----------------------------------------------------
-        // Shadow
-        // ----------------------------------------------------
-
-        _registerShadow.clear();
-
-        _registerShadow.resize(
-            _maxClients
-        );
+        _reservedModbusResources =
+            0;
 
 
-        for (uint8_t client = 0;
-             client < _maxClients;
-             ++client)
-        {
-            _registerShadow[client].assign(
-                _registerCount,
-                0
-            );
-        }
+        _serverResourceAcquired =
+            false;
 
 
         // ----------------------------------------------------
-        // Disabled
+        // Reset shadow
         // ----------------------------------------------------
+
+        resetRegisterShadow();
+
+
+        // ====================================================
+        // DISABLED
+        // ====================================================
 
         if (!_config.enabled)
         {
@@ -2466,9 +3229,9 @@ public:
         }
 
 
-        // ----------------------------------------------------
-        // Validate client count
-        // ----------------------------------------------------
+        // ====================================================
+        // VALIDATE MAX CLIENTS
+        // ====================================================
 
         if (_maxClients == 0)
         {
@@ -2481,9 +3244,39 @@ public:
         }
 
 
-        // ----------------------------------------------------
-        // Validate socket owner
-        // ----------------------------------------------------
+        // ====================================================
+        // VALIDATE REGISTER COUNT
+        // ====================================================
+
+        if (_registerCount == 0)
+        {
+            LOG_EF(
+                "HMIEngine",
+                "HMI enabled but registerCount=0"
+            );
+
+            return;
+        }
+
+
+        // ====================================================
+        // VALIDATE PORT
+        // ====================================================
+
+        if (_config.port == 0)
+        {
+            LOG_EF(
+                "HMIEngine",
+                "HMI enabled but TCP port=0"
+            );
+
+            return;
+        }
+
+
+        // ====================================================
+        // VALIDATE SOCKET OWNER
+        // ====================================================
 
         if (_socketOwner < 0)
         {
@@ -2496,9 +3289,9 @@ public:
         }
 
 
-        // ----------------------------------------------------
-        // Start server
-        // ----------------------------------------------------
+        // ====================================================
+        // SETUP
+        // ====================================================
 
         _running =
             SetupServer();
@@ -2508,7 +3301,8 @@ public:
         {
             LOG_WF(
                 "HMIEngine",
-                "HMI network resources unavailable - engine remains disabled"
+                "HMI network resources unavailable - "
+                "engine remains disabled"
             );
 
             return;
@@ -2580,7 +3374,7 @@ public:
 
 
     // ========================================================
-    // SYNC
+    // SYNC LOOP
     // ========================================================
 
     void Sync(
@@ -2646,12 +3440,23 @@ public:
     }
 
 
+    uint16_t registerCount() const
+    {
+        return _registerCount;
+    }
+
+
+    DMNetworkManager::ProtocolId protocolId() const
+    {
+        return _protocolId;
+    }
+
+
     SocketManager::OwnerId socketOwner() const
     {
         return _socketOwner;
     }
 };
-
 
 class SecurityEngine
 {
@@ -2672,6 +3477,7 @@ private:
 
     static inline uint64_t lastCurrentAlarmMask = 0;
     static inline uint64_t lastEffectiveAlarmMask = 0;
+    static inline uint64_t lastSystemBitmask = 0;
 
 
     // ============================================================
@@ -2695,7 +3501,8 @@ private:
             bool engaged,
             bool active,
             uint64_t currentAlarmMask,
-            uint64_t effectiveAlarmMask
+            uint64_t effectiveAlarmMask,
+            uint64_t systemBitmask
         );
 
     static inline AlarmCallback alarmCallback = nullptr;
@@ -3214,19 +4021,39 @@ private:
         // SISTEMA / CENTRALE
         // ============================================================
         //
-        // STATUS AREA
+        // WORD 1
         //
-        // bit 0  ... 6  = system bitmask
-        // bit 7         = connected
-        // bit 8         = communicationFault
-        // bit 9         = channelSupervised
-        // bit 10        = ready
-        // bit 11        = globalTamper
-        // bit 12        = globalTrouble
+        // bit  0 = intrusion REALTIME
+        // bit  1 = intrusion H24 REALTIME
+        // bit  2 = flood REALTIME
+        // bit  3 = smoke REALTIME
+        // bit  4 = windows open REALTIME
+        // bit  5 = doors open REALTIME
+        //
+        // bit  6 = intrusion MEM
+        // bit  7 = intrusion H24 MEM
+        // bit  8 = flood MEM
+        // bit  9 = smoke MEM
+        // bit 10 = windows open MEM
+        // bit 11 = doors open MEM
+        //
+        // bit 12 = global tamper
+        //
+        //
+        //
+        // WORD 2
+        //
+        // bit 0 = connected
+        // bit 1 = communication fault
+        // bit 2 = channel supervised
+        // bit 3 = ready
+        // bit 4 = global trouble
+        // bit 5 = ready for arm
+        //
         //
         // ARM STATE
         //
-        // armState viene scritto su una seconda area dedicata.
+        // armState viene scritto su una area dedicata.
         //
         // ============================================================
 
@@ -3244,9 +4071,9 @@ private:
                     state,
                     0))
             {
-                // ====================================================
-                // STATUS AREA
-                // ====================================================
+                // ========================================================
+                // WORD 1 - SYSTEM
+                // ========================================================
 
                 const int statusArea =
                     config->statusArea;
@@ -3254,89 +4081,94 @@ private:
 
                 if (statusArea >= 0)
                 {
-                    long value =
-                        static_cast<long>(
+                    const uint16_t word1 =
+                        static_cast<uint16_t>(
                             state.systemBitmask
                         );
 
 
-                    // ------------------------------------------------
-                    // PANEL STATUS
-                    // ------------------------------------------------
-
-                    bitWrite(
-                        value,
-                        7,
-                        state.connected
-                    );
-
-
-                    bitWrite(
-                        value,
-                        8,
-                        state.communicationFault
-                    );
-
-
-                    bitWrite(
-                        value,
-                        9,
-                        state.channelSupervised
-                    );
-
-
-                    bitWrite(
-                        value,
-                        10,
-                        state.ready
-                    );
-
-
-                    bitWrite(
-                        value,
-                        11,
-                        state.globalTamper
-                    );
-
-
-                    bitWrite(
-                        value,
-                        12,
-                        state.globalTrouble
-                    );
-
-                    bitWrite(
-                        value,
-                        13,
-                        state.readyForArm
-                    );
-
                     if (force ||
-                        buffer.getValueFast(statusArea) != value)
+                        buffer.getValueFast(statusArea) !=
+                            static_cast<long>(word1))
                     {
                         manager->forceInternalEvent(
                             statusArea,
-                            value
+                            static_cast<long>(word1)
                         );
                     }
                 }
 
 
-                // ====================================================
+                // ========================================================
+                // WORD 2 - PANEL STATUS
+                // ========================================================
+
+                const int statusArea2 =
+                    config->statusArea2;
+
+
+                if (statusArea2 >= 0)
+                {
+                    uint16_t word2 = 0;
+
+
+                    bitWrite(
+                        word2,
+                        0,
+                        state.connected
+                    );
+
+
+                    bitWrite(
+                        word2,
+                        1,
+                        state.communicationFault
+                    );
+
+
+                    bitWrite(
+                        word2,
+                        2,
+                        state.channelSupervised
+                    );
+
+
+                    bitWrite(
+                        word2,
+                        3,
+                        state.ready
+                    );
+
+
+                    bitWrite(
+                        word2,
+                        4,
+                        state.globalTrouble
+                    );
+
+
+                    bitWrite(
+                        word2,
+                        5,
+                        state.readyForArm
+                    );
+
+
+                    if (force ||
+                        buffer.getValueFast(statusArea2) !=
+                            static_cast<long>(word2))
+                    {
+                        manager->forceInternalEvent(
+                            statusArea2,
+                            static_cast<long>(word2)
+                        );
+                    }
+                }
+
+
+                // ========================================================
                 // ARM STATE AREA
-                // ====================================================
-                //
-                // Valore diretto:
-                //
-                // 0 = DISARMED
-                // 1 = ARMED_STAY
-                // 2 = ARMED_AWAY
-                // 3 = ARMED_NIGHT
-                // 4 = ARMED_PARTIAL
-                // 5 = NOT_READY
-                // 6 = UNKNOWN
-                //
-                // ====================================================
+                // ========================================================
 
                 const int armStateArea =
                     config->armStateArea;
@@ -3374,100 +4206,50 @@ private:
     //
     // ============================================================
 
-
     static void UpdateAlarmCallback()
     {
-        if (!initialized)
-            return;
-
-        if (!alarmCallback)
-            return;
-
-
-        // ============================================================
-        // PANEL STATE
-        // ============================================================
-
         SecurityHmiInterface::PanelState panelState;
 
-        auto& hmi =
-            SecurityHmiInterface::instance();
+        auto& hmi = SecurityHmiInterface::instance();
 
-
-        if (!hmi.getPanelState(
-                panelState,
-                0))
-        {
+        if (!hmi.getPanelState(panelState, 0))
             return;
-        }
-
-
-        // ============================================================
-        // ENGAGED
-        // ============================================================
 
         const bool engaged =
             panelState.armState !=
-                AlarmPanelInterface::ArmState::DISARMED;
+            AlarmPanelInterface::ArmState::DISARMED;
 
-
-        // ============================================================
-        // CURRENT ALARM MASK
-        // ============================================================
+        const uint64_t systemBitmask =
+            static_cast<uint64_t>(panelState.systemBitmask);
 
         const uint64_t currentAlarmMask =
-            SecurityOrchestrator::
-                getCurrentAlarmMask();
+            SecurityOrchestrator::getCurrentAlarmMask();
 
+        auto& alarmPanel =
+            DomoManagerAlarmPanel::instance();
 
-        // ============================================================
-        // EFFECTIVE ALARM MASK
+        // Non sincronizzare qui silencedAlarmMask.
         //
-        // Tiene conto degli allarmi silenziati.
-        // ============================================================
+        // La tacitazione viene gestita da silenceAlarm().
+        // La memoria di tacitazione viene rimossa da
+        // synchronizeAlarmSilence() quando l'allarme non è più presente.
 
         const uint64_t effectiveAlarmMask =
-            DomoManagerAlarmPanel::instance()
-                .getEffectiveAlarmMask();
-
-
-        // ============================================================
-        // ACTIVE
-        // ============================================================
+            alarmPanel.getEffectiveAlarmMask();
 
         const bool active =
             effectiveAlarmMask != 0;
-
-
-        // ============================================================
-        // CHECK CHANGE
-        //
-        // La callback NON deve essere chiamata ad ogni Loop().
-        // ============================================================
 
         const bool changed =
             !alarmCallbackStateValid ||
             engaged != lastAlarmEngaged ||
             active != lastAlarmActive ||
             currentAlarmMask != lastCurrentAlarmMask ||
-            effectiveAlarmMask != lastEffectiveAlarmMask;
-
+            effectiveAlarmMask != lastEffectiveAlarmMask ||
+            systemBitmask != lastSystemBitmask;
 
         if (!changed)
-        {
             return;
-        }
-
-
-        // ============================================================
-        // SAVE STATE
-        //
-        // IMPORTANTE:
-        // salvare prima della callback evita problemi se il frontend
-        // provoca indirettamente un nuovo ciclo security.
-        // ============================================================
-
-        alarmCallbackStateValid = true;
 
         lastAlarmEngaged =
             engaged;
@@ -3481,17 +4263,39 @@ private:
         lastEffectiveAlarmMask =
             effectiveAlarmMask;
 
-        // ============================================================
-        // CALLBACK
-        // ============================================================
+        lastSystemBitmask =
+            systemBitmask;
 
-        alarmCallback(
-            engaged,
-            active,
-            currentAlarmMask,
-            effectiveAlarmMask
+        alarmCallbackStateValid =
+            true;
+
+        if (alarmCallback)
+        {
+            alarmCallback(
+                engaged,
+                active,
+                currentAlarmMask,
+                effectiveAlarmMask,
+                systemBitmask
+            );
+        }
+
+        LOG_IF(
+            "SECURITY",
+            "CALLBACK CALC: "
+            "engaged=%d "
+            "active=%d "
+            "current=0x%016llX "
+            "effective=0x%016llX "
+            "silenced=0x%016llX",
+            engaged ? 1 : 0,
+            active ? 1 : 0,
+            (unsigned long long)currentAlarmMask,
+            (unsigned long long)effectiveAlarmMask,
+            (unsigned long long)alarmPanel.getSilencedAlarmMask()
         );
     }
+    
 
 public:
     // ============================================================
@@ -3510,19 +4314,32 @@ public:
     static void setAlarmCallback(
         AlarmCallback callback)
     {
-        alarmCallback = callback;
+        alarmCallback =
+            callback;
+
 
         // ------------------------------------------------------------
         // Una nuova callback deve ricevere il primo stato disponibile.
         // ------------------------------------------------------------
 
-        alarmCallbackStateValid = false;
+        alarmCallbackStateValid =
+            false;
 
-        lastAlarmEngaged = false;
-        lastAlarmActive = false;
 
-        lastCurrentAlarmMask = 0;
-        lastEffectiveAlarmMask = 0;
+        lastAlarmEngaged =
+            false;
+
+        lastAlarmActive =
+            false;
+
+        lastCurrentAlarmMask =
+            0;
+
+        lastEffectiveAlarmMask =
+            0;
+
+        lastSystemBitmask =
+            0;
 
 
         LOG_IF(
@@ -3680,19 +4497,56 @@ public:
         if (!dm.getPowerOnCycleCompleted())
             return false;
 
-        if (hmiInitialSyncPending)
-        {
-            UpdateSecurityHmi(true);
 
-            hmiInitialSyncPending = false;
-        }
+        // =========================================================
+        // SECURITY ORCHESTRATOR
+        //
+        // Questo è l'UNICO punto in cui viene eseguito Loop().
+        // =========================================================
 
         const uint8_t changes =
             SecurityOrchestrator::Loop(now);
 
-        changeFlags |= changes;
+        changeFlags |=
+            changes;
+
+
+        DomoManagerAlarmPanel::instance()
+        .synchronizeAlarmSilence(
+            SecurityOrchestrator::getCurrentAlarmMask()
+        );
+
+
+        // =========================================================
+        // HMI
+        //
+        // Prima aggiorniamo la HMI, poi leggiamo PanelState
+        // nel callback.
+        // =========================================================
+
+        const bool forceHmi =
+            hmiInitialSyncPending;
+
+        UpdateSecurityHmi(
+            forceHmi
+        );
+
+        if (forceHmi)
+            hmiInitialSyncPending = false;
+
+
+        // =========================================================
+        // ALARM CALLBACK
+        //
+        // Ora PanelState è aggiornato.
+        // =========================================================
 
         UpdateAlarmCallback();
+
+
+        // =========================================================
+        // NOTHING CHANGED
+        // =========================================================
 
         if (changeFlags ==
             SecurityOrchestrator::CHANGE_NONE)
@@ -3700,7 +4554,10 @@ public:
             return false;
         }
 
-        UpdateSecurityHmi();      
+
+        // =========================================================
+        // REPORT
+        // =========================================================
 
         if (reportOnChange &&
             (changeFlags &
@@ -3711,12 +4568,13 @@ public:
             SecurityOrchestrator::CHANGE_COMMAND)))
         {
             SecurityOrchestrator::
-                Diagnostic:: FullReport();
-                //CoreReport();
+                Diagnostic::FullReport();
         }
+
 
         changeFlags =
             SecurityOrchestrator::CHANGE_NONE;
+
 
         return true;
     }
@@ -3758,7 +4616,18 @@ public:
         long value,
         unsigned long now)
     {
-        (void)now;
+        // ============================================================
+        // ENTRY
+        // ============================================================
+
+        LOG_IF(
+            "SECURITY",
+            "ApplyCommand ENTRY: "
+            "area=%d value=%ld now=%lu",
+            area,
+            value,
+            now
+        );
 
 
         if (!initialized)
@@ -3768,9 +4637,129 @@ public:
         if (!config)
             return false;
 
-        // --------------------------------------------------------
-        // ALARM PANEL
-        // --------------------------------------------------------
+
+        // ============================================================
+        // DEBUG CONFIGURATION
+        // ============================================================
+
+        LOG_IF(
+            "SECURITY",
+            "ApplyCommand CHECK: "
+            "area=%d "
+            "value=0x%08lX "
+            "panelCommandArea=%d "
+            "panelBitCommandArea=%d",
+            area,
+            (unsigned long)value,
+            config->panelCommandArea,
+            config->panelBitCommandArea
+        );
+
+
+        // ============================================================
+        // PANEL BIT COMMAND
+        //
+        // Area generica a bit.
+        //
+        // Il comando viene elaborato come impulso.
+        // Dopo l'elaborazione il valore dell'area viene riportato
+        // a 0 senza generare un nuovo evento.
+        // ============================================================
+
+        if (config->panelBitCommandArea >= 0 &&
+            area == config->panelBitCommandArea)
+        {
+            LOG_IF(
+                "SECURITY",
+                "PANEL BIT AREA MATCH: "
+                "area=%d value=0x%08lX",
+                area,
+                (unsigned long)value
+            );
+
+
+            const bool handled =
+                SecurityOrchestrator::
+                    ApplyPanelBitCommand(
+                        area,
+                        value
+                    );
+
+
+            if (handled)
+            {
+                changeFlags |=
+                    SecurityOrchestrator::CHANGE_COMMAND;
+
+
+                LOG_IF(
+                    "SECURITY",
+                    "PANEL BIT CMD: "
+                    "area=%d value=0x%08lX",
+                    area,
+                    (unsigned long)value
+                );
+
+
+                // ----------------------------------------------------
+                // RESET IMPULSO
+                //
+                // Il reset è SILENT:
+                // 1 -> 0 non deve generare un nuovo comando.
+                // ----------------------------------------------------
+
+                if (manager)
+                {
+                    manager->getBuffer().WriteElement(
+                        area,
+                        0,
+                        false,
+                        now
+                    );
+
+
+                    LOG_IF(
+                        "SECURITY",
+                        "PANEL BIT CMD RESET: "
+                        "area=%d value=0",
+                        area
+                    );
+                }
+                else
+                {
+                    LOG_EF(
+                        "SECURITY",
+                        "PANEL BIT CMD RESET FAILED: manager=null"
+                    );
+                }
+            }
+            else
+            {
+                LOG_WF(
+                    "SECURITY",
+                    "Panel bit command rejected "
+                    "area=%d value=0x%08lX",
+                    area,
+                    (unsigned long)value
+                );
+            }
+
+
+            // L'area è riservata ai panel bit commands.
+            return true;
+        }
+
+
+        // ============================================================
+        // ALARM PANEL COMMAND
+        //
+        // Comando a valore:
+        //
+        // 0 = DISARM
+        // 1 = ARM_AWAY
+        // 2 = ARM_STAY
+        // 3 = ARM_NIGHT
+        // ============================================================
 
         if (config->panelCommandArea >= 0 &&
             area == config->panelCommandArea)
@@ -3785,8 +4774,6 @@ public:
 
             if (handled)
             {
-                // Il comando ha prodotto una variazione
-                // nello stato del pannello/security.
                 changeFlags |=
                     SecurityOrchestrator::CHANGE_COMMAND;
 
@@ -3811,16 +4798,13 @@ public:
 
 
             // L'area è riservata al pannello.
-            //
-            // Anche se il valore non è valido, non deve
-            // proseguire nel normale percorso EventManager.
             return true;
         }
 
 
-        // --------------------------------------------------------
+        // ============================================================
         // SINGLE SENSOR
-        // --------------------------------------------------------
+        // ============================================================
 
         if (SecurityOrchestrator::
                 ApplySecurityCommand(
@@ -3828,8 +4812,6 @@ public:
                     value
                 ))
         {
-            // Il comando ha modificato il controllo
-            // di un singolo sensore.
             changeFlags |=
                 SecurityOrchestrator::CHANGE_COMMAND;
 
@@ -3846,9 +4828,9 @@ public:
         }
 
 
-        // --------------------------------------------------------
+        // ============================================================
         // NOT A SECURITY COMMAND
-        // --------------------------------------------------------
+        // ============================================================
 
         return false;
     }

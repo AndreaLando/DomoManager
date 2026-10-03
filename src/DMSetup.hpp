@@ -38,17 +38,19 @@
 
 // ************ IO AREA IDs*******************************
 // 0..9 RESERVED
-// Esempio: DEFINE_AREA(AREA_CAMERA_WIN1_ALM, 13) 
+// DEFINE_AREA(AREA_PMETER_VOLTAGE, 10) //Define area di buffer di esempio
+
 
 
 // ************ PHISICAL DEVICES *******************************
-// Esempio: arduino::IPAddress WaveShareP1_Addr=IPAddress(192, 168, 12, 203);
+IPAddress WaveShareP1_Addr=IPAddress(192, 168, 12, 203); // IP address di esempio, dispositivo Waveshare EthToRs485
+
 
 static const DomoManagerConfig::Devices mainDevicesConfig = {
     {
-        // --- Esempio: ---
+        // --- Impostazione modulo di lettura consumi di esempio ---
         //{ "Lettore consumi - Quadro P1", WaveShareP1_Addr, 1, "LE_01MQ",
-        //  { 10, 11, 12, 13, 14 }, 3, Low
+        //  { AREA_PMETER_VOLTAGE, 11, 12, 13, 14 }, 3, Low
         //}
 
     }
@@ -57,18 +59,17 @@ static const DomoManagerConfig::Devices mainDevicesConfig = {
 
 // ************ IO AREAS *******************************
 static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
-    {
-        // --- Esempio: ---
-        //{ AREA_PMETER_VOLTAGE, 0, "Lettura tensione", {false}, {50,200} }
+{
+    // --- Configurazione area di esempio ---
+    // { AREA_PMETER_VOLTAGE, 0, "Lettura tensione", {false}, {50,200} }
     
-    }
-};
+}};
 
 // ************ ROUTES, SPLITS and TOGGLES *******************************
 static const DomoManagerRouteEngine::RoutesConfig mainRoutesConfig = {
     {
-        // --- Esempio: ---
-        /*{
+        /* Route di esempio, con 1 pulsante, controllo alimentatore e valori RGB 
+        {
             "Bagno - Interruttore luce",
             BAGNO_IN_P1,
             {
@@ -81,6 +82,7 @@ static const DomoManagerRouteEngine::RoutesConfig mainRoutesConfig = {
                         { BAGNO_OUT_LED01G, 0 },
                         { BAGNO_OUT_LED01B, 0 },
                         { BAGNO_OUT_LED01W, 4095 },
+                        { BAGNO_OUT_LED02, 4095 }
                     }
                 },
 
@@ -93,25 +95,27 @@ static const DomoManagerRouteEngine::RoutesConfig mainRoutesConfig = {
                         { BAGNO_OUT_LED01G, 0 },
                         { BAGNO_OUT_LED01B, 0 },
                         { BAGNO_OUT_LED01W, 0 },
+                        { BAGNO_OUT_LED02, 0 }
                     }
                 }
             }
-        }*/
+        } */
     }
 };
 
 static const DomoManagerSplitEngine::SplitsConfig mainSplitsConfig = {
     {
-        // --- Esempio: ---
-        //{ 78, {114,115}, 30000 }
+        /* Split di esempio, il buffer 78 controlla attivazione di due uscite 114 e 115 mentre il buffer 79 solo la 114, utile per controllo Vasistas
+        { 78, {114,115}, 30000 },
+        { 79, {114},     30000 } */
+        
     }
 };
 
 static const DomoManagerToggleEngine::TogglesConfig mainTogglesConfig = {
     {
-        // --- Esempio: ---
-        //{ 90, { 82, 55 } },
-        //{ 63, {} }
+        /* Esempio associazione di un toggle all' area 63
+        { 63, {} } */
     }
 };
 
@@ -131,70 +135,132 @@ static Watchdog::Params wdConfig = {
 // ************ AUTOMATIONS *******************************
 static const char* AUTOMATION_JSON = R"json(
 {
-    // --- Esempio: ---
-    /*
-    "scenes": [
-        {
-        "name": "CappaOn",
+  "scenes": [
+    {
+      "name": "CappaOn",
+      "actions": [
+        { "area": "AREA_ESTRATTORE_CUCINA", "value": 1 }
+      ]
+    },
+    {
+      "name": "CappaOff",
+      "actions": [
+        { "area": "AREA_ESTRATTORE_CUCINA", "value": 0 }
+      ]
+    },
+    {
+      "name": "BagnoUmido",
+      "actions": [
+        { "area": "AREA_ESTRATTORE_BAGNO", "value": 1 }
+      ]
+    },
+    {
+      "name": "BagnoNormale",
+      "actions": [
+        { "area": "AREA_ESTRATTORE_BAGNO", "value": 0 }
+      ]
+    },
+    {
+        "name": "LightsOff",
         "actions": [
-            { "area": "AREA_ESTRATTORE_CUCINA", "value": 1 }
+            { "area": "AREA_PLAFONIERA_EXT", "value": 0 },
+            { "area": "RELAY_LED_BAGNO", "value": 0 }
         ]
-        },
-        {
-        "name": "CappaOff",
-        "actions": [
-            { "area": "AREA_ESTRATTORE_CUCINA", "value": 0 }
-        ]
-        },
-    ],
+    }
 
-    "rules": [
-        {
-            "name": "RegolaCappa",
-            "type": "composite",
-            "intervalMs": 20000,
+  ],
 
-            "composite": {
-                "logic": "OR",
+  "rules": [
+    {
+      "name": "RegolaBagnoUmido",
+      "type": "trend",
+      "intervalMs": 20000,
+      "trend": {
+        "area": "SENSORE_BAGNO_HUM",
+        "scale": 10,
+        "threshold": 65,
+        "trend": "rising",
+        "tofMinutes": 5
+      },
+      "sceneTrue": "BagnoUmido",
+      "sceneFalse": "BagnoNormale"
+    },
 
-                "inputs": [
-                {
-                    "type": "debounce",
-                    "name": "corrente",
-                    "area": "SENSORE_CUCINA_CORRENTE",
-                    "threshold": 1,
-                    "debounceMs": 10000,
-                    "tofMinutes": 10
-                },
-                {
-                    "type": "trend",
-                    "name": "umidita",
-                    "area": "SENSORE_CUCINA_HUM",
-                    "scale": 10,
-                    "threshold": 65,
-                    "trend": "rising",
-                    "tofMinutes": 5
-                },
-                {
-                    "type": "bitmask",
-                    "name": "manuale",
-                    "area": "AREA_CUCINA_ESTRATTORE_BIT",
-                    "bitIndex": 2
-                }
-                ],
+    {
+        "name": "RegolaCappa",
+        "type": "composite",
+        "intervalMs": 20000,
 
-                "output": {
+        "composite": {
+            "logic": "OR",
+
+            "inputs": [
+            {
+                "type": "debounce",
+                "name": "corrente",
+                "area": "SENSORE_CUCINA_CORRENTE",
+                "threshold": 1,
+                "debounceMs": 10000,
+                "tofMinutes": 10
+            },
+            {
+                "type": "trend",
+                "name": "umidita",
+                "area": "SENSORE_CUCINA_HUM",
+                "scale": 10,
+                "threshold": 65,
+                "trend": "rising",
+                "tofMinutes": 5
+            },
+            {
+                "type": "bitmask",
+                "name": "manuale",
                 "area": "AREA_CUCINA_ESTRATTORE_BIT",
-                "bitIndex": 0
-                }
+                "bitIndex": 2
+            }
+            ],
+
+            "output": {
+            "area": "AREA_CUCINA_ESTRATTORE_BIT",
+            "bitIndex": 0
+            }
+    },
+
+    "sceneTrue": "CappaOn",
+    "sceneFalse": "CappaOff"
+    },
+
+    {
+        "name": "AutoOff",
+        "type": "composite",
+        "intervalMs": 300000,
+
+        "composite": {
+            "logic": "AND",
+
+            "inputs": [
+            { "type": "simple", "area": "AREA_CUCINA_PIR_ALM" },
+            { "type": "simple", "area": "AREA_CAMERA_PIR_ALM" },
+            { "type": "simple", "area": "AREA_CAMERA_WIN1_ALM" },
+            { "type": "simple", "area": "AREA_CAMERA_WIN2_ALM" },
+            { "type": "simple", "area": "AREA_CAMERA_WIN3_ALM" },
+            { "type": "simple", "area": "AREA_INGRESSO_DOOR_ALM" },
+            { "type": "simple", "area": "AREA_CUCINA_DOOR_ALM" }
+            ],
+
+            "output": {
+            "area": "AREA_PLAFONIERA_EXT",
+            "bitIndex": 0
+            }
         },
 
-        "sceneTrue": "CappaOn",
-        "sceneFalse": "CappaOff"
-        }
-    ],
+        "sceneTrue": "LightsOff",
+        "sceneFalse": "NoAction"
+    }
 
-    "sequences": [] */
+  ],
+
+  "sequences": []
 }
 )json";
 
@@ -202,7 +268,7 @@ static const char* AUTOMATION_JSON = R"json(
 DomoManagerConfig makeDomoConfig() {
     DomoManagerConfig cfg;   // usa tutti i default della struct
 
-    cfg.hmi.enabled = false;   // opzionale, è già default
+    cfg.hmi.enabled = false;   // HMI modbus TCP disabilitato
     cfg.hmi.port = 502;        // default
     cfg.hmi.pollingMs = 250;   // default
     cfg.hmi.maxClients = 1;
@@ -246,16 +312,43 @@ static DomoManagerConfig domoConfig = makeDomoConfig();
 
 static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
 
-    // --- Esempio: ---
+    // ============================
+    // esempio di configurazione di un sensore PIR ed un sensore di fumo
+    // ============================
+
     /*
-    { "Cucina",
-        { SensorChannel(-1, RT_DELAY, SensorChannelType::RT) },
+    { "PIR Cucina", "Cucina",
         {
-            [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_DOOR_ALM) != 0; }
+            SensorChannel(-1, RT_DELAY, SensorChannelType::RT),
+            SensorChannel(-1, INITIAL_DELAY,      SensorChannelType::H24)
         },
-        SensorCategory::DOOR
+        {
+            [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_PIR_ALM) != 0; },
+            [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_PIR_TAMPER) != 0; }
+        },
+        SensorCategory::PIR, AREA_CUCINA_PIR_CMD, AREA_CUCINA_PIR_STATUS
     }
-    */
+
+    // Smoke Cucina
+    { "Fumo Cucina", "Cucina",
+        { SensorChannel(-1, RT_DELAY, SensorChannelType::H24) },
+        {
+            [](){ return DomoManager::instance->getBuffer().getValueFast(AREA_CUCINA_SMOKE_ALM) != 0; }
+        },
+        SensorCategory::SMOKE, AREA_CUCINA_SMOKE_CMD, AREA_CUCINA_SMOKE_STATUS
+    } */
+
+    
+
+};
+
+static const FrontendConfig::SecurityZoneConfig SECURITY_ZONE_CONFIG[] =
+{
+    /* Esempi configurazione zone
+    { "Cucina",   AREA_CUCINA_SECURITY_STATUS },
+    { "Camera",   AREA_CAMERA_SECURITY_STATUS },
+    { "Bagno",    AREA_BAGNO_SECURITY_STATUS },
+    { "Ingresso", AREA_INGRESSO_SECURITY_STATUS } */
 };
 
 // ============================================================================
@@ -301,58 +394,117 @@ static constexpr FrontendConfig::MQTT::EnumValue
     { "recall_2_long",                22 }
 };
 
+static constexpr FrontendConfig::MQTT::EnumValue
+    IRB4_SystemModes[] =
+{
+    { "off",      0 },
+    { "heat",     1 },
+    { "cool",     2 },
+    { "auto",     3 },
+    { "dry",      4 },
+    { "fan_only", 5 }
+};
+
+static constexpr FrontendConfig::MQTT::EnumValue
+    IRB4_FanModes[] =
+{
+    { "off",    0 },
+    { "low",    1 },
+    { "medium", 2 },
+    { "high",   3 },
+    { "auto",   4 }
+};
+
+static constexpr FrontendConfig::MQTT::EnumValue
+    IRB4_LouverPositions[] =
+{
+    { "fully_open",          0 },
+    { "fully_closed",        1 },
+    { "half_open",           2 },
+    { "quarter_open",        3 },
+    { "three_quarters_open", 4 }
+};
+
+// ============================================================================
+// TINT 404049D
+// ============================================================================
+
+static constexpr FrontendConfig::MQTT::EnumValue
+    TINT404049D_Actions[] =
+{
+    { "on",                       1 },
+    { "off",                      2 },
+
+    { "brightness_step_up",       3 },
+    { "brightness_step_down",     4 },
+
+    { "brightness_move_up",       5 },
+    { "brightness_move_down",     6 },
+
+    { "brightness_stop",          7 },
+
+    { "color_temperature_move",   8 },
+    { "color_move",               9 },
+
+    { "scene_1",                 10 },
+    { "scene_2",                 11 },
+    { "scene_3",                 12 },
+    { "scene_4",                 13 },
+    { "scene_5",                 14 },
+    { "scene_6",                 15 },
+    { "scene_7",                 16 },
+    { "scene_8",                 17 },
+    { "scene_9",                 18 },
+    { "scene_10",                19 }
+};
 
 static const FrontendConfig::MQTT::Device
     MQTT_SMHub_Devices[] =
 {
-    
-    /*
+    /* ESEMPIO configurazione dispositivo 4DI+4DO MQTT
      * ============================================================
-     * EGLO 99099 - Telecomando
-     * ============================================================
-     
+          
 
     {
-        "Telecomando",
-        "Telecomando EGLO 99099",
+        "4DI4DOPergola",
+        "Comando Pergola",
 
         {
             {
-                "action",
-                FrontendConfig::MQTT::Mapping::Direction::READ,
-                FrontendConfig::MQTT::Mapping::DataType::ENUM,
-                500,
-                1.0f,
-                EGLO99099_Actions
-            },
-
-            {
-                "action_group",
-                FrontendConfig::MQTT::Mapping::Direction::READ,
-                FrontendConfig::MQTT::Mapping::DataType::INT,
-                501,
+                "state_l1",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::BOOL,
+                127,
                 1.0f
             },
 
             {
-                "action_level",
-                FrontendConfig::MQTT::Mapping::Direction::READ,
-                FrontendConfig::MQTT::Mapping::DataType::INT,
-                502,
+                "state_l2",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::BOOL,
+                301,
                 1.0f
             },
 
             {
-                "action_color_temperature",
-                FrontendConfig::MQTT::Mapping::Direction::READ,
-                FrontendConfig::MQTT::Mapping::DataType::INT,
-                503,
+                "state_l3",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::BOOL,
+                302,
+                1.0f
+            },
+
+            {
+                "state_l4",
+                FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
+                FrontendConfig::MQTT::Mapping::DataType::BOOL,
+                303,
                 1.0f
             }
         }
-    }
-    */
+    } */
 };
+
 
 
 // ============================================================================
@@ -370,7 +522,7 @@ static const FrontendConfig::MQTT::Client MQTT_CLIENTS[] =
 {
     {
         true,
-        IPAddress(192, 168, 12, 212),
+        IPAddress(192, 168, 12, 212), //101
         1883,
         FrontendConfig::MQTT::Client::Backend::ZIGBEE2MQTT,
         "SMHub",
@@ -378,7 +530,18 @@ static const FrontendConfig::MQTT::Client MQTT_CLIENTS[] =
         MQTT_SMHub_Devices,
         sizeof(MQTT_SMHub_Devices) /
         sizeof(MQTT_SMHub_Devices[0])
-    }
+    }/*,
+    {
+        true,
+        IPAddress(192, 168, 12, 215),
+        1883,
+        FrontendConfig::MQTT::Client::Backend::HOME_ASSISTANT,
+        "Home Assistant",
+        "opta_domotica",
+        MQTT_HA_Devices,
+        sizeof(MQTT_HA_Devices) /
+        sizeof(MQTT_HA_Devices[0])
+    }*/
 };
 
 
@@ -388,10 +551,10 @@ static const FrontendConfig::MQTT::Client MQTT_CLIENTS[] =
 // These configs tell GenericSensor where to read values from.
 // Type::BUFFER means read from Buffer area.
 // ------------------------------------------------------------
-static GenericSensor::Config tempSensorCfg  = { GenericSensor::Config::Type::BUFFER, 10 };
-static GenericSensor::Config windSensorCfg  = { GenericSensor::Config::Type::BUFFER, 11 };
-static GenericSensor::Config rainSensorCfg  = { GenericSensor::Config::Type::BUFFER, 12 };
-static GenericSensor::Config lightSensorCfg = { GenericSensor::Config::Type::BUFFER, 13 };
+static GenericSensor::Config tempSensorCfg  = { GenericSensor::Config::Type::BUFFER, 10 }; //Area di demo
+static GenericSensor::Config windSensorCfg  = { GenericSensor::Config::Type::BUFFER, 11 };//Area di demo
+static GenericSensor::Config rainSensorCfg  = { GenericSensor::Config::Type::BUFFER, 12 };//Area di demo
+static GenericSensor::Config lightSensorCfg = { GenericSensor::Config::Type::BUFFER, 13 };//Area di demo
 
 // ======================================================
 // WEATHER CONFIG
@@ -481,9 +644,10 @@ static FrontendConfig::Power POWER_PARAMS = {
 // Each zone: name, default setpoint, enabled flag, sensor area
 // ------------------------------------------------------------
 static FrontendConfig::HVAC::Zone HVAC_ZONES[] = {
-    { "Giorno", 22.0, 10, 1  },
-    { "Notte", 20.0, 11, 1  },
-    { "Bagno", 23.0, 12, 1  }
+    /* Esempi configurazione zone
+    { "Giorno", 22.0, SENSORE_CUCINA_TEMP, 1  },
+    { "Notte", 20.0, SENSORE_CAMERA_TEMP, 1  },
+    { "Bagno", 23.0, SENSORE_BAGNO_TEMP, 1  } */
 };
 
 // ======================================================
@@ -520,20 +684,35 @@ static const HeatPumpController::Config HEAT_PUMP_PARAMS = {
 
 // Temperature sensors group (each sensor has a scale factor)
 static const FrontendConfig::Averages::Sensore sensoriTemp[] = {
-    { 15,  0.1f },
-    { 16,   0.1f },
-    { 17,  0.1f }
+    /* Esempio configurazione Medie Temperatura
+    { SENSORE_CAMERA_TEMP,  0.1f },
+    { SENSORE_BAGNO_TEMP,   0.1f },
+    { SENSORE_CUCINA_TEMP,  0.1f } */
 };
 
+// Humidity sensors group
+static const FrontendConfig::Averages::Sensore sensoriHum[] = {
+    /* Esempio configurazione Medie Umidità
+    { SENSORE_CAMERA_HUM,  0.1f },
+    { SENSORE_BAGNO_HUM,   0.1f },
+    { SENSORE_CUCINA_HUM,  0.1f } */
+};
 
 // Groups definition: name, outScale, output area, sensors array, sensor count
 static const FrontendConfig::Averages::Gruppo MEAN_GROUPS[] = {
     {
         "Temperature",        // nome gruppo
         10.0f,                // outScale (scrittura *10)
-        12,      // area di output
+        -1,      // area di output
         sensoriTemp,          // array sensori
         sizeof(sensoriTemp) / sizeof(sensoriTemp[0])
+    },
+    {
+        "Umidita",
+        10.0f,
+        -1,
+        sensoriHum,
+        sizeof(sensoriHum) / sizeof(sensoriHum[0])
     }
 };
 
@@ -546,12 +725,114 @@ static const AEEVarDef AEE_VARS[] = {
     // ============================================================
     // SECURITY (buffer → bool)
     // ============================================================
+
+    /* Esempi configurazione scambio dati con dispositivo bridge 
     { "allarmeIntrusione", AEEDirection::FrontendToModule,
         AEEVarSourceType::BufferArea,
-        11, 0,
+        AREA_SECURITY_STATUS, 0,
         {},
         nullptr, nullptr, nullptr,
-        AEEVarType::BOOL }
+        AEEVarType::BOOL },
+
+    { "allarmeAllagamento", AEEDirection::FrontendToModule,
+        AEEVarSourceType::BufferArea,
+        AREA_SECURITY_STATUS, 2,
+        {},
+        nullptr, nullptr, nullptr,
+        AEEVarType::BOOL },
+
+    { "allarmeFumo", AEEDirection::FrontendToModule,
+        AEEVarSourceType::BufferArea,
+        AREA_SECURITY_STATUS, 3,
+        {},
+        nullptr, nullptr, nullptr,
+        AEEVarType::BOOL },
+
+    { "porteAperte", AEEDirection::FrontendToModule,
+        AEEVarSourceType::BufferArea,
+        AREA_SECURITY_STATUS, 5,
+        {},
+        nullptr, nullptr, nullptr,
+        AEEVarType::BOOL },
+
+    { "finestreAperte", AEEDirection::FrontendToModule,
+        AEEVarSourceType::BufferArea,
+        AREA_SECURITY_STATUS, 4,
+        {},
+        nullptr, nullptr, nullptr,
+        AEEVarType::BOOL },
+
+    { "systemStatus", AEEDirection::FrontendToModule,
+        AEEVarSourceType::BufferArea,
+        DeviceManager::AREA_SYSTEM_ERRORS, -1,
+        {},
+        nullptr, nullptr, nullptr,
+        AEEVarType::BOOL },
+
+    // ============================================================
+    // PRESENZA (modulo → frontend)
+    // ============================================================
+    { "arrivoCasa", AEEDirection::ModuleToFrontend,
+        AEEVarSourceType::None,
+        -1, -1,
+        {},
+        nullptr, nullptr, nullptr,
+        AEEVarType::INT },
+
+    { "proximity", AEEDirection::ModuleToFrontend,
+        AEEVarSourceType::None,
+        -1, -1,
+        {},
+        nullptr, nullptr, nullptr,
+        AEEVarType::BOOL },
+
+    // ============================================================
+    // HVAC (funzioni)
+    // ============================================================
+    { "temperaturaMediaInterna", AEEDirection::FrontendToModule,
+        AEEVarSourceType::Function,
+        -1, -1,
+        {},
+        [](){ return DomoManager::instance->getAverages().groupAverage("Temperature"); },
+        nullptr,
+        nullptr,
+        AEEVarType::FLOAT,
+        0.3f   // 🔥 minDelta = 0.3°C
+    },
+
+    { "umiditaMedia", AEEDirection::FrontendToModule,
+        AEEVarSourceType::Function,
+        -1, -1,
+        {},
+        [](){ return DomoManager::instance->getAverages().groupAverage("Umidita"); },
+        nullptr,
+        nullptr,
+        AEEVarType::FLOAT, 
+        0.5f   // 🔥 minDelta = 0.3°C
+    },
+
+    // ============================================================
+    // POWER (buffer)
+    // ============================================================
+    { "gridPower", AEEDirection::FrontendToModule,
+        AEEVarSourceType::BufferArea,
+        AREA_PMETER_POWER, -1,
+        {},
+        nullptr, nullptr, nullptr,
+        AEEVarType::FLOAT,
+        50.0f,   // 🔥 minDelta = 50 W
+        0.01f    //Scala la variabile 2 decimale
+    },
+
+    // ============================================================
+    // TIME (modulo → frontend)
+    // ============================================================
+    { "epoch", AEEDirection::ModuleToFrontend,
+        AEEVarSourceType::None,
+        -1, -1,
+        {},
+        nullptr, nullptr, nullptr,
+        AEEVarType::INT, 0.0f }, */
         
 };
 

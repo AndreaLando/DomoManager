@@ -17,6 +17,7 @@ using DMIPAddress = IPAddress;
     #include <SPI.h>
     #include <Ethernet.h>
     #include <EthernetUdp.h>
+    #include <Dns.h>
 
     using DMEthernetClient = EthernetClient;
     using DMEthernetUDP    = EthernetUDP;
@@ -258,39 +259,47 @@ public:
         const char* hostname,
         IPAddress& result)
     {
+        if (hostname == nullptr || *hostname == '\0')
+            return 0;
 
-#if defined(ARDUINO_ARCH_MBED)
+    #if defined(ARDUINO_ARCH_MBED)
 
+        // --------------------------------------------------------
+        // OPTA / MBED
+        // --------------------------------------------------------
         return Ethernet.hostByName(
             hostname,
             result
         );
 
-#elif defined(ARDUINO_ARCH_ESP32)
+    #elif defined(ARDUINO_ARCH_ESP32)
 
-        (void)hostname;
-        (void)result;
+        // --------------------------------------------------------
+        // ESP32 + W5500
+        //
+        // Ethernet.h usata nel progetto non espone
+        // Ethernet.hostByName(), quindi usiamo DNSClient.
+        // --------------------------------------------------------
+        IPAddress dns = Ethernet.dnsServerIP();
 
-        return 0;
+        // Nessun DNS configurato
+        if (dns == IPAddress(0, 0, 0, 0))
+            return 0;
 
-#else
+        DNSClient dnsClient;
+        dnsClient.begin(dns);
 
-        (void)hostname;
-        (void)result;
-
-        return 0;
-
-#endif
-    }
-
-
-    static int hostByName(
-        const String& hostname,
-        IPAddress& result)
-    {
-        return hostByName(
-            hostname.c_str(),
+        return dnsClient.getHostByName(
+            hostname,
             result
         );
+
+    #else
+
+        (void)hostname;
+        (void)result;
+        return 0;
+
+    #endif
     }
 };

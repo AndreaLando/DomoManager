@@ -136,13 +136,16 @@ DEFINE_AREA(AREA_CUCINA_ESTRATTORE_BIT, 253)
 DEFINE_AREA(AREA_MEAN_TEMPS, 254)
 DEFINE_AREA(AREA_MEAN_HUMS, 255)
 DEFINE_AREA(AREA_SECURITY_STATUS, 256)
-DEFINE_AREA(AREA_SECURITY_EVT_AREA, 257)
-DEFINE_AREA(AREA_SECURITY_CMD_AREA, 258)
+DEFINE_AREA(AREA_SECURITY_STATUS2, 257)
+DEFINE_AREA(AREA_SECURITY_EVT_AREA, 258)
+DEFINE_AREA(AREA_SECURITY_CMD_AREA, 259)
+DEFINE_AREA(AREA_SECURITY_BIT_AREA, 260)
+
 
 // ************ PHISICAL DEVICES *******************************
-arduino::IPAddress WaveShareP1_Addr=IPAddress(192, 168, 12, 203);
-arduino::IPAddress WaveSharePT_Addr=IPAddress(192, 168, 12, 204);
-arduino::IPAddress WaveShareCantina_Addr=IPAddress(192, 168, 12, 205);
+IPAddress WaveShareP1_Addr=IPAddress(192, 168, 12, 203);
+IPAddress WaveSharePT_Addr=IPAddress(192, 168, 12, 204);
+IPAddress WaveShareCantina_Addr=IPAddress(192, 168, 12, 205);
 
 static const DomoManagerConfig::Devices mainDevicesConfig = {
     {
@@ -947,6 +950,39 @@ static constexpr FrontendConfig::MQTT::EnumValue
     { "three_quarters_open", 4 }
 };
 
+// ============================================================================
+// TINT 404049D
+// ============================================================================
+
+static constexpr FrontendConfig::MQTT::EnumValue
+    TINT404049D_Actions[] =
+{
+    { "on",                       1 },
+    { "off",                      2 },
+
+    { "brightness_step_up",       3 },
+    { "brightness_step_down",     4 },
+
+    { "brightness_move_up",       5 },
+    { "brightness_move_down",     6 },
+
+    { "brightness_stop",          7 },
+
+    { "color_temperature_move",   8 },
+    { "color_move",               9 },
+
+    { "scene_1",                 10 },
+    { "scene_2",                 11 },
+    { "scene_3",                 12 },
+    { "scene_4",                 13 },
+    { "scene_5",                 14 },
+    { "scene_6",                 15 },
+    { "scene_7",                 16 },
+    { "scene_8",                 17 },
+    { "scene_9",                 18 },
+    { "scene_10",                19 }
+};
+
 static const FrontendConfig::MQTT::Device
     MQTT_SMHub_Devices[] =
 {
@@ -1161,8 +1197,44 @@ static const FrontendConfig::MQTT::Device
                 0.1f
             }
         }
+    },
+
+    // ============================================================================
+    // TINT 404049D
+    // ============================================================================
+    {
+    "Telecomando01",
+    "Telecomando Tint 404049D",
+
+    {
+        {
+            "action",
+            FrontendConfig::MQTT::Mapping::Direction::READ,
+            FrontendConfig::MQTT::Mapping::DataType::ENUM,
+            -1, //Non scrivono nessuna area, passano dalla callback OnMQTTCommand()
+            1.0f,
+            TINT404049D_Actions
+        },
+
+        {
+            "action_group",
+            FrontendConfig::MQTT::Mapping::Direction::READ,
+            FrontendConfig::MQTT::Mapping::DataType::INT,
+            -1, //Non scrivono nessuna area, passano dalla callback OnMQTTCommand()
+            1.0f
+        },
+
+        {
+            "linkquality",
+            FrontendConfig::MQTT::Mapping::Direction::READ,
+            FrontendConfig::MQTT::Mapping::DataType::INT,
+            -1, //Non scrivono nessuna area, passano dalla callback OnMQTTCommand()
+            1.0f
+        }
     }
+}
 };
+
 
 
 // ============================================================================

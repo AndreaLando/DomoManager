@@ -406,12 +406,15 @@ struct FrontendConfig {
 
         // Stato aggregato security
         int statusArea = -1;
+        int statusArea2 = -1;
         int armStateArea = -1;
+        int eventArea = -1;
+                
         // Comandi Alarm Panel
         int panelCommandArea = -1;
-        int eventArea = -1;
+        int panelBitCommandArea = -1;
         
-        uint32_t startupInhibitMs = 10000;   // <--- nuovo parametro
+        uint32_t startupInhibitMs = 10000;  
     } security;
 
     DiagnosticConfig diagnostic;

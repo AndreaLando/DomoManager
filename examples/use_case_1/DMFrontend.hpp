@@ -647,7 +647,7 @@ private:
                 "Action: System reset due to BLOCKED callback"
             );
 
-            NVIC_SystemReset();
+            DMPlatform::Restart();
         }
 
 
@@ -685,23 +685,25 @@ private:
     {
         uint8_t mac[6];
 
-        for (uint8_t i = 0; i < 6; ++i)
-            mac[i] = cfg.net.mac[i];
+
+        for (uint8_t i = 0;
+            i < 6;
+            ++i)
+        {
+            mac[i] =
+                cfg.net.mac[i];
+        }
 
 
-        Ethernet.begin(
-            mac,
-            cfg.net.ip,
-            cfg.net.gateway,
-            cfg.net.subnet
-        );
-        
-        if (Ethernet.hardwareStatus() ==
-            EthernetNoHardware)
+        if (!DMPlatform::Network::BeginEthernet(
+                mac,
+                cfg.net.ip,
+                cfg.net.gateway,
+                cfg.net.subnet))
         {
             LOG_EF(
                 "DomoManagerFrontendEngine",
-                "Ethernet shield not found"
+                "Ethernet hardware unavailable"
             );
 
             while (true)
@@ -711,15 +713,16 @@ private:
         }
 
 
-        if (Ethernet.linkStatus() == LinkOFF)
+        if (!DMPlatform::Network::WaitForLink(1500UL))
         {
             LOG_EF(
                 "DomoManagerFrontendEngine",
-                "Ethernet cable is not connected"
+                "Ethernet link is DOWN"
             );
 
-            digitalWrite(
-                LED_USER,
+
+            DMPlatform::WriteOutputPin(
+                DMPlatform::LedUser,
                 true
             );
         }
@@ -730,13 +733,18 @@ private:
                 "Ethernet interface started"
             );
 
+
+            const IPAddress ip =
+                DMPlatform::Network::LocalIP();
+
+
             LOG_IF(
                 "DomoManagerFrontendEngine",
-                "My IP address: %d.%d.%d.%d",
-                Ethernet.localIP()[0],
-                Ethernet.localIP()[1],
-                Ethernet.localIP()[2],
-                Ethernet.localIP()[3]
+                "My IP address: %u.%u.%u.%u",
+                ip[0],
+                ip[1],
+                ip[2],
+                ip[3]
             );
         }
     }
@@ -871,13 +879,26 @@ private:
         const unsigned long now =
             Manager->getTimeManager().nowMs();
 
-        // --------------------------------------------------------
-        // SECURITY PANEL COMMAND
-        // --------------------------------------------------------
 
-        if (security.panelCommandArea >= 0 &&
-            event.area == security.panelCommandArea)
+        // ============================================================
+        // SECURITY PANEL BIT COMMAND
+        // ============================================================
+
+        if (security.panelBitCommandArea >= 0 &&
+            event.area == security.panelBitCommandArea)
         {
+            LOG_IF(
+                "SECURITY",
+                "HMI PANEL BIT COMMAND: "
+                "area=%d "
+                "value=0x%08lX "
+                "bit0=%d",
+                event.area,
+                (unsigned long)event.value,
+                (event.value & 0x01L) ? 1 : 0
+            );
+
+
             SecurityEngine::ApplyCommand(
                 event.area,
                 event.value,
@@ -887,9 +908,37 @@ private:
             return;
         }
 
-        // --------------------------------------------------------
+
+        // ============================================================
+        // SECURITY PANEL COMMAND
+        // ============================================================
+
+        if (security.panelCommandArea >= 0 &&
+            event.area == security.panelCommandArea)
+        {
+            LOG_IF(
+                "SECURITY",
+                "HMI PANEL COMMAND: "
+                "area=%d "
+                "value=%ld",
+                event.area,
+                event.value
+            );
+
+
+            SecurityEngine::ApplyCommand(
+                event.area,
+                event.value,
+                now
+            );
+
+            return;
+        }
+
+
+        // ============================================================
         // SECURITY SENSOR COMMAND
-        // --------------------------------------------------------
+        // ============================================================
 
         if (security.sensors)
         {
@@ -905,6 +954,19 @@ private:
                 {
                     continue;
                 }
+
+
+                LOG_IF(
+                    "SECURITY",
+                    "HMI SENSOR COMMAND: "
+                    "sensor=%u "
+                    "area=%d "
+                    "value=0x%08lX",
+                    (unsigned)i,
+                    event.area,
+                    (unsigned long)event.value
+                );
+
 
                 SecurityEngine::ApplyCommand(
                     event.area,
@@ -933,15 +995,19 @@ private:
         bool engaged,
         bool active,
         uint64_t currentAlarmMask,
-        uint64_t effectiveAlarmMask)
+        uint64_t effectiveAlarmMask,
+        uint64_t systemBitmask)
     {
         if (!Manager)
             return;
 
-
         if (!config.security.enabled)
             return;
 
+
+        // ========================================================
+        // LOG
+        // ========================================================
 
         LOG_IF(
             "SECURITY",
@@ -949,7 +1015,8 @@ private:
             "engaged=%d "
             "active=%d "
             "currentMask=0x%016llX "
-            "effectiveMask=0x%016llX",
+            "effectiveMask=0x%016llX "
+            "systemMask=0x%016llX",
             engaged ? 1 : 0,
             active ? 1 : 0,
             static_cast<unsigned long long>(
@@ -957,22 +1024,24 @@ private:
             ),
             static_cast<unsigned long long>(
                 effectiveAlarmMask
+            ),
+            static_cast<unsigned long long>(
+                systemBitmask
             )
         );
 
 
         // ========================================================
         // CENTRALE DISARMATA
-        //
-        // Nessuna uscita di allarme.
         // ========================================================
 
         if (!engaged)
         {
-            // TODO:
             // relay alarm OFF
             // relay sirena OFF
 
+            DMPlatform::WriteOutputPin(DMPlatform::SIREN, false);
+            DMPlatform::WriteOutputPin(DMPlatform::ALARM, false);
             return;
         }
 
@@ -983,6 +1052,69 @@ private:
 
         if (active)
         {
+            // ----------------------------------------------------
+            // TEST BIT STATO CENTRALE
+            //
+            // bit 0 ... 6 = system bitmask
+            // ----------------------------------------------------
+
+            const bool alarmIntrusion =
+                (systemBitmask & (1ULL << 0)) != 0;
+
+            const bool alarmIntrusionH24 =
+                (systemBitmask & (1ULL << 1)) != 0;
+
+            const bool alarmFlood =
+                (systemBitmask & (1ULL << 2)) != 0;
+
+            const bool alarmSmoke =
+                (systemBitmask & (1ULL << 3)) != 0;
+
+            const bool windowsOpen =
+                (systemBitmask & (1ULL << 4)) != 0;
+
+            const bool doorsOpen =
+                (systemBitmask & (1ULL << 5)) != 0;
+
+            const bool alarmTamper =
+                (systemBitmask & (1ULL << 6)) != 0;
+
+
+            // ----------------------------------------------------
+            // TEST
+            // ----------------------------------------------------
+
+            if (alarmIntrusion || windowsOpen || doorsOpen)
+            {
+                // gestione allarme intrusione
+                DMPlatform::WriteOutputPin(DMPlatform::SIREN, true);
+            
+            }
+
+
+            if (alarmIntrusionH24 || alarmTamper)
+            {
+                // gestione allarme intrusione H24
+                DMPlatform::WriteOutputPin(DMPlatform::ALARM, true);
+            }
+
+            if (alarmFlood)
+            {
+                // gestione allarme flood, di norma segnalazione + chiusura elettrovalvole
+                DMPlatform::WriteOutputPin(DMPlatform::ALARM, true);
+            }
+
+            if (alarmSmoke)
+            {
+                // gestione allarme smoke, di norma segnalazione + apertura di tutte le finestre elettriche
+                DMPlatform::WriteOutputPin(DMPlatform::ALARM, true);
+            }
+
+            
+            // ----------------------------------------------------
+            // USCITE GENERALI
+            // ----------------------------------------------------
+
             // TODO:
             // relay alarm ON
             // relay sirena ON
@@ -998,17 +1130,32 @@ private:
         //
         // - nessun allarme
         // - allarme silenziato
-        //
         // ========================================================
 
-        // TODO:
-        // relay alarm OFF
-        // relay sirena OFF
+        DMPlatform::WriteOutputPin(DMPlatform::SIREN, false);
+        DMPlatform::WriteOutputPin(DMPlatform::ALARM, false);
     }
 
     // ============================================================
     //  MQTT EVENT
     // ============================================================
+
+    static void OnMQTTCommand(
+        uint8_t clientIndex,
+        const FrontendConfig::MQTT::Device* device,
+        const FrontendConfig::MQTT::Mapping* mapping,
+        long value
+    )
+    {
+        LOG_IF(
+            "APP",
+            "MQTT RX client=%u device=%s field=%s value=%ld",
+            (unsigned)clientIndex,
+            device ? device->id : "?",
+            mapping ? mapping->field : "?",
+            value
+        );
+    }
 
     static void MQTTEventCallback(
         const EventManager::Event& event)
@@ -1323,8 +1470,7 @@ protected:
                 "Passo a SLAVE -> disabilito Ethernet"
             );
 
-
-            Ethernet.end();
+            DMPlatform::Network::EndEthernet();
         }
 
     #endif
@@ -1609,7 +1755,7 @@ public:
         // DOMO MANAGER CORE
         // --------------------------------------------------------
 
-        NetworkManager::ProtocolId modbusRTUProtocol = -1;
+        DMNetworkManager::ProtocolId modbusRTUProtocol = -1;
 
 
         if (cfg.modbus.enabled)
@@ -1629,7 +1775,19 @@ public:
             );
         }
 
+        if (!Manager->setup(
+                SomethingChanged,
+                TaskEngine::Loop,
+                config.domoManager,
+                modbusRTUProtocol))
+        {
+            while (true)
+            {
+                delay(100);
+            }
+        }
 
+        //Questo va dopo Manager->setup per avere il dimensionamento dinamico del buffer
         if (cfg.domoManager.hmi.enabled)
         {
             const uint8_t hmiSocketDemand =
@@ -1651,23 +1809,9 @@ public:
                 Manager->net.getProtocol(hmiProtocolId).socketOwner, 
                 hmiProtocolId, 
                 cfg.domoManager.hmi.maxClients, 
-                300, 
+                Manager->getBuffer().size(), 
                 hmiSource );
         }
-
-
-        if (!Manager->setup(
-                SomethingChanged,
-                TaskEngine::Loop,
-                config.domoManager,
-                modbusRTUProtocol))
-        {
-            while (true)
-            {
-                delay(100);
-            }
-        }
-
 
         Manager->getOwner().setCallback(
             FrontendOwnerMode::OnChanged
@@ -1785,6 +1929,10 @@ public:
                     cfg.mqtt,
                     mqttProtocolId,
                     (uint8_t)mqttSource
+                );
+
+                MQTTEngine::setCommandReceivedCallback(
+                    OnMQTTCommand
                 );
             }
 

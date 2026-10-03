@@ -500,8 +500,6 @@ class DomoManagerFrontendEngine
     : public FrontendRuntime
 {
 private:
-    
-
     // ============================================================
     //  INSTANCE
     // ============================================================
@@ -543,15 +541,12 @@ private:
     static void CheckFullCycle()
     {
         auto* dm = DomoManager::instance;
-
         if (!dm)
             return;
 
-        bool backend =
-            dm->hasBackendCycleCompleted();
+        bool backend = dm->hasBackendCycleCompleted();
 
-        bool frontend =
-            TaskEngine::hasFrontendCycleCompleted();
+        bool frontend = TaskEngine::hasFrontendCycleCompleted();
 
         if (backend && frontend)
         {
@@ -568,34 +563,24 @@ private:
     // ============================================================
     //  SOMETHING CHANGED
     // ============================================================
-
-    static void SomethingChanged()
+    static void SomethingChanged(
+        const std::unordered_set<int>& changed)
     {
+        /* Esempio per accedere al database delle variabili 
         auto& manager =
             *DomoManager::instance;
 
         auto& buffer =
-            manager.getBuffer();
+            manager.getBuffer(); */
 
-
-        // --------------------------------------------------------
-        // Modifiche provenienti dal pannello HMI
-        // --------------------------------------------------------
-
-        auto changedFromPanel =
-            buffer.getChangedMap();
-
-        if (!changedFromPanel.empty())
+        if (!changed.empty())
         {
-            for (const auto& area :
-                 changedFromPanel)
+            for (const auto& area : changed)
             {
-                SecurityOrchestrator::
-                    ApplySecurityCommands(area);
+                
             }
         }
     }
-
 
     // ============================================================
     //  WATCHDOG
@@ -662,7 +647,7 @@ private:
                 "Action: System reset due to BLOCKED callback"
             );
 
-            NVIC_SystemReset();
+            DMPlatform::Restart();
         }
 
 
@@ -700,24 +685,25 @@ private:
     {
         uint8_t mac[6];
 
-        for (uint8_t i = 0; i < 6; ++i)
-            mac[i] = cfg.net.mac[i];
+
+        for (uint8_t i = 0;
+            i < 6;
+            ++i)
+        {
+            mac[i] =
+                cfg.net.mac[i];
+        }
 
 
-        Ethernet.begin(
-            mac,
-            cfg.net.ip,
-            cfg.net.gateway,
-            cfg.net.subnet
-        );
-
-
-        if (Ethernet.hardwareStatus() ==
-            EthernetNoHardware)
+        if (!DMPlatform::Network::BeginEthernet(
+                mac,
+                cfg.net.ip,
+                cfg.net.gateway,
+                cfg.net.subnet))
         {
             LOG_EF(
                 "DomoManagerFrontendEngine",
-                "Ethernet shield not found"
+                "Ethernet hardware unavailable"
             );
 
             while (true)
@@ -727,15 +713,16 @@ private:
         }
 
 
-        if (Ethernet.linkStatus() == LinkOFF)
+        if (!DMPlatform::Network::WaitForLink(1500UL))
         {
             LOG_EF(
                 "DomoManagerFrontendEngine",
-                "Ethernet cable is not connected"
+                "Ethernet link is DOWN"
             );
 
-            digitalWrite(
-                LED_USER,
+
+            DMPlatform::WriteOutputPin(
+                DMPlatform::LedUser,
                 true
             );
         }
@@ -746,13 +733,18 @@ private:
                 "Ethernet interface started"
             );
 
+
+            const IPAddress ip =
+                DMPlatform::Network::LocalIP();
+
+
             LOG_IF(
                 "DomoManagerFrontendEngine",
-                "My IP address: %d.%d.%d.%d",
-                Ethernet.localIP()[0],
-                Ethernet.localIP()[1],
-                Ethernet.localIP()[2],
-                Ethernet.localIP()[3]
+                "My IP address: %u.%u.%u.%u",
+                ip[0],
+                ip[1],
+                ip[2],
+                ip[3]
             );
         }
     }
@@ -763,11 +755,9 @@ private:
 
     static void InitEngines(
         DomoManager& manager)
-    {
+    {       
         if (config.security.enabled)
-            SecuritySensorEngine::Setup(
-                config.security
-            );
+            SecurityOrchestrator::Setup(&config.security);
 
 
         if (config.hvac.enabled)
@@ -844,9 +834,7 @@ private:
         if (!Manager)
             return;
 
-
         std::vector<DMAEE::Update> updates;
-
 
         if (!DMAEE::BuildUpdatesFromBufferArea(
                 AEEEngine::getMgr(),
@@ -872,17 +860,308 @@ private:
         );
     }
 
+    // ============================================================
+    // SECURITY EVENT
+    // ============================================================
+   
+    static void SecurityEventCallback(
+        const EventManager::Event& event)
+    {
+        if (!Manager)
+            return;
+
+        if (!config.security.enabled)
+            return;
+
+        const auto& security =
+            config.security;
+
+        const unsigned long now =
+            Manager->getTimeManager().nowMs();
+
+
+        // ============================================================
+        // SECURITY PANEL BIT COMMAND
+        // ============================================================
+
+        if (security.panelBitCommandArea >= 0 &&
+            event.area == security.panelBitCommandArea)
+        {
+            LOG_IF(
+                "SECURITY",
+                "HMI PANEL BIT COMMAND: "
+                "area=%d "
+                "value=0x%08lX "
+                "bit0=%d",
+                event.area,
+                (unsigned long)event.value,
+                (event.value & 0x01L) ? 1 : 0
+            );
+
+
+            SecurityEngine::ApplyCommand(
+                event.area,
+                event.value,
+                now
+            );
+
+            return;
+        }
+
+
+        // ============================================================
+        // SECURITY PANEL COMMAND
+        // ============================================================
+
+        if (security.panelCommandArea >= 0 &&
+            event.area == security.panelCommandArea)
+        {
+            LOG_IF(
+                "SECURITY",
+                "HMI PANEL COMMAND: "
+                "area=%d "
+                "value=%ld",
+                event.area,
+                event.value
+            );
+
+
+            SecurityEngine::ApplyCommand(
+                event.area,
+                event.value,
+                now
+            );
+
+            return;
+        }
+
+
+        // ============================================================
+        // SECURITY SENSOR COMMAND
+        // ============================================================
+
+        if (security.sensors)
+        {
+            for (size_t i = 0;
+                i < security.count;
+                ++i)
+            {
+                if (security.sensors[i].cmdArea < 0)
+                    continue;
+
+                if (event.area !=
+                    security.sensors[i].cmdArea)
+                {
+                    continue;
+                }
+
+
+                LOG_IF(
+                    "SECURITY",
+                    "HMI SENSOR COMMAND: "
+                    "sensor=%u "
+                    "area=%d "
+                    "value=0x%08lX",
+                    (unsigned)i,
+                    event.area,
+                    (unsigned long)event.value
+                );
+
+
+                SecurityEngine::ApplyCommand(
+                    event.area,
+                    event.value,
+                    now
+                );
+
+                return;
+            }
+        }
+    }
+
+    // ============================================================
+    // SECURITY ALARM CALLBACK
+    //
+    // Riceve lo stato dell'allarme dal SecurityEngine.
+    //
+    // NON gestisce il protocollo EventManager.
+    // NON modifica SecurityOrchestrator.
+    //
+    // Decide esclusivamente cosa fare con l'uscita fisica.
+    //
+    // ============================================================
+
+    static void SecurityAlarmCallback(
+        bool engaged,
+        bool active,
+        uint64_t currentAlarmMask,
+        uint64_t effectiveAlarmMask,
+        uint64_t systemBitmask)
+    {
+        if (!Manager)
+            return;
+
+        if (!config.security.enabled)
+            return;
+
+
+        // ========================================================
+        // LOG
+        // ========================================================
+
+        LOG_IF(
+            "SECURITY",
+            "ALARM CALLBACK "
+            "engaged=%d "
+            "active=%d "
+            "currentMask=0x%016llX "
+            "effectiveMask=0x%016llX "
+            "systemMask=0x%016llX",
+            engaged ? 1 : 0,
+            active ? 1 : 0,
+            static_cast<unsigned long long>(
+                currentAlarmMask
+            ),
+            static_cast<unsigned long long>(
+                effectiveAlarmMask
+            ),
+            static_cast<unsigned long long>(
+                systemBitmask
+            )
+        );
+
+
+        // ========================================================
+        // CENTRALE DISARMATA
+        // ========================================================
+
+        if (!engaged)
+        {
+            // relay alarm OFF
+            // relay sirena OFF
+
+            DMPlatform::WriteOutputPin(DMPlatform::SIREN, false);
+            DMPlatform::WriteOutputPin(DMPlatform::ALARM, false);
+            return;
+        }
+
+
+        // ========================================================
+        // CENTRALE ARMATA + ALLARME EFFETTIVO
+        // ========================================================
+
+        if (active)
+        {
+            // ----------------------------------------------------
+            // TEST BIT STATO CENTRALE
+            //
+            // bit 0 ... 6 = system bitmask
+            // ----------------------------------------------------
+
+            const bool alarmIntrusion =
+                (systemBitmask & (1ULL << 0)) != 0;
+
+            const bool alarmIntrusionH24 =
+                (systemBitmask & (1ULL << 1)) != 0;
+
+            const bool alarmFlood =
+                (systemBitmask & (1ULL << 2)) != 0;
+
+            const bool alarmSmoke =
+                (systemBitmask & (1ULL << 3)) != 0;
+
+            const bool windowsOpen =
+                (systemBitmask & (1ULL << 4)) != 0;
+
+            const bool doorsOpen =
+                (systemBitmask & (1ULL << 5)) != 0;
+
+            const bool alarmTamper =
+                (systemBitmask & (1ULL << 6)) != 0;
+
+
+            // ----------------------------------------------------
+            // TEST
+            // ----------------------------------------------------
+
+            if (alarmIntrusion || windowsOpen || doorsOpen)
+            {
+                // gestione allarme intrusione
+                DMPlatform::WriteOutputPin(DMPlatform::SIREN, true);
+            
+            }
+
+
+            if (alarmIntrusionH24 || alarmTamper)
+            {
+                // gestione allarme intrusione H24
+                DMPlatform::WriteOutputPin(DMPlatform::ALARM, true);
+            }
+
+            if (alarmFlood)
+            {
+                // gestione allarme flood, di norma segnalazione + chiusura elettrovalvole
+                DMPlatform::WriteOutputPin(DMPlatform::ALARM, true);
+            }
+
+            if (alarmSmoke)
+            {
+                // gestione allarme smoke, di norma segnalazione + apertura di tutte le finestre elettriche
+                DMPlatform::WriteOutputPin(DMPlatform::ALARM, true);
+            }
+
+            
+            // ----------------------------------------------------
+            // USCITE GENERALI
+            // ----------------------------------------------------
+
+            // TODO:
+            // relay alarm ON
+            // relay sirena ON
+
+            return;
+        }
+
+
+        // ========================================================
+        // CENTRALE ARMATA + NESSUN ALLARME EFFETTIVO
+        //
+        // Può essere:
+        //
+        // - nessun allarme
+        // - allarme silenziato
+        // ========================================================
+
+        DMPlatform::WriteOutputPin(DMPlatform::SIREN, false);
+        DMPlatform::WriteOutputPin(DMPlatform::ALARM, false);
+    }
 
     // ============================================================
     //  MQTT EVENT
     // ============================================================
+
+    static void OnMQTTCommand(
+        uint8_t clientIndex,
+        const FrontendConfig::MQTT::Device* device,
+        const FrontendConfig::MQTT::Mapping* mapping,
+        long value
+    )
+    {
+        LOG_IF(
+            "APP",
+            "MQTT RX client=%u device=%s field=%s value=%ld",
+            (unsigned)clientIndex,
+            device ? device->id : "?",
+            mapping ? mapping->field : "?",
+            value
+        );
+    }
 
     static void MQTTEventCallback(
         const EventManager::Event& event)
     {
         if (!config.mqtt.enabled)
             return;
-
 
         MQTTEngine::PublishEvent(
             event
@@ -934,7 +1213,7 @@ private:
         }
     }
 
-
+    
     // ============================================================
     //  CUSTOM TASK
     // ============================================================
@@ -949,7 +1228,6 @@ private:
             now
         );
     }
-
 
     static void Task_Meteo(
         DomoManager& manager,
@@ -986,36 +1264,26 @@ private:
         auto& averages =
             manager.getAverages();
 
-
         // --------------------------------------------------------
         // INPUTS
         // --------------------------------------------------------
-
         const int gridPower =
             buffer.getValueFast(
                 13,
                 100
             );
 
+        const float lux = 800.0f;
 
-        const float lux =
-            800.0f;
-
-
-        const float tempExt =
-            7.0f;
-
+        const float tempExt = 7.0f;
 
         const float actualProduction =
             0.0f;
 
-
         // --------------------------------------------------------
         // TIME
         // --------------------------------------------------------
-
         struct tm t;
-
 
         manager
             .getTimeManager()
@@ -1040,14 +1308,12 @@ private:
             t.tm_min
         );
 
-
         // --------------------------------------------------------
         // DIAGNOSTICS
         // --------------------------------------------------------
 
         auto& pm =
             PowerEngine::Get();
-
 
         LOG_DF(
             "Power",
@@ -1146,7 +1412,6 @@ protected:
          */
     }
 
-
     void onButtonPressed(
         unsigned long now) override
     {
@@ -1162,7 +1427,6 @@ protected:
     // ------------------------------------------------------------
     // DEVELOPER MODE
     // ------------------------------------------------------------
-
     void onDeveloperMode() override
     {
         /*
@@ -1182,7 +1446,6 @@ protected:
         // ------------------------------------------------------------
         // MASTER
         // ------------------------------------------------------------
-
         void onBecomeMaster() override
         {
             LOG_I(
@@ -1200,7 +1463,6 @@ protected:
         // ------------------------------------------------------------
         // SLAVE
         // ------------------------------------------------------------
-
         void onBecomeSlave() override
         {
             LOG_I(
@@ -1208,12 +1470,10 @@ protected:
                 "Passo a SLAVE -> disabilito Ethernet"
             );
 
-
-            Ethernet.end();
+            DMPlatform::Network::EndEthernet();
         }
 
     #endif
-
 
 private:
 
@@ -1391,9 +1651,7 @@ public:
             cfg.modbus.timeoutMs
         );
 
-
         delay(2000);
-
 
         // --------------------------------------------------------
         // TASK ENGINE
@@ -1402,7 +1660,6 @@ public:
         TaskEngine::Setup(
             cfg
         );
-
 
         TaskEngine::AddTask(
             [](DomoManager& dm, unsigned long now)
@@ -1498,7 +1755,7 @@ public:
         // DOMO MANAGER CORE
         // --------------------------------------------------------
 
-        NetworkManager::ProtocolId modbusRTUProtocol = -1;
+        DMNetworkManager::ProtocolId modbusRTUProtocol = -1;
 
 
         if (cfg.modbus.enabled)
@@ -1518,7 +1775,19 @@ public:
             );
         }
 
+        if (!Manager->setup(
+                SomethingChanged,
+                TaskEngine::Loop,
+                config.domoManager,
+                modbusRTUProtocol))
+        {
+            while (true)
+            {
+                delay(100);
+            }
+        }
 
+        //Questo va dopo Manager->setup per avere il dimensionamento dinamico del buffer
         if (cfg.domoManager.hmi.enabled)
         {
             const uint8_t hmiSocketDemand =
@@ -1540,23 +1809,9 @@ public:
                 Manager->net.getProtocol(hmiProtocolId).socketOwner, 
                 hmiProtocolId, 
                 cfg.domoManager.hmi.maxClients, 
-                300, 
+                Manager->getBuffer().size(), 
                 hmiSource );
         }
-
-
-        if (!Manager->setup(
-                SomethingChanged,
-                TaskEngine::Loop,
-                config.domoManager,
-                modbusRTUProtocol))
-        {
-            while (true)
-            {
-                delay(100);
-            }
-        }
-
 
         Manager->getOwner().setCallback(
             FrontendOwnerMode::OnChanged
@@ -1654,8 +1909,8 @@ public:
                         "MQTT",
                         50,
                         20,
-                        (uint8_t)
-                            cfg.mqtt.clientCount
+                        (uint8_t)cfg.mqtt.clientCount, 
+                        true
                     );
 
 
@@ -1675,7 +1930,32 @@ public:
                     mqttProtocolId,
                     (uint8_t)mqttSource
                 );
+
+                MQTTEngine::setCommandReceivedCallback(
+                    OnMQTTCommand
+                );
             }
+
+            if (config.security.enabled)
+            {
+                static int securitySource =
+                        Manager->getEventManager().add(
+                            SecurityEventCallback,
+                            "SECURITY"
+                        );
+                        
+                SecurityEngine::Setup(
+                    *Manager,
+                    config.security,
+                    (uint8_t)securitySource
+                );
+
+                // ============================================================ 
+                // SECURITY ALARM CALLBACK 
+                // ============================================================ 
+                SecurityEngine::setAlarmCallback( SecurityAlarmCallback );
+            }
+             
         #endif
 
 
@@ -1689,19 +1969,15 @@ public:
                 {
                     const int OLDER = 5000;
 
-
                     auto& buffer =
                         dm.getBuffer();
-
 
                     std::vector<DMAEE::Update>
                         updates;
 
-
                     updates.reserve(
                         16
                     );
-
 
                     const unsigned long now =
                         dm.getTimeManager()
@@ -1720,7 +1996,6 @@ public:
                             updates
                         );
 
-
                     if (hasUpdates)
                     {
                         DMAEE::ApplyUpdates(
@@ -1729,11 +2004,9 @@ public:
                         );
                     }
 
-
                     // ------------------------------------------------
                     // Pulizia variazioni Buffer
                     // ------------------------------------------------
-
                     buffer.ResetAll(
                         now,
                         OLDER
@@ -1747,7 +2020,6 @@ public:
         // --------------------------------------------------------
 
         Manager->enableWatchdog();
-
 
         LOG_IF(
             "DOMO MANAGER",
@@ -1767,7 +2039,6 @@ public:
         if (!instance)
             return;
 
-
         // ========================================================
         // FRONTEND RUNTIME
         //
@@ -1779,44 +2050,33 @@ public:
         //   - HotStandby
         //
         // ========================================================
-
         const unsigned long now =
             instance->updateRuntime();
-
 
         // ========================================================
         // APPLICATION LOOP
         // ========================================================
-
         #if HOTSTANDBY_ENABLED
-
-                if (instance->getIsMaster())
-
+            if (instance->getIsMaster())
         #else
-
-                if (true)
-
+            if (true)
         #endif
         {
             // ----------------------------------------------------
             // HMI
             // ----------------------------------------------------
-
             hmiEngine.SetLoopEnabled(
                 Manager->getPowerOnCycleCompleted()
             );
-
 
             hmiEngine.ProcessNetwork(
                 *Manager,
                 now
             );
 
-
             // ----------------------------------------------------
             // DOMO MANAGER
             // ----------------------------------------------------
-
             Manager->loop(
                 network->
                     modbusTCP()
@@ -1828,7 +2088,6 @@ public:
             // ----------------------------------------------------
             // SLAVE
             // ----------------------------------------------------
-
             Manager->loop(
                 network->
                     modbusTCP()

@@ -106,7 +106,7 @@ class DomoManager {
 private:
     TimeManager timeManager;
     DeviceManager deviceManager;
-    NetworkManager::ProtocolId networkProtocolId = -1;
+    DMNetworkManager::ProtocolId networkProtocolId = -1;
 
     #if HOTSTANDBY_ENABLED
         bool isClusterMasterFlag = false;
@@ -191,7 +191,7 @@ public:
     using SomethingChangedFn = DMRuntime::SomethingChangedFn;
     static DomoManager* instance;
 
-    NetworkManager net;
+    DMNetworkManager net;
 
     explicit DomoManager(const LedController::LedPins& ledPins)
         : timeManager(),
@@ -214,7 +214,7 @@ public:
     bool setup(SomethingChangedFn changed,
                ActivityLoopFn activity,
                DomoManagerConfig cfg,
-               NetworkManager::ProtocolId protocolId) {
+               DMNetworkManager::ProtocolId protocolId) {
         networkProtocolId = protocolId;
         config = cfg;
         runtime.setCallbacks(changed, activity);

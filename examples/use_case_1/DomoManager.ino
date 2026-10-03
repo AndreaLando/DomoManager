@@ -12,12 +12,11 @@
 
    ============================================================================ */
 
-#include "DMUsb.hpp"
+// #include "DMUsb.hpp"
 #include "DMFrontend.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
-#include "DMPlatform.hpp"
 
 // ======================================================
 // DIAGNOSTICS
@@ -57,13 +56,13 @@ static const int watchAreas[] = {
 static FrontendConfig mainConfig = [](){
     FrontendConfig c;
 
-    c.pins.userButton = BTN_USER;
-    c.pins.leds = LedController::LedPins(
-        LED_D0, //RS485 Read
-        LED_D1, //RS485 Write
-        LED_D2, // HMI, MQTT Read/Write   
-        LED_D3  // Devices in error
-    );
+    c.pins.userButton = DMPlatform::UserButton;
+    c.pins.leds = {
+        DMPlatform::LedD0, // RS485 Read
+        DMPlatform::LedD1, // RS485 Write
+        DMPlatform::LedD2, // HMI, MQTT Read/Write
+        DMPlatform::LedD3  // Devices in error
+    };
 
     // --- NETWORK ---
     c.net.mac     = {0x90, 0xA2, 0xDA, 0x0E, 0x94, 0xB5};
@@ -132,10 +131,10 @@ static FrontendConfig mainConfig = [](){
     c.ps.enabled    = false;
     c.ps.intervalMs = 5000;
     c.ps.mainPower = { GenericSensor::Config::Type::BUFFER, AREA_PMETER_VOLTAGE, 0.01f };
-    c.ps.i24vOk    = { GenericSensor::Config::Type::DIGITAL, I1 };
-    c.ps.fault     = { GenericSensor::Config::Type::DIGITAL, I2 };
-    c.ps.battery   = { GenericSensor::Config::Type::DIGITAL, I3 };
-    c.ps.i12vOk    = { GenericSensor::Config::Type::DIGITAL, I4 };
+    c.ps.i24vOk    = { GenericSensor::Config::Type::DIGITAL, DMPlatform::I1 };
+    c.ps.fault     = { GenericSensor::Config::Type::DIGITAL, DMPlatform::I2 };
+    c.ps.battery   = { GenericSensor::Config::Type::DIGITAL, DMPlatform::I3 };
+    c.ps.i12vOk    = { GenericSensor::Config::Type::DIGITAL, DMPlatform::I4 };
     c.ps.mainPowerLow  = 215.0f;
     c.ps.mainPowerHigh = 240.0f;
 
@@ -145,7 +144,9 @@ static FrontendConfig mainConfig = [](){
     c.security.reportOnChange  = false;                      //Abilito la visualizzazione del report ogni volta che cambia un sensore
     c.security.eventArea = -1;                              //Non mi interessa accedere al buffer eventi
     c.security.panelCommandArea = AREA_SECURITY_CMD_AREA;   //Area comandi centralina
-    c.security.statusArea= AREA_SECURITY_STATUS;            //Area stato centralina
+    c.security.panelBitCommandArea=AREA_SECURITY_BIT_AREA;  //Area comandi a bit
+    c.security.statusArea=  AREA_SECURITY_STATUS;            // WORD 1 - stato sicurezza    
+    c.security.statusArea2= AREA_SECURITY_STATUS2;          // WORD 2 - stato centralina
     c.security.startupInhibitMs = 10000;
     
     c.security.sensors = WIRED_SENSOR_CONFIG;
@@ -189,12 +190,8 @@ static FrontendConfig mainConfig = [](){
 void setup() {
     Serial.begin(19200);
 
-    //Setup OPTA IO
-    pinMode(I1, INPUT);
-    pinMode(I2, INPUT);
-    pinMode(I3, INPUT);
-    pinMode(I4, INPUT);
-    
+    DMPlatform::SetupPlatformIO();
+
     /* USBConfigLoader::Init([](bool ok){
         if (ok) {
             LOG_I("USB", "USB inizializzato");

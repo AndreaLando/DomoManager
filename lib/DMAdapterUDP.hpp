@@ -47,7 +47,7 @@ private:
     // SOCKET MANAGER
     // ========================================================
 
-    NetworkManager* networkManager = nullptr;
+    DMNetworkManager* networkManager = nullptr;
 
     SocketManager::OwnerId socketOwner = -1;
 
@@ -85,7 +85,7 @@ public:
     // ========================================================
 
     void setSocketContext(
-        NetworkManager& manager,
+        DMNetworkManager& manager,
         SocketManager::OwnerId owner)
     {
         networkManager = &manager;

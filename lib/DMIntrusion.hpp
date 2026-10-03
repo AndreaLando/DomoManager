@@ -5,6 +5,7 @@
 #include <vector>
 #include <functional>
 #include <set>
+#include <cstring>
 
 #include "DMWiredSensors.hpp"
 
@@ -1708,14 +1709,20 @@ public:
     // ============================================================
     // ALARM PANEL COMMAND
     // ============================================================
+    enum PanelBitCommand : uint8_t
+    {
+        BITCMD_SILENCE_ALARM = 0,
+        // BITCMD_... = 1,
+        // BITCMD_... = 2,
+        // BITCMD_... = 3,
+    };
 
     enum AlarmPanelCommand : uint8_t
     {
         DISARM = 0,
         ARM_AWAY,
         ARM_STAY,
-        ARM_NIGHT,
-        SILENCE_ALARM
+        ARM_NIGHT
     };
 
 
@@ -1770,13 +1777,37 @@ public:
 
         enum Field
         {
-            ALARM_INTRUSION,
-            ALARM_INTRUSION_H24,
-            ALARM_FLOOD,
-            ALARM_SMOKE,
-            WINDOWS_OPEN,
-            DOORS_OPEN,
-            ALARM_TAMPER,
+            // ============================================================
+            // REALTIME
+            // ============================================================
+
+            ALARM_INTRUSION,          // bit 0
+            ALARM_INTRUSION_H24,      // bit 1
+            ALARM_FLOOD,              // bit 2
+            ALARM_SMOKE,              // bit 3
+            WINDOWS_OPEN,             // bit 4
+            DOORS_OPEN,               // bit 5
+
+
+            // ============================================================
+            // MEMORY
+            // ============================================================
+
+            ALARM_INTRUSION_MEM,      // bit 6
+            ALARM_INTRUSION_H24_MEM,  // bit 7
+            ALARM_FLOOD_MEM,          // bit 8
+            ALARM_SMOKE_MEM,          // bit 9
+            WINDOWS_OPEN_MEM,         // bit 10
+            DOORS_OPEN_MEM,           // bit 11
+
+
+            // ============================================================
+            // GLOBAL
+            // ============================================================
+
+            ALARM_TAMPER,             // bit 12
+
+
             FIELD_COUNT
         };
 
@@ -1843,10 +1874,13 @@ public:
         int getBitmask() const
         {
             int mask = 0;
+
             for (int i = 0; i < FIELD_COUNT; ++i)
             {
-                if (info.f[i].get())
-                    mask |= (1 << i);
+                if (!info.f[i].get())
+                    continue;
+
+                mask |= (1 << i);
             }
 
             return mask;
@@ -1860,37 +1894,83 @@ public:
         void ComputeFrom(
             const WiredSensorsManager& ws)
         {
-            auto st = ws.ComputeAggregate();
+            auto st =
+                ws.ComputeAggregate();
+
+
+            // ============================================================
+            // REALTIME
+            // ============================================================
 
             set(
                 ALARM_INTRUSION,
-                st.intrusion
+                st.normal.intrusion
             );
 
             set(
                 ALARM_INTRUSION_H24,
-                st.intrusionH24
+                st.normal.intrusionH24
             );
 
             set(
                 ALARM_FLOOD,
-                st.flood
+                st.normal.flood
             );
 
             set(
                 ALARM_SMOKE,
-                st.smoke
+                st.normal.smoke
             );
 
             set(
                 WINDOWS_OPEN,
-                st.windowsOpen
+                st.normal.windowsOpen
             );
 
             set(
                 DOORS_OPEN,
-                st.doorsOpen
+                st.normal.doorsOpen
             );
+
+
+            // ============================================================
+            // MEMORY
+            // ============================================================
+
+            set(
+                ALARM_INTRUSION_MEM,
+                st.mem.intrusion
+            );
+
+            set(
+                ALARM_INTRUSION_H24_MEM,
+                st.mem.intrusionH24
+            );
+
+            set(
+                ALARM_FLOOD_MEM,
+                st.mem.flood
+            );
+
+            set(
+                ALARM_SMOKE_MEM,
+                st.mem.smoke
+            );
+
+            set(
+                WINDOWS_OPEN_MEM,
+                st.mem.windowsOpen
+            );
+
+            set(
+                DOORS_OPEN_MEM,
+                st.mem.doorsOpen
+            );
+
+
+            // ============================================================
+            // GLOBAL
+            // ============================================================
 
             set(
                 ALARM_TAMPER,
@@ -1910,10 +1990,15 @@ public:
                 "===== SYSTEM STATE ====="
             );
 
+
+            // ====================================================
+            // REALTIME
+            // ====================================================
+
             LOG_IF(
                 "SystemManager",
                 "%-25s : %s",
-                "Intrusion",
+                "Intrusion REALTIME",
                 info.f[ALARM_INTRUSION].get()
                     ? "TRUE"
                     : "false"
@@ -1922,7 +2007,7 @@ public:
             LOG_IF(
                 "SystemManager",
                 "%-25s : %s",
-                "Intrusion H24",
+                "Intrusion H24 REALTIME",
                 info.f[ALARM_INTRUSION_H24].get()
                     ? "TRUE"
                     : "false"
@@ -1931,7 +2016,7 @@ public:
             LOG_IF(
                 "SystemManager",
                 "%-25s : %s",
-                "Flood",
+                "Flood REALTIME",
                 info.f[ALARM_FLOOD].get()
                     ? "TRUE"
                     : "false"
@@ -1940,7 +2025,7 @@ public:
             LOG_IF(
                 "SystemManager",
                 "%-25s : %s",
-                "Smoke",
+                "Smoke REALTIME",
                 info.f[ALARM_SMOKE].get()
                     ? "TRUE"
                     : "false"
@@ -1949,7 +2034,7 @@ public:
             LOG_IF(
                 "SystemManager",
                 "%-25s : %s",
-                "Windows Open",
+                "Windows Open REALTIME",
                 info.f[WINDOWS_OPEN].get()
                     ? "TRUE"
                     : "false"
@@ -1958,11 +2043,75 @@ public:
             LOG_IF(
                 "SystemManager",
                 "%-25s : %s",
-                "Doors Open",
+                "Doors Open REALTIME",
                 info.f[DOORS_OPEN].get()
                     ? "TRUE"
                     : "false"
             );
+
+
+            // ====================================================
+            // MEMORY
+            // ====================================================
+
+            LOG_IF(
+                "SystemManager",
+                "%-25s : %s",
+                "Intrusion MEM",
+                info.f[ALARM_INTRUSION_MEM].get()
+                    ? "TRUE"
+                    : "false"
+            );
+
+            LOG_IF(
+                "SystemManager",
+                "%-25s : %s",
+                "Intrusion H24 MEM",
+                info.f[ALARM_INTRUSION_H24_MEM].get()
+                    ? "TRUE"
+                    : "false"
+            );
+
+            LOG_IF(
+                "SystemManager",
+                "%-25s : %s",
+                "Flood MEM",
+                info.f[ALARM_FLOOD_MEM].get()
+                    ? "TRUE"
+                    : "false"
+            );
+
+            LOG_IF(
+                "SystemManager",
+                "%-25s : %s",
+                "Smoke MEM",
+                info.f[ALARM_SMOKE_MEM].get()
+                    ? "TRUE"
+                    : "false"
+            );
+
+            LOG_IF(
+                "SystemManager",
+                "%-25s : %s",
+                "Windows Open MEM",
+                info.f[WINDOWS_OPEN_MEM].get()
+                    ? "TRUE"
+                    : "false"
+            );
+
+            LOG_IF(
+                "SystemManager",
+                "%-25s : %s",
+                "Doors Open MEM",
+                info.f[DOORS_OPEN_MEM].get()
+                    ? "TRUE"
+                    : "false"
+            );
+
+
+            // ====================================================
+            // GLOBAL
+            // ====================================================
 
             LOG_IF(
                 "SystemManager",
@@ -1972,6 +2121,11 @@ public:
                     ? "TRUE"
                     : "false"
             );
+
+
+            // ====================================================
+            // BITMASK
+            // ====================================================
 
             LOG_IF(
                 "SystemManager",
@@ -1984,7 +2138,6 @@ public:
                 "========================"
             );
         }
-
 
         // --------------------------------------------------------
         // COMPATIBILITÀ
@@ -2742,6 +2895,9 @@ public:
         int area,
         long value);
 
+    static bool ApplyPanelBitCommand(
+        int area,
+        long value);
 
     // ------------------------------------------------------------
     // SINGLE SENSOR
@@ -2916,15 +3072,6 @@ public:
 
         if (!cfg)
             return;
-
-        auto* dm =
-            DomoManager::instance;
-
-        if (!dm)
-            return;
-
-        auto& buffer =
-            dm->getBuffer();
 
         for (size_t i = 0;
             i < ws.Count();
@@ -4314,14 +4461,6 @@ public:
                     static_cast<SecurityOrchestrator::AlarmPanelCommand>(
                         command))
                 {
-                    case SecurityOrchestrator::SILENCE_ALARM:
-                        LOG_IF(
-                            "SecurityOrchestrator",
-                            "  decoded=SILENCE_ALARM"
-                        );
-
-                        break;
-
                     case SecurityOrchestrator::ARM_AWAY:
                         LOG_IF(
                             "SecurityOrchestrator",
@@ -5484,6 +5623,11 @@ public:
         return alarmMask.currentMask;
     }
 
+    static uint64_t getAlarmMemoryMask()
+    {
+        return alarmMask.memMask;
+    }
+
     // ============================================================
     // CALLBACKS
     // ============================================================
@@ -6225,7 +6369,7 @@ private:
     // ============================================================
 
     uint64_t silencedAlarmMask = 0;
-
+    
     // ============================================================
     // COSTANTI
     // ============================================================
@@ -6376,24 +6520,8 @@ private:
         return partition == 0;
     }
 
-    // ============================================================
-    // UPDATE SILENCED ALARM MASK
-    //
-    // Un allarme può rimanere tacitato SOLO finché è presente.
-    //
-    // Quando il relativo bit scompare da currentMask, viene
-    // automaticamente rimosso da silencedAlarmMask.
-    //
-    // Questo permette di tacitare nuovamente l'allarme quando
-    // successivamente ritorna.
-    // ============================================================
+    
 
-    void updateSilencedAlarmMask(
-        uint64_t currentMask)
-    {
-        silencedAlarmMask &=
-            currentMask;
-    }
 public:
 
     // ============================================================
@@ -6711,12 +6839,15 @@ public:
     // ============================================================
     // POLL
     //
-    // Esegue il sottosistema SecurityOrchestrator.
+    // Legge lo stato già elaborato da SecurityOrchestrator.
     //
-    // Dopo il Loop aggiorna la relazione:
+    // Non esegue SecurityOrchestrator::Loop():
+    // l'Orchestrator viene eseguito dal SecurityEngine.
     //
-    //     currentMask XOR silencedAlarmMask
-    //
+    // Aggiorna:
+    //     currentMask
+    //     silencedAlarmMask
+    //     effectiveAlarmMask
     // ============================================================
 
     bool poll(
@@ -6728,69 +6859,29 @@ public:
             now
         );
 
-
         lastPoll = now;
 
-
-        LOG_IF(
-            "SECURITY",
-            "poll BEFORE SecurityOrchestrator::Loop"
-        );
-
-
-        const uint8_t changes =
-            SecurityOrchestrator::Loop(now);
-
-
-        LOG_IF(
-            "SECURITY",
-            "poll AFTER SecurityOrchestrator::Loop changes=%u",
-            (unsigned)changes
-        );
-
-
         lastChanges =
-            changes;
-
-
-        LOG_IF(
-            "SECURITY",
-            "poll AFTER lastChanges=%u",
-            (unsigned)lastChanges
-        );
+            SecurityOrchestrator::getLastChanges();
 
 
         // ========================================================
         // CURRENT ALARM MASK
         // ========================================================
-        //
-        // AlarmBitmaskManager è la source of truth.
-        // ========================================================
 
         const uint64_t currentMask =
             SecurityOrchestrator::getCurrentAlarmMask();
 
-
-        // ========================================================
-        // CLEAN STALE SILENCED BITS
-        // ========================================================
-
-        updateSilencedAlarmMask(
-            currentMask
-        );
+        synchronizeAlarmSilence(currentMask);
 
 
         // ========================================================
         // EFFECTIVE ALARM MASK
         // ========================================================
-        //
-        // Sono gli allarmi correnti NON tacitati.
-        // ========================================================
 
         const uint64_t effectiveMask =
-            currentMask ^
-            silencedAlarmMask;
-
+            currentMask &
+            ~silencedAlarmMask;
 
         LOG_IF(
             "SECURITY",
@@ -6808,7 +6899,7 @@ public:
         // PANEL CHANGE
         // ========================================================
 
-        if (changes !=
+        if (lastChanges !=
             SecurityOrchestrator::CHANGE_NONE)
         {
             LOG_IF(
@@ -6823,15 +6914,14 @@ public:
         LOG_IF(
             "SECURITY",
             "poll BEFORE RETURN changes=%u panelStateChanged=%d",
-            (unsigned)changes,
+            (unsigned)lastChanges,
             panelStateChanged ? 1 : 0
         );
 
 
-        return changes !=
+        return lastChanges !=
             SecurityOrchestrator::CHANGE_NONE;
     }
-
 
     // ============================================================
     // STATO CENTRALE
@@ -6888,8 +6978,8 @@ public:
 
 
         const uint64_t effectiveMask =
-            currentMask ^
-            validSilencedMask;
+            currentMask &
+            ~validSilencedMask;
 
 
         return effectiveMask == 0;
@@ -6927,8 +7017,8 @@ public:
         // Questi sono stati correnti, non memorie.
         // --------------------------------------------------------
 
-        if (st.windowsOpen ||
-            st.doorsOpen)
+        if (st.normal.windowsOpen ||
+            st.normal.doorsOpen)
         {
             return false;
         }
@@ -6965,8 +7055,7 @@ public:
         // la tacitazione precedente non deve essere ereditata.
 
         silencedAlarmMask = 0;
-
-
+       
         const ArmState state =
             ArmState::ARMED_AWAY;
 
@@ -7020,8 +7109,7 @@ public:
         // la tacitazione precedente non deve essere ereditata.
 
         silencedAlarmMask = 0;
-
-
+        
         const ArmState state =
             ArmState::ARMED_STAY;
 
@@ -7075,8 +7163,7 @@ public:
         // la tacitazione precedente non deve essere ereditata.
 
         silencedAlarmMask = 0;
-
-
+        
         const ArmState state =
             ArmState::ARMED_NIGHT;
 
@@ -7105,15 +7192,12 @@ public:
 
     // ============================================================
     // DISARM
-    // ============================================================
     //
-    // DISARM normalmente richiede READY.
+    // Disinserisce la centrale e forza lo stato di sicurezza
+    // a DISARMED.
     //
-    // Eccezione:
-    // se la centrale è NOT READY ma l'allarme è stato
-    // precedentemente tacitato, DISARM è consentito.
-    //
-    // La memoria dell'allarme NON viene cancellata.
+    // Il disarmo è sempre consentito e non modifica la memoria
+    // di tacitazione dell'episodio di allarme corrente.
     // ============================================================
 
     
@@ -7166,106 +7250,95 @@ public:
     // corrispondenti agli allarmi tacitati.
     //
     // ============================================================
-
+    
     bool silenceAlarm(
-        int partition = 0)
+        uint8_t partition)
     {
-        if (!validPartition(partition))
-            return false;
-
-
-        // ========================================================
-        // CURRENT ALARM MASK
-        // ========================================================
-
         const uint64_t currentMask =
             SecurityOrchestrator::getCurrentAlarmMask();
 
+        const uint64_t memoryMask =
+            SecurityOrchestrator::getAlarmMemoryMask();
 
-        // ========================================================
-        // CLEAN STALE SILENCED BITS
-        // ========================================================
-
-        updateSilencedAlarmMask(
-            currentMask
-        );
-
-
-        // ========================================================
-        // UNSILENCED ALARMS
-        // ========================================================
+        const uint64_t episodeMask =
+            currentMask |
+            memoryMask;
 
         const uint64_t unsilencedMask =
-            currentMask ^
-            silencedAlarmMask;
+            episodeMask &
+            ~silencedAlarmMask;
 
-
-        // ========================================================
-        // NOTHING TO SILENCE
-        // ========================================================
 
         if (unsilencedMask == 0)
-        {
-            LOG_IF(
-                "DomoManagerAlarmPanel",
-                "SILENCE ALARM ignored: "
-                "no new unsilenced alarms "
-                "current=0x%016llX "
-                "silenced=0x%016llX",
-                (unsigned long long)currentMask,
-                (unsigned long long)silencedAlarmMask
-            );
-
             return false;
-        }
 
-
-        // ========================================================
-        // MARK ALARMS AS SILENCED
-        // ========================================================
 
         silencedAlarmMask |=
             unsilencedMask;
 
-
-        // ========================================================
-        // RESET CENTRAL ALARM MEMORY
-        //
-        // IMPORTANT:
-        // resettiamo SOLO i bit appena tacitati.
-        // ========================================================
 
         SecurityOrchestrator::ResetAlarmMemory(
             unsilencedMask
         );
 
 
-        // ========================================================
-        // EFFECTIVE MASK
-        // ========================================================
-
         const uint64_t effectiveMask =
-            currentMask ^
-            silencedAlarmMask;
+            episodeMask &
+            ~silencedAlarmMask;
 
 
         LOG_IF(
             "DomoManagerAlarmPanel",
             "SILENCE ALARM: "
             "current=0x%016llX "
+            "memory=0x%016llX "
+            "episode=0x%016llX "
             "silenced=0x%016llX "
             "memoryReset=0x%016llX "
             "effective=0x%016llX",
-            (unsigned long long)currentMask,
-            (unsigned long long)silencedAlarmMask,
-            (unsigned long long)unsilencedMask,
-            (unsigned long long)effectiveMask
+            static_cast<unsigned long long>(
+                currentMask),
+            static_cast<unsigned long long>(
+                memoryMask),
+            static_cast<unsigned long long>(
+                episodeMask),
+            static_cast<unsigned long long>(
+                silencedAlarmMask),
+            static_cast<unsigned long long>(
+                unsilencedMask),
+            static_cast<unsigned long long>(
+                effectiveMask)
         );
 
+
+        (void)partition;
 
         return true;
     }
 
+
+    void synchronizeAlarmSilence(uint64_t currentMask)
+    {
+        const uint64_t oldSilencedMask = silencedAlarmMask;
+
+        silencedAlarmMask &= currentMask;
+
+        if (oldSilencedMask != silencedAlarmMask)
+        {
+            LOG_IF(
+                "DomoManagerAlarmPanel",
+                "SYNC SILENCED MASK: "
+                "current=0x%016llX "
+                "old=0x%016llX "
+                "new=0x%016llX",
+                static_cast<unsigned long long>(currentMask),
+                static_cast<unsigned long long>(oldSilencedMask),
+                static_cast<unsigned long long>(silencedAlarmMask)
+            );
+        }
+    }
+
+    
     // ============================================================
     // ZONE STATE
     // ============================================================
@@ -7979,15 +8052,22 @@ public:
         const uint64_t currentMask =
             SecurityOrchestrator::getCurrentAlarmMask();
 
+        const uint64_t memoryMask =
+            SecurityOrchestrator::getAlarmMemoryMask();
 
-        const uint64_t validSilencedMask =
-            silencedAlarmMask &
-            currentMask;
+        const uint64_t episodeMask =
+            currentMask |
+            memoryMask;
 
+        const uint64_t effectiveMask =
+            episodeMask &
+            ~silencedAlarmMask;
 
-        return currentMask ^
-            validSilencedMask;
+        return effectiveMask;
     }
+
+
+
 private:
 
     // ============================================================
@@ -8393,6 +8473,7 @@ inline bool SecurityOrchestrator::ApplyPanelCommand(
         return false;
     }
 
+
     // ============================================================
     // PANEL COMMAND AREA
     // ============================================================
@@ -8407,6 +8488,7 @@ inline bool SecurityOrchestrator::ApplyPanelCommand(
         return false;
     }
 
+
     if (area != cfgCopy.panelCommandArea)
     {
         LOG_EF(
@@ -8419,6 +8501,7 @@ inline bool SecurityOrchestrator::ApplyPanelCommand(
         return false;
     }
 
+
     // ============================================================
     // VALIDATE COMMAND VALUE
     //
@@ -8426,14 +8509,11 @@ inline bool SecurityOrchestrator::ApplyPanelCommand(
     // 1 = ARM_AWAY
     // 2 = ARM_STAY
     // 3 = ARM_NIGHT
-    // 4 = SILENCE_ALARM
     //
-    // IMPORTANT:
-    // validate BEFORE static_cast<AlarmPanelCommand>(value)
     // ============================================================
 
     if (value < static_cast<long>(DISARM) ||
-        value > static_cast<long>(SILENCE_ALARM))
+        value > static_cast<long>(ARM_NIGHT))
     {
         LOG_EF(
             "SecurityOrchestrator",
@@ -8445,8 +8525,10 @@ inline bool SecurityOrchestrator::ApplyPanelCommand(
         return false;
     }
 
+
     const AlarmPanelCommand command =
         static_cast<AlarmPanelCommand>(value);
+
 
     // ============================================================
     // ALARM PANEL
@@ -8455,7 +8537,9 @@ inline bool SecurityOrchestrator::ApplyPanelCommand(
     DomoManagerAlarmPanel& panel =
         DomoManagerAlarmPanel::instance();
 
+
     bool result = false;
+
 
     // ============================================================
     // APPLY COMMAND
@@ -8463,59 +8547,41 @@ inline bool SecurityOrchestrator::ApplyPanelCommand(
 
     switch (command)
     {
-        // --------------------------------------------------------
-        // DISARM
-        // --------------------------------------------------------
-
         case DISARM:
         {
-            result = panel.disarm(0);
+            result =
+                panel.disarm(0);
+
             break;
         }
 
-        // --------------------------------------------------------
-        // ARM AWAY
-        // --------------------------------------------------------
 
         case ARM_AWAY:
         {
-            result = panel.armAway(0);
+            result =
+                panel.armAway(0);
+
             break;
         }
 
-        // --------------------------------------------------------
-        // ARM STAY
-        // --------------------------------------------------------
 
         case ARM_STAY:
         {
-            result = panel.armStay(0);
+            result =
+                panel.armStay(0);
+
             break;
         }
 
-        // --------------------------------------------------------
-        // ARM NIGHT
-        // --------------------------------------------------------
 
         case ARM_NIGHT:
         {
-            result = panel.armNight(0);
+            result =
+                panel.armNight(0);
+
             break;
         }
 
-        // --------------------------------------------------------
-        // SILENCE CURRENT ALARM
-        // --------------------------------------------------------
-
-        case SILENCE_ALARM:
-        {
-            result = panel.silenceAlarm(0);
-            break;
-        }
-
-        // --------------------------------------------------------
-        // SHOULD NEVER HAPPEN
-        // --------------------------------------------------------
 
         default:
         {
@@ -8530,6 +8596,7 @@ inline bool SecurityOrchestrator::ApplyPanelCommand(
         }
     }
 
+
     // ============================================================
     // RESULT
     // ============================================================
@@ -8538,7 +8605,8 @@ inline bool SecurityOrchestrator::ApplyPanelCommand(
     {
         LOG_IF(
             "SecurityOrchestrator",
-            "ApplyPanelCommand: area=%d value=%ld command=%u result=ACCEPTED",
+            "ApplyPanelCommand: "
+            "area=%d value=%ld command=%u result=ACCEPTED",
             area,
             value,
             static_cast<unsigned>(command)
@@ -8548,16 +8616,149 @@ inline bool SecurityOrchestrator::ApplyPanelCommand(
     {
         LOG_EF(
             "SecurityOrchestrator",
-            "ApplyPanelCommand: area=%d value=%ld command=%u result=FAILED",
+            "ApplyPanelCommand: "
+            "area=%d value=%ld command=%u result=FAILED",
             area,
             value,
             static_cast<unsigned>(command)
         );
     }
 
+
     return result;
 }
 
+inline bool SecurityOrchestrator::ApplyPanelBitCommand(
+    int area,
+    long value)
+{
+    // ============================================================
+    // SECURITY SUBSYSTEM INITIALIZED
+    // ============================================================
+
+    if (!initialized)
+    {
+        LOG_EF(
+            "SecurityOrchestrator",
+            "ApplyPanelBitCommand: security not initialized"
+        );
+
+        return false;
+    }
+
+
+    // ============================================================
+    // PANEL BIT COMMAND AREA
+    // ============================================================
+
+    if (cfgCopy.panelBitCommandArea < 0)
+    {
+        LOG_EF(
+            "SecurityOrchestrator",
+            "ApplyPanelBitCommand: "
+            "panel bit command area disabled"
+        );
+
+        return false;
+    }
+
+
+    if (area != cfgCopy.panelBitCommandArea)
+    {
+        LOG_EF(
+            "SecurityOrchestrator",
+            "ApplyPanelBitCommand: "
+            "invalid area=%d expected=%d",
+            area,
+            cfgCopy.panelBitCommandArea
+        );
+
+        return false;
+    }
+
+
+    // ============================================================
+    // DECODE BIT COMMANDS
+    //
+    // bit 0 = SILENCE_ALARM
+    //
+    // Altri bit riservati per future funzioni.
+    //
+    // ============================================================
+
+    const uint32_t bits =
+        static_cast<uint32_t>(value);
+
+
+    const uint32_t silenceMask =
+        (1UL << BITCMD_SILENCE_ALARM);
+
+
+    // ============================================================
+    // UNKNOWN / RESERVED BITS
+    // ============================================================
+
+    const uint32_t reservedBits =
+        bits & ~silenceMask;
+
+
+    if (reservedBits != 0)
+    {
+        LOG_WF(
+            "SecurityOrchestrator",
+            "ApplyPanelBitCommand: "
+            "reserved bits set "
+            "area=%d value=0x%08lX "
+            "reserved=0x%08lX",
+            area,
+            (unsigned long)bits,
+            (unsigned long)reservedBits
+        );
+    }
+
+
+    // ============================================================
+    // SILENCE ALARM
+    // ============================================================
+
+    if (bits &
+        silenceMask)
+    {
+        DomoManagerAlarmPanel& panel =
+            DomoManagerAlarmPanel::instance();
+
+
+        const bool result =
+            panel.silenceAlarm(0);
+
+
+        LOG_IF(
+            "SecurityOrchestrator",
+            "ApplyPanelBitCommand: "
+            "SILENCE_ALARM "
+            "area=%d "
+            "bit=%u "
+            "result=%s",
+            area,
+            (unsigned)BITCMD_SILENCE_ALARM,
+            result
+                ? "ACCEPTED"
+                : "FAILED"
+        );
+    }
+
+
+    // ============================================================
+    // AREA HANDLED
+    //
+    // La command area è stata riconosciuta.
+    // SecurityEngine provvederà eventualmente al reset
+    // dell'impulso a zero.
+    //
+    // ============================================================
+
+    return true;
+}
 
 class SecurityHmiInterface
 {

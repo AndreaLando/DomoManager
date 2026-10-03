@@ -24,6 +24,7 @@
 
 #include "DMSignal.hpp"
 #include "DMLogger.hpp"
+#include "DMPlatform.hpp"
 
 enum Priority {
   Low=0, 
@@ -952,6 +953,7 @@ private:
     }
 };
 
+
 class LedController {
 public:
     static constexpr int NO_PIN = -1;
@@ -962,163 +964,304 @@ public:
         int panel = NO_PIN;
         int err   = NO_PIN;
 
-        // 🔥 Ripristino costruttore a 4 parametri
-        constexpr LedPins(int r, int w, int p, int e)
-            : read(r), write(w), panel(p), err(e) {}
+        constexpr LedPins(
+            int r,
+            int w,
+            int p,
+            int e
+        )
+            : read(r),
+              write(w),
+              panel(p),
+              err(e)
+        {}
 
         constexpr LedPins() = default;
     };
 
     enum Channel : uint8_t {
-        ONE = 0, TWO = 1, THREE = 2, FOUR = 3, CHANNEL_COUNT = 4
+        ONE = 0,
+        TWO = 1,
+        THREE = 2,
+        FOUR = 3,
+        CHANNEL_COUNT = 4
     };
 
     LedController() = default;
 
-    LedController(const LedPins& pins, bool activeLow = false)
-        : m_pins(pins), m_activeLow(activeLow) {}
+    LedController(
+        const LedPins& pins,
+        bool activeLow = false
+    )
+        : m_pins(pins),
+          m_activeLow(activeLow)
+    {}
 
-    void begin() {
-        if (m_initialized) return;
+    void begin()
+    {
+        if (m_initialized)
+            return;
 
         validRead  = (m_pins.read  != NO_PIN);
         validWrite = (m_pins.write != NO_PIN);
         validPanel = (m_pins.panel != NO_PIN);
         validErr   = (m_pins.err   != NO_PIN);
 
-        if (validRead)  pinMode(m_pins.read,  OUTPUT);
-        if (validWrite) pinMode(m_pins.write, OUTPUT);
-        if (validPanel) pinMode(m_pins.panel, OUTPUT);
-        if (validErr)   pinMode(m_pins.err,   OUTPUT);
+        if (validRead)
+        {
+            DMPlatform::SetupOutputPin(
+                m_pins.read
+            );
+        }
+
+        if (validWrite)
+        {
+            DMPlatform::SetupOutputPin(
+                m_pins.write
+            );
+        }
+
+        if (validPanel)
+        {
+            DMPlatform::SetupOutputPin(
+                m_pins.panel
+            );
+        }
+
+        if (validErr)
+        {
+            DMPlatform::SetupOutputPin(
+                m_pins.err
+            );
+        }
+
+        // Stato logico iniziale di tutti i canali
+        for (uint8_t i = 0; i < CHANNEL_COUNT; ++i)
+        {
+            m_state[i] = false;
+            m_blink[i].active = false;
+            m_blink[i].on = false;
+            m_blink[i].lastChange = 0;
+        }
 
         m_initialized = true;
     }
 
-    // 🔥 Compatibilità: hasChannel()
-    inline bool hasChannel(Channel ch) const {
-        switch (ch) {
-            case ONE:   return validRead;
-            case TWO:   return validWrite;
-            case THREE: return validPanel;
-            case FOUR:  return validErr;
-            default:    return false;
+    inline bool hasChannel(Channel ch) const
+    {
+        switch (ch)
+        {
+            case ONE:
+                return validRead;
+
+            case TWO:
+                return validWrite;
+
+            case THREE:
+                return validPanel;
+
+            case FOUR:
+                return validErr;
+
+            default:
+                return false;
         }
     }
 
-    // 🔥 Compatibilità: setAll()
-    inline void setAll(bool on) {
-        if (validRead)  set(ONE,   on);
-        if (validWrite) set(TWO,   on);
-        if (validPanel) set(THREE, on);
-        if (validErr)   set(FOUR,  on);
-    }
-
-    // 🔥 Compatibilità: update()
-    inline void update(unsigned long /*now*/) {
-        // Se in futuro vuoi fare blinking o animazioni, qui è il posto giusto.
-        // Per ora è un NO-OP veloce.
-    }
-
-    inline void set(Channel ch, bool on)
+    inline void setAll(bool on)
     {
-        const uint8_t idx = static_cast<uint8_t>(ch);
+        if (validRead)
+            set(ONE, on);
+
+        if (validWrite)
+            set(TWO, on);
+
+        if (validPanel)
+            set(THREE, on);
+
+        if (validErr)
+            set(FOUR, on);
+    }
+
+    inline void update(unsigned long now)
+    {
+        for (uint8_t i = 0; i < CHANNEL_COUNT; ++i)
+        {
+            BlinkState& state = m_blink[i];
+
+            if (!state.active)
+                continue;
+
+            const int pin = getPin(
+                static_cast<Channel>(i)
+            );
+
+            if (pin == NO_PIN)
+                continue;
+
+            const unsigned long interval =
+                state.on ? state.onTime : state.offTime;
+
+            if ((now - state.lastChange) < interval)
+                continue;
+
+            state.lastChange = now;
+            state.on = !state.on;
+
+            m_state[i] = state.on;
+
+            DMPlatform::WriteOutputPin(
+                pin,
+                state.on ^ m_activeLow
+            );
+        }
+    }
+
+    inline void set(
+        Channel ch,
+        bool on
+    )
+    {
+        const uint8_t idx =
+            static_cast<uint8_t>(ch);
 
         if (idx >= CHANNEL_COUNT)
             return;
 
         const int pin = getPin(ch);
+
         if (pin == NO_PIN)
             return;
 
+        // Disabilita eventuale blinking
         m_blink[idx].active = false;
 
-        digitalWrite(pin, (on ^ m_activeLow) ? HIGH : LOW);
+        // Salva stato logico
+        m_state[idx] = on;
+
+        DMPlatform::WriteOutputPin(
+            pin,
+            on ^ m_activeLow
+        );
     }
 
     inline void toggle(Channel ch)
     {
-        const uint8_t idx = static_cast<uint8_t>(ch);
+        const uint8_t idx =
+            static_cast<uint8_t>(ch);
 
         if (idx >= CHANNEL_COUNT)
             return;
 
         const int pin = getPin(ch);
+
         if (pin == NO_PIN)
             return;
 
+        // Disabilita eventuale blinking
         m_blink[idx].active = false;
 
-        bool current = digitalRead(pin);
+        // Il WS2812 non è leggibile come una normale GPIO.
+        // Usiamo quindi lo stato logico memorizzato.
+        m_state[idx] = !m_state[idx];
 
-        digitalWrite(
+        DMPlatform::WriteOutputPin(
             pin,
-            (!current ^ m_activeLow) ? HIGH : LOW
+            m_state[idx] ^ m_activeLow
         );
     }
 
-    inline void blink(Channel ch,
-                  unsigned long onTime,
-                  unsigned long offTime,
-                  unsigned long now)
+    inline void blink(
+        Channel ch,
+        unsigned long onTime,
+        unsigned long offTime,
+        unsigned long now
+    )
     {
-        const uint8_t idx = static_cast<uint8_t>(ch);
+        const uint8_t idx =
+            static_cast<uint8_t>(ch);
 
         if (idx >= CHANNEL_COUNT)
             return;
 
         const int pin = getPin(ch);
+
         if (pin == NO_PIN)
             return;
 
         BlinkState& state = m_blink[idx];
 
-        // Prima chiamata
-        if (!state.active)
-        {
-            state.active = true;
-            state.on = true;
-            state.lastChange = now;
-
-            digitalWrite(pin, m_activeLow ? LOW : HIGH);
-            return;
-        }
-
-        const unsigned long interval = state.on ? onTime : offTime;
-
-        if (now - state.lastChange < interval)
-            return;
-
+        state.active = true;
+        state.onTime = onTime;
+        state.offTime = offTime;
         state.lastChange = now;
-        state.on = !state.on;
+        state.on = true;
 
-        digitalWrite(
+        m_state[idx] = true;
+
+        DMPlatform::WriteOutputPin(
             pin,
-            (state.on ^ m_activeLow) ? HIGH : LOW
+            true ^ m_activeLow
         );
     }
+
 private:
     LedPins m_pins;
-    bool    m_activeLow = false;
-    bool    m_initialized = false;
+
+    bool m_activeLow = false;
+    bool m_initialized = false;
 
     bool validRead  = false;
     bool validWrite = false;
     bool validPanel = false;
     bool validErr   = false;
 
-    inline int getPin(Channel ch) const {
-        switch (ch) {
-            case ONE:   return validRead  ? m_pins.read  : NO_PIN;
-            case TWO:   return validWrite ? m_pins.write : NO_PIN;
-            case THREE: return validPanel ? m_pins.panel : NO_PIN;
-            case FOUR:  return validErr   ? m_pins.err   : NO_PIN;
-            default:    return NO_PIN;
+    // Stato logico dei quattro canali.
+    //
+    // Serve soprattutto per il WS2812:
+    // il LED RGB non può essere letto con digitalRead().
+    bool m_state[CHANNEL_COUNT] = {
+        false,
+        false,
+        false,
+        false
+    };
+
+    inline int getPin(Channel ch) const
+    {
+        switch (ch)
+        {
+            case ONE:
+                return validRead
+                    ? m_pins.read
+                    : NO_PIN;
+
+            case TWO:
+                return validWrite
+                    ? m_pins.write
+                    : NO_PIN;
+
+            case THREE:
+                return validPanel
+                    ? m_pins.panel
+                    : NO_PIN;
+
+            case FOUR:
+                return validErr
+                    ? m_pins.err
+                    : NO_PIN;
+
+            default:
+                return NO_PIN;
         }
     }
 
     struct BlinkState
     {
         unsigned long lastChange = 0;
+        unsigned long onTime = 0;
+        unsigned long offTime = 0;
+
         bool active = false;
         bool on = false;
     };
@@ -1126,7 +1269,7 @@ private:
     BlinkState m_blink[CHANNEL_COUNT];
 };
 
-
+/*
 class ButtonManager {
 public:
     struct ButtonState {
@@ -1168,6 +1311,104 @@ public:
             lastState = nowState;
             return st;
         }
+}; */
+
+class ButtonManager {
+public:
+
+    struct ButtonState {
+        bool pressedNow = false;
+        bool pressedAtStartup = false;
+    };
+
+private:
+
+    int pin = DMPlatform::PIN_NOT_CONNECTED;
+
+    bool startupState = false;
+    bool startupConsumed = false;
+    bool lastState = false;
+
+public:
+
+    explicit ButtonManager(int buttonPin)
+        : pin(buttonPin)
+    {
+    }
+
+    void begin()
+    {
+        // --------------------------------------------------------
+        // Pulsante non presente sulla piattaforma
+        // --------------------------------------------------------
+
+        if (!DMPlatform::IsPinAvailable(pin))
+        {
+            startupState = false;
+            startupConsumed = true;
+            lastState = false;
+            return;
+        }
+
+        // --------------------------------------------------------
+        // Pulsante reale
+        // --------------------------------------------------------
+
+        DMPlatform::SetupInputPin(pin);
+
+        delay(50);
+
+        startupState =
+            (DMPlatform::ReadInputPin(pin) == LOW);
+
+        lastState =
+            startupState;
+
+        startupConsumed = false;
+    }
+
+    ButtonState update(unsigned long /*now*/)
+    {
+        ButtonState st;
+
+        // --------------------------------------------------------
+        // Pulsante non presente
+        // --------------------------------------------------------
+
+        if (!DMPlatform::IsPinAvailable(pin))
+        {
+            return st;
+        }
+
+        // --------------------------------------------------------
+        // Lettura attuale
+        // --------------------------------------------------------
+
+        const bool nowState =
+            (DMPlatform::ReadInputPin(pin) == LOW);
+
+        // --------------------------------------------------------
+        // Fronte di discesa
+        // --------------------------------------------------------
+
+        st.pressedNow =
+            nowState && !lastState;
+
+        // --------------------------------------------------------
+        // Evento startup una sola volta
+        // --------------------------------------------------------
+
+        if (!startupConsumed && startupState)
+        {
+            st.pressedAtStartup = true;
+            startupConsumed = true;
+        }
+
+        lastState =
+            nowState;
+
+        return st;
+    }
 };
 
 /******************************************************

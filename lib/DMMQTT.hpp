@@ -977,7 +977,7 @@ public:
                     {
                         value = enumValue.value;
 
-                        LOG_IF(
+                        LOG_DF(
                             "MQTT",
                             "Z2M ENUM field=%s text=%s value=%ld",
                             mapping->field,
