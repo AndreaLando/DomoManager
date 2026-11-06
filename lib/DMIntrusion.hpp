@@ -2217,6 +2217,7 @@ public:
             DOORS_OPEN_MEM,
             ALARM_TAMPER,
             ALARM_PANIC,
+            ALARM_CAMERA,
             GLOBAL_TROUBLE,
             FIELD_COUNT
         };
@@ -2293,6 +2294,11 @@ public:
             set(
                 ALARM_PANIC,
                 st.panic
+            );
+
+            set(
+                ALARM_CAMERA,
+                st.camera
             );
 
             set(
@@ -2405,6 +2411,7 @@ public:
             LOG_IF("SystemManager","%-25s : %s","Doors Open MEM",info.f[DOORS_OPEN_MEM].get()?"TRUE":"false");
             LOG_IF("SystemManager","%-25s : %s","Tamper",info.f[ALARM_TAMPER].get()?"TRUE":"false");
             LOG_IF("SystemManager","%-25s : %s","Panic",info.f[ALARM_PANIC].get()?"TRUE":"false");
+            LOG_IF("SystemManager","%-25s : %s","Camera",info.f[ALARM_CAMERA].get()?"TRUE":"false");
             LOG_IF("SystemManager","%-25s : %s","Global Trouble",info.f[GLOBAL_TROUBLE].get()?"TRUE":"false");
             LOG_IF("SystemManager","Bitmask                : 0x%08X",(unsigned)getBitmask());
             LOG_IF("SystemManager","========================");
@@ -3312,7 +3319,8 @@ public:
                     : SensorCategory::OTHER;
 
             if(category == SensorCategory::TAMPER ||
-            category == SensorCategory::PANIC)
+            category == SensorCategory::PANIC ||
+            category == SensorCategory::CAMERA )
             {
                 sensor->EngageRT(true);
                 sensor->EngageH24(true);
@@ -3366,6 +3374,7 @@ public:
                         case SensorCategory::SMOKE:
                         case SensorCategory::TAMPER:
                         case SensorCategory::PANIC:
+                        case SensorCategory::CAMERA:
                             engageRT = true;
                             break;
 
@@ -4103,6 +4112,8 @@ public:
                 system.info.f[SystemManager::ALARM_TAMPER].get()?"ACTIVE":"OK");
             LOG_IF("SecurityOrchestrator","Panic            : %s",
                 system.info.f[SystemManager::ALARM_PANIC].get()?"ACTIVE":"OK");
+            LOG_IF("SecurityOrchestrator","Camera            : %s",
+                system.info.f[SystemManager::ALARM_CAMERA].get()?"ACTIVE":"OK");
             LOG_IF("SecurityOrchestrator","System bitmask    : 0x%08X",(unsigned)system.getBitmask());
 
             Footer();
@@ -4282,6 +4293,8 @@ public:
                 system.info.f[SystemManager::ALARM_TAMPER].get()?"ACTIVE":"OK");
             LOG_IF("SecurityOrchestrator","Panic            : %s",
                 system.info.f[SystemManager::ALARM_PANIC].get()?"ACTIVE":"OK");
+            LOG_IF("SecurityOrchestrator","Camera            : %s",
+                system.info.f[SystemManager::ALARM_CAMERA].get()?"ACTIVE":"OK");
             LOG_IF("SecurityOrchestrator","Intrusion         : %s",
                 system.info.f[SystemManager::ALARM_INTRUSION].get()?"ACTIVE":"OK");
             LOG_IF("SecurityOrchestrator","Intrusion H24     : %s",
@@ -7243,6 +7256,27 @@ inline void SecurityOrchestrator::Diagnostic::ReportHmi()
                 "  systemBitmask=0x%08X",
                 (unsigned)state.systemBitmask
             );
+
+        // --------------------------------------------------------
+        // DECODED SECURITY SYSTEM FLAGS
+        // --------------------------------------------------------
+
+        const bool cameraAlarm =
+            (
+                state.systemBitmask &
+                (
+                    uint32_t(1) <<
+                    SecurityOrchestrator::
+                        SystemManager::
+                        ALARM_CAMERA
+                )
+            ) != 0;
+
+        LOG_IF(
+            "SecurityOrchestrator",
+            "  cameraAlarm=%u",
+            cameraAlarm ? 1 : 0
+        );
 
             LOG_IF(
                 "SecurityOrchestrator",

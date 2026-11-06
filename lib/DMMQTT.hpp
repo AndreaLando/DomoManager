@@ -23,6 +23,243 @@
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
 
+// ============================================================================
+// MQTT INBOUND MESSAGE
+//
+// Rappresentazione normalizzata di un messaggio MQTT ricevuto.
+//
+// La struttura viene utilizzata sia dal layer MQTT Device/Mapping sia dal
+// DMHAOrchestrator.
+//
+// Il payload e tutti i puntatori presenti nella struttura sono validi
+// solamente durante l'esecuzione sincrona della callback.
+//
+// Se un consumer deve conservare il contenuto deve copiarlo.
+// ============================================================================
+
+struct MQTTInboundMessage
+{
+    // ========================================================================
+    // ORIGIN
+    // ========================================================================
+
+    enum class Origin : uint8_t
+    {
+        UNKNOWN = 0,
+
+        // Messaggio MQTT ricevuto ma non ancora interpretato.
+        RAW,
+
+        // Mapping MQTT configurato.
+        MAPPING_NUMERIC,
+        MAPPING_TEXT,
+
+        // Comando Home Assistant.
+        HOME_ASSISTANT_AREA,
+        HOME_ASSISTANT_RUNTIME
+    };
+
+    // ========================================================================
+    // VALUE TYPE
+    // ========================================================================
+
+    enum class ValueType : uint8_t
+    {
+        NONE = 0,
+
+        BOOLEAN,
+        INTEGER,
+        FLOAT,
+        TEXT,
+        JSON
+    };
+
+    // ========================================================================
+    // SOURCE
+    // ========================================================================
+
+    Origin origin =
+        Origin::UNKNOWN;
+
+    ValueType valueType =
+        ValueType::NONE;
+
+    uint8_t clientIndex =
+        0;
+
+    FrontendConfig::MQTT::Client::Backend backend =
+        FrontendConfig::MQTT::Client::Backend::GENERIC;
+
+    // ========================================================================
+    // RAW MQTT
+    // ========================================================================
+
+    const char* topic =
+        nullptr;
+
+    const char* payload =
+        nullptr;
+
+    size_t payloadLength =
+        0;
+
+    // ========================================================================
+    // DEVICE / MAPPING
+    // ========================================================================
+
+    const FrontendConfig::MQTT::Device*
+        device =
+            nullptr;
+
+    const FrontendConfig::MQTT::Mapping*
+        mapping =
+            nullptr;
+
+    // ========================================================================
+    // NUMERIC VALUE
+    // ========================================================================
+
+    long integerValue =
+        0;
+
+    float floatValue =
+        0.0f;
+
+    bool booleanValue =
+        false;
+
+    // ========================================================================
+    // BUFFER AREA
+    // ========================================================================
+
+    int area =
+        -1;
+
+    // ========================================================================
+    // RUNTIME STORE
+    //
+    // Non vengono utilizzati tipi annidati di DMRuntimeStore.
+    //
+    // Questo mantiene DMMQTT.hpp indipendente da DMRuntimeStore.hpp ed evita
+    // dipendenze circolari tra il layer MQTT e il runtime database.
+    // ========================================================================
+
+    static constexpr uint8_t INVALID_RUNTIME_HANDLE =
+        0xFF;
+
+    uint8_t runtimeHandle =
+        INVALID_RUNTIME_HANDLE;
+
+    const char* runtimeId =
+        nullptr;
+
+    uint8_t runtimeType =
+        0;
+
+    bool runtimeSensitive =
+        false;
+
+    // ========================================================================
+    // HELPERS
+    // ========================================================================
+
+    bool hasPayload() const
+    {
+        return
+            payload != nullptr;
+    }
+
+    bool isRaw() const
+    {
+        return
+            origin ==
+                Origin::RAW;
+    }
+
+    bool isMapping() const
+    {
+        return
+            origin ==
+                Origin::MAPPING_NUMERIC ||
+            origin ==
+                Origin::MAPPING_TEXT;
+    }
+
+    bool isHomeAssistant() const
+    {
+        return
+            origin ==
+                Origin::HOME_ASSISTANT_AREA ||
+            origin ==
+                Origin::HOME_ASSISTANT_RUNTIME;
+    }
+
+    bool isArea() const
+    {
+        return
+            area >= 0;
+    }
+
+    bool isRuntime() const
+    {
+        return
+            origin ==
+                Origin::HOME_ASSISTANT_RUNTIME &&
+            runtimeHandle !=
+                INVALID_RUNTIME_HANDLE &&
+            runtimeId !=
+                nullptr;
+    }
+
+    bool valid() const
+    {
+        switch (origin)
+        {
+            case Origin::RAW:
+            {
+                return
+                    topic != nullptr &&
+                    payload != nullptr;
+            }
+
+            case Origin::MAPPING_NUMERIC:
+            {
+                return
+                    device != nullptr &&
+                    mapping != nullptr;
+            }
+
+            case Origin::MAPPING_TEXT:
+            {
+                return
+                    device != nullptr &&
+                    mapping != nullptr &&
+                    payload != nullptr;
+            }
+
+            case Origin::HOME_ASSISTANT_AREA:
+            {
+                return
+                    area >= 0;
+            }
+
+            case Origin::HOME_ASSISTANT_RUNTIME:
+            {
+                return
+                    runtimeHandle !=
+                        INVALID_RUNTIME_HANDLE &&
+                    runtimeId !=
+                        nullptr;
+            }
+
+            case Origin::UNKNOWN:
+            default:
+            {
+                return false;
+            }
+        }
+    }
+};
 
 
 // ============================================================
@@ -31,31 +268,7 @@
 
 class MQTT {
 public:
-    struct HADiscoveryEntity
-    {
-        int area = -1;
-
-        const char* deviceId = nullptr;
-        const char* deviceName = nullptr;
-
-        const char* name = nullptr;
-        const char* uniqueId = nullptr;
-        const char* field = nullptr;
-
-        const char* component = nullptr;
-
-        const char* unit = nullptr;
-        const char* deviceClass = nullptr;
-        const char* stateClass = nullptr;
-
-        bool readable = false;
-        bool writable = false;
-
-        float scale = 1.0f;
-
-        bool valid = false;
-    };
-
+    
     static size_t getMappingCount(
         const FrontendConfig::MQTT::Device* device
     )
@@ -74,11 +287,46 @@ public:
         return FrontendConfig::MQTT::Device::MAX_MAPPINGS;
     }
 
-    typedef void (*CommandCallback)(
+    // ========================================================================
+    // INBOUND MESSAGE CALLBACK
+    //
+    // Callback applicativa unica per:
+    //
+    //   - mapping numerici;
+    //   - mapping testuali;
+    //   - messaggi raw, se richiesto;
+    //   - eventi Home Assistant normalizzati dal relativo orchestratore.
+    //
+    // La callback è sincrona.
+    // ========================================================================
+
+    using InboundMessageCallback =
+        void (*)(
+            const MQTTInboundMessage& message
+        );
+
+    // ========================================================
+    // RAW MESSAGE CALLBACK
+    // ========================================================
+    //
+    // Utilizzato dai backend privi di mapping statici.
+    //
+    // Caso principale:
+    //
+    //   Home Assistant Auto Discovery
+    //
+    // dove i comandi arrivano su:
+    //
+    //   domomanager/area/<area>/set
+    //
+    // ========================================================
+
+    typedef void (*RawMessageCallback)(
         uint8_t clientIndex,
-        const FrontendConfig::MQTT::Device* device,
-        const FrontendConfig::MQTT::Mapping* mapping,
-        long value
+        FrontendConfig::MQTT::Client::Backend backend,
+        const char* topic,
+        const char* payload,
+        size_t length
     );
 
     class BackendBase
@@ -102,9 +350,129 @@ public:
             long value
         ) = 0;
 
+        // ========================================================
+        // HOME ASSISTANT SUBSCRIBE
+        // ========================================================
+        //
+        // Il client Home Assistant non utilizza Device/Mapping
+        // statici.
+        //
+        // Tutti i comandi Auto Discovery vengono ricevuti tramite:
+        //
+        //     <topicPrefix>/area/+/set
+        //
+        // Con topicPrefix:
+        //
+        //     domomanager
+        //
+        // la subscription risultante è:
+        //
+        //     domomanager/area/+/set
+        //
+        // ========================================================
+
         virtual void subscribe(
-            MQTT* mqttInstance
-        ) = 0;
+            MQTT* mqttInstance)
+        {
+            if (!mqttInstance)
+            {
+                LOG_EF(
+                    "MQTT",
+                    "BackendHA::subscribe: mqttInstance NULL"
+                );
+
+                return;
+            }
+
+
+            // ====================================================
+            // TOPIC PREFIX
+            // ====================================================
+
+            const char* prefix =
+                mqttInstance->getTopicPrefix();
+
+
+            if (!prefix ||
+                prefix[0] == '\0')
+            {
+                prefix =
+                    "domomanager";
+            }
+
+
+            // ====================================================
+            // COMMAND SUBSCRIPTION
+            // ====================================================
+
+            char commandTopic[160];
+
+            const int length =
+                snprintf(
+                    commandTopic,
+                    sizeof(commandTopic),
+                    "%s/area/+/set",
+                    prefix
+                );
+
+
+            if (length <= 0 ||
+                static_cast<size_t>(length) >=
+                    sizeof(commandTopic))
+            {
+                LOG_EF(
+                    "MQTT",
+                    "BackendHA::subscribe: "
+                    "topic non valido prefix=%s",
+                    prefix
+                );
+
+                return;
+            }
+
+
+            LOG_IF(
+                "MQTT",
+                "HA command subscription: topic=%s",
+                commandTopic
+            );
+
+
+            const bool subscribed =
+                mqttInstance->subscribeRaw(
+                    commandTopic
+                );
+
+
+            if (!subscribed)
+            {
+                LOG_EF(
+                    "MQTT",
+                    "HA command subscription FALLITA: topic=%s",
+                    commandTopic
+                );
+
+                return;
+            }
+
+
+            LOG_IF(
+                "MQTT",
+                "HA command subscription completata: topic=%s",
+                commandTopic
+            );
+        }
+
+        // ========================================================
+        // HOME ASSISTANT DECODE MESSAGE
+        // ========================================================
+        //
+        // I comandi Auto Discovery vengono gestiti mediante il
+        // RawMessageCallback.
+        //
+        // Questo backend non produce Device/Mapping statici.
+        //
+        // ========================================================
 
         virtual bool decodeMessage(
             MQTT* mqttInstance,
@@ -113,8 +481,53 @@ public:
             size_t len,
             const FrontendConfig::MQTT::Device*& device,
             const FrontendConfig::MQTT::Mapping*& mapping,
-            long& value
-        ) = 0;
+            long& value)
+        {
+            (void)mqttInstance;
+            (void)topic;
+            (void)payload;
+            (void)len;
+
+            device =
+                nullptr;
+
+            mapping =
+                nullptr;
+
+            value =
+                0;
+
+            return false;
+        }
+
+        virtual bool decodeTextMessage(
+            MQTT* mqttInstance,
+            const char* topic,
+            const char* payload,
+            size_t len,
+            const FrontendConfig::MQTT::Device*& device,
+            const FrontendConfig::MQTT::Mapping*& mapping,
+            char* text,
+            size_t textSize,
+            size_t& textLength)
+        {
+            (void)mqttInstance;
+            (void)topic;
+            (void)payload;
+            (void)len;
+
+            device = nullptr;
+            mapping = nullptr;
+
+            if (text && textSize > 0)
+            {
+                text[0] = '\0';
+            }
+
+            textLength = 0;
+
+            return false;
+        }
 
         virtual const char* name() const = 0;
     };
@@ -128,10 +541,9 @@ public:
     public:
 
         virtual void begin(
-            MQTT* mqttInstance
-        )
+            MQTT* mqttInstance)
         {
-            publishDiscovery(mqttInstance);
+            (void)mqttInstance;
         }
 
         virtual void loop(
@@ -447,115 +859,6 @@ public:
                     return true;
             }
         }
-
-        static void publishDiscovery(
-            MQTT* mqttInstance
-        )
-        {
-            if (!mqttInstance)
-                return;
-
-            const size_t count =
-                mqttInstance->getHADiscoveryCount();
-
-            for (size_t i = 0;
-                i < count;
-                ++i)
-            {
-                const MQTT::HADiscoveryEntity* entity =
-                    mqttInstance->getHADiscovery(i);
-
-                if (!entity)
-                    continue;
-
-                if (!entity->valid)
-                    continue;
-
-                char topic[180];
-                char payload[768];
-
-                const char* component =
-                    entity->component
-                        ? entity->component
-                        : "sensor";
-
-                const char* field =
-                    entity->field
-                        ? entity->field
-                        : "";
-
-                const char* uniqueId =
-                    entity->uniqueId
-                        ? entity->uniqueId
-                        : field;
-
-                const char* name =
-                    entity->name
-                        ? entity->name
-                        : field;
-
-                const char* prefix =
-                    mqttInstance->getTopicPrefix();
-
-                /*
-                * ====================================================
-                * DISCOVERY TOPIC
-                * ====================================================
-                */
-
-                snprintf(
-                    topic,
-                    sizeof(topic),
-                    "homeassistant/%s/%s/config",
-                    component,
-                    uniqueId
-                );
-
-                /*
-                * ====================================================
-                * BASE JSON
-                * ====================================================
-                */
-
-                snprintf(
-                    payload,
-                    sizeof(payload),
-                    "{"
-                    "\"name\":\"%s\","
-                    "\"unique_id\":\"%s\","
-                    "\"state_topic\":\"homeassistant/state/%s/%s\""
-                    "}",
-                    name,
-                    uniqueId,
-                    prefix,
-                    field
-                );
-
-                /*
-                * ====================================================
-                * PUBLISH
-                * ====================================================
-                */
-
-                const bool ok =
-                    mqttInstance->publishRaw(
-                        topic,
-                        payload,
-                        true
-                    );
-
-                LOG_IF(
-                    "MQTT",
-                    "HA DISCOVERY TX "
-                    "ok=%d "
-                    "topic=%s "
-                    "payload=%s",
-                    ok ? 1 : 0,
-                    topic,
-                    payload
-                );
-            }
-        }
     };
 
     // ========================================================
@@ -741,6 +1044,149 @@ public:
             return false;
         }
 
+        virtual bool decodeTextMessage(
+            MQTT* mqttInstance,
+            const char* topic,
+            const char* payload,
+            size_t len,
+            const FrontendConfig::MQTT::Device*& device,
+            const FrontendConfig::MQTT::Mapping*& mapping,
+            char* text,
+            size_t textSize,
+            size_t& textLength)
+        {
+            device = nullptr;
+            mapping = nullptr;
+            textLength = 0;
+
+            if (!mqttInstance ||
+                !topic ||
+                !payload ||
+                !text ||
+                textSize < 2)
+            {
+                return false;
+            }
+
+            text[0] = '\0';
+
+            for (size_t d = 0;
+                d < mqttInstance->getDeviceCount();
+                ++d)
+            {
+                const FrontendConfig::MQTT::Device* dev =
+                    mqttInstance->getDevice(d);
+
+                if (!dev)
+                    continue;
+
+                char stateTopic[180];
+
+                const int topicLength =
+                    snprintf(
+                        stateTopic,
+                        sizeof(stateTopic),
+                        "%s/%s",
+                        mqttInstance->getTopicPrefix(),
+                        dev->id
+                    );
+
+                if (topicLength <= 0 ||
+                    static_cast<size_t>(topicLength) >=
+                        sizeof(stateTopic))
+                {
+                    continue;
+                }
+
+                if (strcmp(topic, stateTopic) != 0)
+                    continue;
+
+                for (size_t m = 0;
+                    m < MQTT::getMappingCount(dev);
+                    ++m)
+                {
+                    const FrontendConfig::MQTT::Mapping* map =
+                        &dev->mappings[m];
+
+                    if (!mqttInstance->canRead(map))
+                        continue;
+
+                    if (map->type !=
+                            FrontendConfig::MQTT::Mapping::DataType::STRING &&
+                        map->type !=
+                            FrontendConfig::MQTT::Mapping::DataType::JSON)
+                    {
+                        continue;
+                    }
+
+                    bool decoded = false;
+
+                    if (map->type ==
+                        FrontendConfig::MQTT::Mapping::DataType::STRING)
+                    {
+                        decoded =
+                            extractJsonTextValue(
+                                payload,
+                                len,
+                                map->field,
+                                text,
+                                textSize,
+                                textLength
+                            );
+                    }
+                    else
+                    {
+                        /*
+                        * JSON trasporta il payload completo.
+                        *
+                        * Il consumer frontend potrà successivamente
+                        * deserializzarlo con ArduinoJson.
+                        */
+                        if (len < textSize)
+                        {
+                            memcpy(
+                                text,
+                                payload,
+                                len
+                            );
+
+                            text[len] = '\0';
+                            textLength = len;
+                            decoded = true;
+                        }
+                    }
+
+                    if (!decoded)
+                        continue;
+
+                    device = dev;
+                    mapping = map;
+
+                    LOG_DF(
+                        "MQTT",
+                        "Z2M TEXT field=%s bytes=%u value='%s'",
+                        map->field
+                            ? map->field
+                            : "?",
+                        static_cast<unsigned>(
+                            textLength
+                        ),
+                        text
+                    );
+
+                    return true;
+                }
+
+                /*
+                * Il topic appartiene al device trovato, ma nessuna
+                * mapping testuale corrisponde al payload.
+                */
+                return false;
+            }
+
+            return false;
+        }
+
         virtual const char* name() const
         {
             return "ZIGBEE2MQTT";
@@ -790,6 +1236,213 @@ public:
             }
         }
 
+        static bool extractJsonTextValue(
+            const char* payload,
+            size_t len,
+            const char* field,
+            char* output,
+            size_t outputSize,
+            size_t& outputLength)
+        {
+            outputLength = 0;
+
+            if (!payload ||
+                len == 0 ||
+                !field ||
+                field[0] == '\0' ||
+                !output ||
+                outputSize < 2)
+            {
+                return false;
+            }
+
+            output[0] = '\0';
+
+            char key[96];
+
+            const int keyLength =
+                snprintf(
+                    key,
+                    sizeof(key),
+                    "\"%s\"",
+                    field
+                );
+
+            if (keyLength <= 0 ||
+                static_cast<size_t>(keyLength) >=
+                    sizeof(key))
+            {
+                return false;
+            }
+
+            const char* payloadEnd =
+                payload + len;
+
+            const char* position =
+                strstr(
+                    payload,
+                    key
+                );
+
+            if (!position ||
+                position >= payloadEnd)
+            {
+                return false;
+            }
+
+            position +=
+                static_cast<size_t>(
+                    keyLength
+                );
+
+            /*
+            * Cerca il separatore ':' senza oltrepassare
+            * il payload ricevuto.
+            */
+            while (position < payloadEnd &&
+                (*position == ' ' ||
+                    *position == '\t' ||
+                    *position == '\r' ||
+                    *position == '\n'))
+            {
+                ++position;
+            }
+
+            if (position >= payloadEnd ||
+                *position != ':')
+            {
+                return false;
+            }
+
+            ++position;
+
+            /*
+            * Salta gli spazi dopo ':'.
+            */
+            while (position < payloadEnd &&
+                (*position == ' ' ||
+                    *position == '\t' ||
+                    *position == '\r' ||
+                    *position == '\n'))
+            {
+                ++position;
+            }
+
+            if (position >= payloadEnd)
+                return false;
+
+            /*
+            * Per DataType::STRING richiediamo una stringa JSON.
+            */
+            if (*position != '"')
+                return false;
+
+            ++position;
+
+            bool escaped = false;
+
+            while (position < payloadEnd)
+            {
+                const char current =
+                    *position++;
+
+                if (escaped)
+                {
+                    char decoded =
+                        current;
+
+                    switch (current)
+                    {
+                        case '"':
+                            decoded = '"';
+                            break;
+
+                        case '\\':
+                            decoded = '\\';
+                            break;
+
+                        case '/':
+                            decoded = '/';
+                            break;
+
+                        case 'n':
+                            decoded = '\n';
+                            break;
+
+                        case 'r':
+                            decoded = '\r';
+                            break;
+
+                        case 't':
+                            decoded = '\t';
+                            break;
+
+                        case 'b':
+                            decoded = '\b';
+                            break;
+
+                        case 'f':
+                            decoded = '\f';
+                            break;
+
+                        default:
+                            /*
+                            * Le sequenze Unicode \uXXXX non vengono
+                            * decodificate in questa prima versione.
+                            */
+                            decoded = current;
+                            break;
+                    }
+
+                    if (outputLength >=
+                        outputSize - 1)
+                    {
+                        output[0] = '\0';
+                        outputLength = 0;
+                        return false;
+                    }
+
+                    output[outputLength++] =
+                        decoded;
+
+                    escaped = false;
+                    continue;
+                }
+
+                if (current == '\\')
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (current == '"')
+                {
+                    output[outputLength] =
+                        '\0';
+
+                    return true;
+                }
+
+                if (outputLength >=
+                    outputSize - 1)
+                {
+                    output[0] = '\0';
+                    outputLength = 0;
+                    return false;
+                }
+
+                output[outputLength++] =
+                    current;
+            }
+
+            /*
+            * Stringa JSON non chiusa.
+            */
+            output[0] = '\0';
+            outputLength = 0;
+
+            return false;
+        }
 
         static bool extractJsonValue(
             const char* payload,
@@ -1194,14 +1847,12 @@ private:
 
     BackendBase* backendImpl;
 
-    CommandCallback commandCallback;
+    InboundMessageCallback inboundMessageCallback;
+    RawMessageCallback rawMessageCallback;
 
     static MQTT* activeCallbackInstance;
 
     unsigned long lastReconnectAttempt;
-
-    const HADiscoveryEntity* haDiscovery;
-    size_t haDiscoveryCount;
 
 public:
 
@@ -1211,21 +1862,18 @@ public:
         uint8_t mqttClientIndex,
         const FrontendConfig::MQTT::Client* client,
         const FrontendConfig::MQTT::Device* deviceList,
-        size_t deviceCount_
-    )
+        size_t deviceCount_)
         : eth(ethClient),
-          mqtt(mqttClient),
-          clientIndex(mqttClientIndex),
-          clientCfg(client),
-          devices(deviceList),
-          deviceCount(deviceCount_),
-          backendImpl(nullptr),
-          commandCallback(nullptr),
-          haDiscovery(nullptr),
-        haDiscoveryCount(0)
+        mqtt(mqttClient),
+        clientIndex(mqttClientIndex),
+        clientCfg(client),
+        devices(deviceList),
+        deviceCount(deviceCount_),
+        backendImpl(nullptr),
+        inboundMessageCallback(nullptr),
+        rawMessageCallback(nullptr),
+        lastReconnectAttempt(0)
     {
-        
-        lastReconnectAttempt = 0;
     }
 
     int state() const
@@ -1238,11 +1886,35 @@ public:
         return eth.connected();
     }
 
-    void setCommandCallback(
-        CommandCallback cb
-    )
+    // ========================================================================
+    // SET INBOUND MESSAGE CALLBACK
+    //
+    // Registra la callback applicativa unica.
+    //
+    // La callback riceve solamente messaggi già normalizzati dal layer che li
+    // ha riconosciuti.
+    // ========================================================================
+
+    void setInboundMessageCallback(
+        InboundMessageCallback callback)
     {
-        commandCallback = cb;
+        inboundMessageCallback =
+            callback;
+    }
+
+    // ========================================================================
+    // SET RAW MESSAGE CALLBACK
+    //
+    // Registra il consumer infrastrutturale dei messaggi raw.
+    //
+    // Il caso principale è DMHAOrchestrator.
+    // ========================================================================
+
+    void setRawMessageCallback(
+        RawMessageCallback callback)
+    {
+        rawMessageCallback =
+            callback;
     }
 
     void setBackend(
@@ -1524,68 +2196,366 @@ public:
         return &devices[index];
     }
 
-    const HADiscoveryEntity* getHADiscovery(
-        size_t index
-    ) const
-    {
-        if (index >= haDiscoveryCount)
-            return nullptr;
-
-        return &haDiscovery[index];
-    }
-
-    size_t getHADiscoveryCount() const
-    {
-        return haDiscoveryCount;
-    }
-
 private:
 
     BackendHA haBackend;
     BackendZ2M z2mBackend;
     BackendShelly shellyBackend;
 
+    // ========================================================================
+    // RESOLVE MAPPING VALUE TYPE
+    // ========================================================================
+
+    static MQTTInboundMessage::ValueType mappingValueType(
+        const FrontendConfig::MQTT::Mapping* mapping)
+    {
+        using DataType =
+            FrontendConfig::MQTT::Mapping::DataType;
+
+        using ValueType =
+            MQTTInboundMessage::ValueType;
+
+        if (!mapping)
+            return ValueType::NONE;
+
+        switch (mapping->type)
+        {
+            case DataType::BOOL:
+                return ValueType::BOOLEAN;
+
+            case DataType::FLOAT:
+                return ValueType::FLOAT;
+
+            case DataType::STRING:
+                return ValueType::TEXT;
+
+            case DataType::JSON:
+                return ValueType::JSON;
+
+            case DataType::ENUM:
+            case DataType::INT:
+            default:
+                return ValueType::INTEGER;
+        }
+    }
+
+    // ========================================================================
+    // NOTIFY INBOUND
+    // ========================================================================
+
+    void notifyInbound(
+        const MQTTInboundMessage& message)
+    {
+        if (!inboundMessageCallback)
+            return;
+
+        if (!message.valid())
+        {
+            LOG_WF(
+                "MQTT",
+                "Inbound message non valido: "
+                "client=%u origin=%u",
+                static_cast<unsigned>(
+                    message.clientIndex
+                ),
+                static_cast<unsigned>(
+                    message.origin
+                )
+            );
+
+            return;
+        }
+
+        inboundMessageCallback(
+            message
+        );
+    }
+
+    // ========================================================================
+    // NOTIFY RAW
+    //
+    // Il messaggio raw viene notificato alla callback applicativa solamente
+    // quando non è destinato al backend Home Assistant.
+    //
+    // I messaggi Home Assistant vengono prima interpretati da DMHAOrchestrator
+    // e poi notificati come HOME_ASSISTANT_AREA o HOME_ASSISTANT_RUNTIME.
+    //
+    // Questo impedisce una doppia notifica dello stesso messaggio.
+    // ========================================================================
+
+    void notifyRawApplication(
+        FrontendConfig::MQTT::Client::Backend backend,
+        const char* topic,
+        const char* payload,
+        size_t length)
+    {
+        if (backend ==
+            FrontendConfig::MQTT::Client::Backend::HOME_ASSISTANT)
+        {
+            return;
+        }
+
+        MQTTInboundMessage message;
+
+        message.origin =
+            MQTTInboundMessage::Origin::RAW;
+
+        message.valueType =
+            MQTTInboundMessage::ValueType::NONE;
+
+        message.clientIndex =
+            clientIndex;
+
+        message.backend =
+            backend;
+
+        message.topic =
+            topic;
+
+        message.payload =
+            payload;
+
+        message.payloadLength =
+            length;
+
+        notifyInbound(
+            message
+        );
+    }
+
+    // ========================================================================
+    // NOTIFY NUMERIC MAPPING
+    // ========================================================================
+
+    void notifyNumericMapping(
+        FrontendConfig::MQTT::Client::Backend backend,
+        const char* topic,
+        const char* payload,
+        size_t length,
+        const FrontendConfig::MQTT::Device* device,
+        const FrontendConfig::MQTT::Mapping* mapping,
+        long value)
+    {
+        if (!device ||
+            !mapping)
+        {
+            return;
+        }
+
+        MQTTInboundMessage message;
+
+        message.origin =
+            MQTTInboundMessage::Origin::
+                MAPPING_NUMERIC;
+
+        message.valueType =
+            mappingValueType(
+                mapping
+            );
+
+        message.clientIndex =
+            clientIndex;
+
+        message.backend =
+            backend;
+
+        message.topic =
+            topic;
+
+        message.payload =
+            payload;
+
+        message.payloadLength =
+            length;
+
+        message.device =
+            device;
+
+        message.mapping =
+            mapping;
+
+        message.area =
+            mapping->area;
+
+        message.integerValue =
+            value;
+
+        switch (mapping->type)
+        {
+            case FrontendConfig::MQTT::Mapping::
+                DataType::BOOL:
+            {
+                message.booleanValue =
+                    value != 0;
+
+                break;
+            }
+
+            case FrontendConfig::MQTT::Mapping::
+                DataType::FLOAT:
+            {
+                message.floatValue =
+                    static_cast<float>(
+                        value
+                    ) *
+                    mapping->scale;
+
+                break;
+            }
+
+            default:
+                break;
+        }
+
+        notifyInbound(
+            message
+        );
+    }
+
+    // ========================================================================
+    // NOTIFY TEXT MAPPING
+    // ========================================================================
+
+    void notifyTextMapping(
+        FrontendConfig::MQTT::Client::Backend backend,
+        const char* topic,
+        const char* rawPayload,
+        size_t rawPayloadLength,
+        const FrontendConfig::MQTT::Device* device,
+        const FrontendConfig::MQTT::Mapping* mapping,
+        const char* decodedPayload,
+        size_t decodedLength)
+    {
+        if (!device ||
+            !mapping ||
+            !decodedPayload)
+        {
+            return;
+        }
+
+        MQTTInboundMessage message;
+
+        message.origin =
+            MQTTInboundMessage::Origin::
+                MAPPING_TEXT;
+
+        message.valueType =
+            mappingValueType(
+                mapping
+            );
+
+        message.clientIndex =
+            clientIndex;
+
+        message.backend =
+            backend;
+
+        message.topic =
+            topic;
+
+        /*
+        * Per il mapping testuale il payload applicativo è quello già
+        * decodificato dal backend, non il payload MQTT grezzo.
+        */
+        message.payload =
+            decodedPayload;
+
+        message.payloadLength =
+            decodedLength;
+
+        message.device =
+            device;
+
+        message.mapping =
+            mapping;
+
+        message.area =
+            mapping->area;
+
+        (void)rawPayload;
+        (void)rawPayloadLength;
+
+        notifyInbound(
+            message
+        );
+    }
+
+    // ========================================================
+    // MQTT CALLBACK
+    // ========================================================
+
     static void mqttCallback(
         char* topic,
         uint8_t* payload,
-        unsigned int len
-    )
+        unsigned int len)
     {
-        LOG_DF(
-            "MQTT",
-            "RX topic=%s payload=%s",
-            topic,
-            payload
-        );
-
         if (!activeCallbackInstance)
             return;
 
         activeCallbackInstance->onMessage(
             topic,
             payload,
-            len
+            static_cast<size_t>(
+                len
+            )
         );
     }
+
+    // ========================================================================
+    // MQTT MESSAGE DISPATCH
+    //
+    // Flusso:
+    //
+    //   1. copia e termina il payload;
+    //   2. invia sempre il raw al consumer infrastrutturale;
+    //   3. HOME_ASSISTANT termina qui perché verrà interpretato da
+    //      DMHAOrchestrator;
+    //   4. prova il decoder testuale;
+    //   5. prova il decoder numerico;
+    //   6. se nessun decoder riconosce il messaggio, notifica RAW
+    //      all'applicazione.
+    //
+    // Ogni messaggio produce una sola notifica applicativa normalizzata.
+    // ========================================================================
 
     void onMessage(
         const char* topic,
         const uint8_t* payload,
-        size_t len
-    )
+        size_t len)
     {
-        if (!backendImpl)
+        if (!topic ||
+            !payload)
+        {
             return;
+        }
 
-        const FrontendConfig::MQTT::Device* device = nullptr;
-        const FrontendConfig::MQTT::Mapping* mapping = nullptr;
-
-        long value = 0;
+        // ========================================================
+        // PAYLOAD COPY
+        // ========================================================
 
         char payloadBuffer[256];
 
-        if (len >= sizeof(payloadBuffer))
-            len = sizeof(payloadBuffer) - 1;
+        if (len >=
+            sizeof(payloadBuffer))
+        {
+            LOG_WF(
+                "MQTT",
+                "RX payload troppo grande: "
+                "client=%u topic=%s bytes=%u max=%u",
+                static_cast<unsigned>(
+                    clientIndex
+                ),
+                topic,
+                static_cast<unsigned>(
+                    len
+                ),
+                static_cast<unsigned>(
+                    sizeof(payloadBuffer) - 1
+                )
+            );
+
+            return;
+        }
 
         memcpy(
             payloadBuffer,
@@ -1593,37 +2563,219 @@ private:
             len
         );
 
-        payloadBuffer[len] = '\0';
-        
-        if (!backendImpl->decodeMessage(
-                this,
+        payloadBuffer[len] =
+            '\0';
+
+        const size_t payloadLength =
+            len;
+
+        LOG_DF(
+            "MQTT",
+            "RX client=%u topic=%s payload=%s len=%u",
+            static_cast<unsigned>(
+                clientIndex
+            ),
+            topic,
+            payloadBuffer,
+            static_cast<unsigned>(
+                payloadLength
+            )
+        );
+
+        // ========================================================
+        // BACKEND
+        // ========================================================
+
+        const FrontendConfig::MQTT::Client::Backend backend =
+            clientCfg
+                ? clientCfg->backend
+                : FrontendConfig::MQTT::Client::
+                    Backend::GENERIC;
+
+        // ========================================================
+        // INFRASTRUCTURE RAW DISPATCH
+        //
+        // Utilizzato da DMHAOrchestrator.
+        // ========================================================
+
+        if (rawMessageCallback)
+        {
+            rawMessageCallback(
+                clientIndex,
+                backend,
                 topic,
                 payloadBuffer,
-                len,
-                device,
-                mapping,
-                value))
+                payloadLength
+            );
+        }
+
+        // ========================================================
+        // HOME ASSISTANT
+        //
+        // Il messaggio verrà notificato all'applicazione solamente
+        // dopo essere stato interpretato da DMHAOrchestrator.
+        // ========================================================
+
+        if (backend ==
+            FrontendConfig::MQTT::Client::
+                Backend::HOME_ASSISTANT)
         {
-            LOG_WF(
-                "MQTT",
-                "RX decode FALLITO topic=%s",
-                topic
+            return;
+        }
+
+        // ========================================================
+        // BACKEND VALIDATION
+        // ========================================================
+
+        if (!backendImpl)
+        {
+            notifyRawApplication(
+                backend,
+                topic,
+                payloadBuffer,
+                payloadLength
             );
 
             return;
         }
 
-        if (!device || !mapping)
-            return;
+        // ========================================================
+        // TEXT / JSON DECODER
+        // ========================================================
 
-        if (!commandCallback)
-            return;
+        const FrontendConfig::MQTT::Device* textDevice =
+            nullptr;
 
-        commandCallback(
-            clientIndex,
-            device,
-            mapping,
-            value
+        const FrontendConfig::MQTT::Mapping* textMapping =
+            nullptr;
+
+        char textValue[192];
+
+        size_t textLength =
+            0;
+
+        const bool textDecoded =
+            backendImpl->decodeTextMessage(
+                this,
+                topic,
+                payloadBuffer,
+                payloadLength,
+                textDevice,
+                textMapping,
+                textValue,
+                sizeof(textValue),
+                textLength
+            );
+
+        if (textDecoded)
+        {
+            if (!textDevice ||
+                !textMapping)
+            {
+                LOG_WF(
+                    "MQTT",
+                    "Text decode senza device/mapping: "
+                    "client=%u topic=%s",
+                    static_cast<unsigned>(
+                        clientIndex
+                    ),
+                    topic
+                );
+
+                return;
+            }
+
+            notifyTextMapping(
+                backend,
+                topic,
+                payloadBuffer,
+                payloadLength,
+                textDevice,
+                textMapping,
+                textValue,
+                textLength
+            );
+
+            return;
+        }
+
+        // ========================================================
+        // NUMERIC DECODER
+        // ========================================================
+
+        const FrontendConfig::MQTT::Device* device =
+            nullptr;
+
+        const FrontendConfig::MQTT::Mapping* mapping =
+            nullptr;
+
+        long value =
+            0;
+
+        const bool numericDecoded =
+            backendImpl->decodeMessage(
+                this,
+                topic,
+                payloadBuffer,
+                payloadLength,
+                device,
+                mapping,
+                value
+            );
+
+        if (numericDecoded)
+        {
+            if (!device ||
+                !mapping)
+            {
+                LOG_WF(
+                    "MQTT",
+                    "Numeric decode senza device/mapping: "
+                    "client=%u topic=%s",
+                    static_cast<unsigned>(
+                        clientIndex
+                    ),
+                    topic
+                );
+
+                return;
+            }
+
+            notifyNumericMapping(
+                backend,
+                topic,
+                payloadBuffer,
+                payloadLength,
+                device,
+                mapping,
+                value
+            );
+
+            return;
+        }
+
+        // ========================================================
+        // UNRESOLVED RAW MESSAGE
+        // ========================================================
+
+        notifyRawApplication(
+            backend,
+            topic,
+            payloadBuffer,
+            payloadLength
+        );
+
+        LOG_DF(
+            "MQTT",
+            "RX non risolto: "
+            "client=%u backend=%u topic=%s",
+            static_cast<unsigned>(
+                clientIndex
+            ),
+            static_cast<unsigned>(
+                backend
+            ),
+            topic
         );
     }
 };

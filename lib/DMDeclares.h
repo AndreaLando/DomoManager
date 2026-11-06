@@ -20,6 +20,7 @@
 
 #include "DMAEE.hpp"
 #include "DMWebAPI.hpp"
+#include "DMAccessControl.hpp"
 
 #include "DMHVAC.h"
 #include "DMWeather.hpp"
@@ -141,6 +142,8 @@ struct DomoManagerConfig {
             std::vector<int> areas;
             int retry;
             Priority priority;
+            const char* suggestedArea = nullptr;
+            const char* installPlace = nullptr;
         };
 
         std::vector<Device> list;
@@ -234,6 +237,113 @@ struct NetworkProtocolConfig {
     bool pacingEnabled = true;
 
     unsigned long slotDuration = 0;
+};
+
+// ============================================================================
+// CONFIGURAZIONE MISURA CONSUMO CARICO
+// ============================================================================
+
+/**
+ * @brief Configurazione opzionale della misura associata a un carico.
+ *
+ * La sorgente viene letta attraverso GenericSensor.
+ * Il valore viene successivamente normalizzato in watt.
+ */
+struct LoadPowerSensorConfig
+{
+    /**
+     * @brief Tipo fisico della misura fornita dal GenericSensor.
+     */
+    enum class MeasureType
+    {
+        /**
+         * Nessuna misura configurata.
+         *
+         * Il sistema utilizza la potenza nominale quando necessario.
+         */
+        NONE,
+
+        /**
+         * Il valore acquisito rappresenta direttamente una potenza.
+         */
+        WATT,
+
+        /**
+         * Il valore acquisito rappresenta una corrente.
+         *
+         * La potenza viene calcolata come:
+         *
+         * watt = ampere * voltage * powerFactor
+         */
+        AMPERE,
+
+        /**
+         * Il valore acquisito rappresenta solamente lo stato ON/OFF.
+         *
+         * Se il valore supera onThreshold, la potenza viene stimata
+         * utilizzando la potenza nominale del carico.
+         */
+        ON_OFF
+    };
+
+    /**
+     * @brief Tipo fisico della misura.
+     *
+     * NONE disabilita la lettura.
+     */
+    MeasureType type =
+        MeasureType::NONE;
+
+    /**
+     * @brief Configurazione del GenericSensor.
+     */
+    GenericSensor::Config sensor{};
+
+    /**
+     * @brief Fattore applicato al valore restituito da GenericSensor.
+     *
+     * Esempi:
+     *
+     * 1.0f   valore intero;
+     * 0.1f   valore espresso in decimi;
+     * 0.01f  valore espresso in centesimi;
+     * 0.001f valore espresso in millesimi.
+     */
+    float scale = 1.0f;
+
+    /**
+     * @brief Tensione usata per convertire ampere in watt.
+     *
+     * Utilizzata solamente con MeasureType::AMPERE.
+     */
+    float voltage = 230.0f;
+
+    /**
+     * @brief Fattore di potenza.
+     *
+     * Utilizzato solamente con MeasureType::AMPERE.
+     * Il valore valido è compreso tra 0.0 e 1.0.
+     */
+    float powerFactor = 1.0f;
+
+    /**
+     * @brief Soglia oltre la quale il carico viene considerato acceso.
+     *
+     * Significato:
+     * - WATT: soglia espressa in watt;
+     * - AMPERE: soglia espressa in ampere;
+     * - ON_OFF: soglia sul valore logico acquisito.
+     */
+    float onThreshold = 0.5f;
+
+    /**
+     * @brief Indica se è configurata una misura.
+     */
+    bool enabled() const
+    {
+        return
+            type != MeasureType::NONE;
+    }
 };
 
 struct FrontendConfig {
@@ -333,11 +443,13 @@ struct FrontendConfig {
 
             enum class DataType
             {
+                BOOL,
                 INT,
                 FLOAT,
-                BOOL,
+                ENUM,
+
                 STRING,
-                ENUM
+                JSON
             };
 
             DataType type = DataType::INT;
@@ -411,34 +523,112 @@ struct FrontendConfig {
     } weather;
 
 
-    struct Power {
+    // ============================================================================
+    // POWER MANAGEMENT
+    // ============================================================================
+
+    struct Power
+    {
+        /**
+        * @brief Abilita il sottosistema PowerManager.
+        */
         bool enabled = false;
-        uint32_t intervalMs = 15000;
 
-        float limitSoft;
-        float limitHard;
-        bool autoTune;
-        uint32_t tuneIntervalMs;
+        /**
+        * @brief Abilita il report diagnostico a ogni evento Power.
+        */
+        bool reporting = false;
 
-        struct Load {
-            const char* name;
-            int priority;
-            float watt;
-            int minOn;
-            int minOff;
+        /**
+        * @brief Intervallo di esecuzione del PowerManager.
+        */
+        uint32_t intervalMs = 15000UL;
+
+        /**
+        * @brief Limite operativo di prelievo.
+        */
+        float limitSoft = 3000.0f;
+
+        /**
+        * @brief Limite assoluto di protezione.
+        */
+        float limitHard = 3500.0f;
+
+        /**
+        * @brief Abilita l'autotuning.
+        */
+        bool autoTune = false;
+
+        /**
+        * @brief Intervallo di esecuzione dell'autotuning.
+        */
+        uint32_t tuneIntervalMs =
+            2UL * 60UL * 1000UL;
+
+        /**
+        * @brief Area buffer destinata alla word di stato distacco carichi.
+        *
+        * Layout per ciascun carico:
+        *
+        * bit index * 2     = richiesta di distacco pendente;
+        * bit index * 2 + 1 = distacco confermato e attivo.
+        *
+        * Un valore negativo disabilita la pubblicazione.
+        */
+        int loadShedStatusArea = -1;
+
+        // ========================================================================
+        // CARICO ELETTRICO
+        // ========================================================================
+
+        struct Load
+        {
+            /**
+            * @brief Nome univoco del carico.
+            */
+            const char* name = nullptr;
+
+            /**
+            * @brief Priorità del carico.
+            *
+            * Un valore maggiore indica una priorità maggiore.
+            */
+            int priority = 0;
+
+            /**
+            * @brief Potenza nominale del carico.
+            *
+            * Viene utilizzata:
+            * - per prevedere l'assorbimento prima dell'accensione;
+            * - come fallback quando la misura non è disponibile;
+            * - come fallback quando la misura è solamente ON/OFF.
+            */
+            float watt = 0.0f;
+
+            /**
+            * @brief Tempo minimo ON espresso in secondi.
+            */
+            unsigned long minOn = 5UL;
+
+            /**
+            * @brief Tempo minimo OFF espresso in secondi.
+            */
+            unsigned long minOff = 5UL;
+
+            /**
+            * @brief Configurazione opzionale della misura reale.
+            */
+            LoadPowerSensorConfig measurement{};
         };
-        Load loads[8];
-        size_t loadCount;
 
-        struct Thermal {
-            const char* name;
-            bool enabled;
-            float setpoint;
-            float min;
-            float max;
-            int minOn;
-            int minOff;
-        } thermal;
+        /**
+        * @brief Numero massimo di carichi configurabili.
+        */
+        static constexpr size_t MAX_LOADS = 8U;
+
+        Load loads[MAX_LOADS]{};
+
+        size_t loadCount = 0U;
     } power;
 
     struct PowerSupervisor {
@@ -514,20 +704,188 @@ struct FrontendConfig {
         size_t count = 0;
     } watch;
 
-    struct webApiDeviceMessaging {
-        bool enabled = false;
-        uint32_t intervalMs = 2000;   // default 2s
+    // ============================================================
+    // WEB API CONFIGURATION
+    // ============================================================
 
-        const DeviceMessageGroup* groups = nullptr;
-        size_t groupCount = 0;
+    struct webApiDeviceMessaging
+    {
+        // ========================================================
+        // HTTP CLIENT / POLLING
+        // ========================================================
 
-        const char* baseUrl = nullptr;
-        uint32_t timeoutMs = 3000;
+        struct Client
+        {
+            bool enabled =
+                false;
+
+            const WebApiDevice* devices =
+                nullptr;
+
+            size_t deviceCount =
+                0;
+
+            uint32_t timeoutMs =
+                3000;
+        };
+
+
+        // ========================================================
+        // HTTP SERVER / WEBHOOK
+        // ========================================================
+
+        struct Server
+        {
+            bool enabled =
+                false;
+
+            uint16_t port =
+                8080;
+
+            uint32_t timeoutMs =
+                3000;
+        };
+
+
+        // ========================================================
+        // INSTANCES
+        // ========================================================
+
+        Client client;
+
+        Server server;
+
+
+        // ========================================================
+        // STATUS
+        // ========================================================
+
+        bool enabled() const
+        {
+            return
+                client.enabled ||
+                server.enabled;
+        }
     } webApi;
 
+    // ============================================================
+    // ACCESS CONTROL CONFIGURATION
+    // ============================================================
+
+    struct Access
+    {
+        bool enabled =
+            false;
+
+        const AccessReader* readers =
+            nullptr;
+
+        size_t readerCount =
+            0;
+
+        const char* commonCardCode =
+            nullptr;
+
+        int defaultRelayIndex =
+            1;
+
+        int defaultRelayTime =
+            10;
+    } access;
+
+    // ============================================================
+    // SOLAR INVERTER
+    // ============================================================
+    struct Solar
+    {
+        bool enabled = false;
+        bool reportOnChange = false;
+        enum class TransportType
+        {
+            SERIAL_PORT,
+            TCP_CLIENT,
+            UDP_CLIENT
+        };
+
+        TransportType transport =
+            TransportType::SERIAL_PORT;
+
+        bool autoDiscovery = true;
+
+        bool diagnosticsEnabled = true;
+
+        bool publishEvents = true;
+
+        uint32_t queryTimeoutMs = 3000;
+
+        uint32_t reconnectMs = 5000;
+
+        uint32_t discoveryTimeoutMs = 1000;
+
+        uint32_t intervalMs = 1000;     
+
+        struct TCP
+        {
+            IPAddress host;
+
+            uint16_t port = 8899;
+
+            uint32_t timeoutMs = 3000;
+
+        } tcp;
+
+        struct Serial
+        {
+            HardwareSerial* port = nullptr;
+
+            uint32_t baudrate = 2400;
+
+        } serial;
+
+        struct Areas
+        {
+            int pvVoltage = -1;
+            int pvCurrent = -1;
+            int pvPower = -1;
+
+            int batteryVoltage = -1;
+            int batterySoc = -1;
+
+            int gridVoltage = -1;
+            int gridPower = -1;
+
+            int outputPower = -1;
+            int loadPercent = -1;
+
+            int inverterTemperature = -1;
+            
+            int status = -1;
+            int frontendStatus = -1;
+        } areas;
+
+    };
+
+    static constexpr uint8_t
+        MAX_SOLAR_INVERTERS =
+            4;
+
+    struct SolarInverters
+    {
+        uint8_t
+            count =
+                0;
+
+        Solar
+            inverter[MAX_SOLAR_INVERTERS];
+
+    } solarInverters;
+
+    // ============================================================
+    // J CONFIGURATION
+    // ============================================================
     struct Jobs {
         bool enabled = false;
-        uint32_t intervalMs = 1000;
+        uint32_t intervalMs = 5000;
     } jobs;
 
 };

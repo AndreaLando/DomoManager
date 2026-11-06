@@ -670,7 +670,7 @@ private:
     {
     private:
 
-        static constexpr unsigned long INACTIVITY = 600;
+        static constexpr unsigned long INACTIVITY = 1200;
         static constexpr unsigned long IP_SWITCH_GUARD_MS = 0;
 
         // ============================================================
@@ -889,8 +889,7 @@ private:
         // ============================================================
 
         inline ReconnectReason getReconnectReason(
-            const IPAddress& ip,
-            unsigned long now) const
+            const IPAddress& ip) const
         {
             // La connessione TCP non esiste più.
             if (!modbusClient.connected())
@@ -901,7 +900,7 @@ private:
                 return ReconnectReason::IP_CHANGED;
 
             // Timeout di inattività.
-            if (now - connection.lastActivity > INACTIVITY)
+            if (millis() - connection.lastActivity > INACTIVITY)
                 return ReconnectReason::INACTIVITY;
 
             return ReconnectReason::NONE;
@@ -975,10 +974,7 @@ private:
             // --------------------------------------------------------
 
             const ReconnectReason reason =
-                getReconnectReason(
-                    ip,
-                    now
-                );
+                getReconnectReason(ip);
 
             // ========================================================
             // CONNESSIONE VALIDA
@@ -1735,7 +1731,7 @@ public:
             }
 
 
-            conn.touch(now);
+            conn.touch(millis());
 
             // ----------------------------------------------------
             // FIX:
@@ -1885,7 +1881,7 @@ public:
             );
 
 
-            conn.touch(now);
+            conn.touch(millis());
             step = ClientStep::READ;
 
 
@@ -2562,7 +2558,7 @@ private:
     // ============================================================
     // DEVICE MANAGEMENT READ
     // ============================================================
-
+/*
     bool DeviceManagement_Read(
         LedController* ledsController,
         ModbusTCPClient& modbusTCPCli,
@@ -2960,6 +2956,809 @@ private:
                 false,
                 -1,
                 items
+            );
+        }
+
+
+        return !error;
+    } */
+
+    bool DeviceManagement_Read(
+        LedController* ledsController,
+        ModbusTCPClient& modbusTCPCli,
+        IpManager& ipManager,
+        short ipIndex,
+        Buffer& buffer,
+        std::vector<GenericPrgDevice>& prgDevices,
+        AnalogThresholdManager& thresholds,
+        unsigned long now,
+        std::vector<uint16_t>& mbRead,
+        unsigned long slotStart)
+    {
+        bool error = false;
+
+        static DeviceReadPlanner planner;
+
+        planner.buildCacheIfNeeded(
+            prgDevices
+        );
+
+
+        // --------------------------------------------------------
+        // PRIORITY
+        // --------------------------------------------------------
+
+        auto& priorityExecution =
+            ipManager.GetCurrentPriority(
+                ipIndex,
+                prgDevices,
+                planner.getDeviceManager()
+            );
+
+        PriorityMgmt& actualPriority =
+            priorityExecution.Base;
+
+
+        // --------------------------------------------------------
+        // DEVICES FOR CURRENT IP
+        // --------------------------------------------------------
+
+        const std::vector<int>& devices =
+            planner.getDevicesForIp(
+                actualPriority,
+                ipManager,
+                ipIndex
+            );
+
+        const int itemCount =
+            static_cast<int>(
+                devices.size()
+            );
+
+
+        if (itemCount <= 0)
+        {
+            LOG_EF(
+                "ModbusManager",
+                "Nothing to read"
+                " | Priority=%d"
+                " | IP=%u.%u.%u.%u",
+                static_cast<int>(
+                    actualPriority.priority
+                ),
+                static_cast<unsigned>(
+                    ipManager.GetIp(ipIndex).IP[0]
+                ),
+                static_cast<unsigned>(
+                    ipManager.GetIp(ipIndex).IP[1]
+                ),
+                static_cast<unsigned>(
+                    ipManager.GetIp(ipIndex).IP[2]
+                ),
+                static_cast<unsigned>(
+                    ipManager.GetIp(ipIndex).IP[3]
+                )
+            );
+
+            return true;
+        }
+
+
+        // --------------------------------------------------------
+        // READ LED
+        // --------------------------------------------------------
+
+        if (ledsController &&
+            ledsController->hasChannel(
+                LedController::ONE
+            ))
+        {
+            static bool ledState =
+                false;
+
+            ledState =
+                !ledState;
+
+            ledsController->set(
+                LedController::ONE,
+                ledState
+            );
+        }
+
+
+        // --------------------------------------------------------
+        // DEVICE RANGE
+        // --------------------------------------------------------
+
+        const auto range =
+            planner.computeRange(
+                priorityExecution,
+                itemCount,
+                ipIndex,
+                ipManager
+            );
+
+
+        // --------------------------------------------------------
+        // RESUME PACING
+        // --------------------------------------------------------
+
+        int startIndex =
+            range.start;
+
+        if (priorityExecution.Interrupted)
+        {
+            startIndex =
+                priorityExecution.Base.deviceIndex;
+
+            if (startIndex < range.start)
+                startIndex = range.start;
+
+            if (startIndex >= range.end)
+                startIndex = range.end - 1;
+        }
+
+
+        // --------------------------------------------------------
+        // DEVICE LOOP
+        // --------------------------------------------------------
+
+        for (int deviceIndex = startIndex;
+            deviceIndex < range.end;
+            ++deviceIndex)
+        {
+            const int runtimeDeviceIndex =
+                devices[deviceIndex];
+
+
+            if (runtimeDeviceIndex < 0 ||
+                runtimeDeviceIndex >=
+                    static_cast<int>(
+                        prgDevices.size()
+                    ))
+            {
+                LOG_EF(
+                    "ModbusManager",
+                    "Invalid runtime device index"
+                    " | DeviceIndex=%d"
+                    " | RuntimeIndex=%d"
+                    " | DeviceCount=%u",
+                    deviceIndex,
+                    runtimeDeviceIndex,
+                    static_cast<unsigned>(
+                        prgDevices.size()
+                    )
+                );
+
+                error =
+                    true;
+
+                break;
+            }
+
+
+            GenericPrgDevice& device =
+                prgDevices[
+                    static_cast<size_t>(
+                        runtimeDeviceIndex
+                    )
+                ];
+
+
+            // ----------------------------------------------------
+            // DEVICE ALREADY IN ERROR
+            // ----------------------------------------------------
+
+            if (device.GetError().IsInError())
+            {
+                LOG_DF(
+                    "MDB::READ",
+                    "Device skipped because it is in error"
+                    " | DeviceIndex=%d"
+                    " | RuntimeIndex=%d"
+                    " | Name=%s"
+                    " | Zone=%s"
+                    " | Installation=%s"
+                    " | IP=%u.%u.%u.%u"
+                    " | Address=%u",
+                    deviceIndex,
+                    runtimeDeviceIndex,
+                    device.GetName(),
+                    device.GetZone(),
+                    device.GetInstallationLocation(),
+                    static_cast<unsigned>(
+                        device.GetIp()[0]
+                    ),
+                    static_cast<unsigned>(
+                        device.GetIp()[1]
+                    ),
+                    static_cast<unsigned>(
+                        device.GetIp()[2]
+                    ),
+                    static_cast<unsigned>(
+                        device.GetIp()[3]
+                    ),
+                    static_cast<unsigned>(
+                        device.GetDeviceAddress()
+                    )
+                );
+
+
+                device.GetError().Loop(
+                    true,
+                    now
+                );
+
+
+                if (priorityExecution.Interrupted)
+                {
+                    priorityExecution.Cursor.save(
+                        deviceIndex
+                    );
+                }
+
+
+                continue;
+            }
+
+
+            // ----------------------------------------------------
+            // PACING
+            // ----------------------------------------------------
+
+            if (InternalPacingCheck(
+                    ipManager,
+                    ipIndex,
+                    slotStart,
+                    deviceIndex,
+                    itemCount,
+                    now))
+            {
+                LOG_DF(
+                    "MDB::READ",
+                    "Read cycle interrupted by pacing"
+                    " | DeviceIndex=%d"
+                    " | Name=%s"
+                    " | Zone=%s"
+                    " | Installation=%s"
+                    " | IP=%u.%u.%u.%u"
+                    " | Address=%u",
+                    deviceIndex,
+                    device.GetName(),
+                    device.GetZone(),
+                    device.GetInstallationLocation(),
+                    static_cast<unsigned>(
+                        device.GetIp()[0]
+                    ),
+                    static_cast<unsigned>(
+                        device.GetIp()[1]
+                    ),
+                    static_cast<unsigned>(
+                        device.GetIp()[2]
+                    ),
+                    static_cast<unsigned>(
+                        device.GetIp()[3]
+                    ),
+                    static_cast<unsigned>(
+                        device.GetDeviceAddress()
+                    )
+                );
+
+
+                return true;
+            }
+
+
+    #ifdef DEBUG_VIEW
+
+            LOG_IF(
+                "MDB::READ",
+                "Reading device"
+                " | DeviceIndex=%d"
+                " | RuntimeIndex=%d"
+                " | Name=%s"
+                " | Zone=%s"
+                " | Installation=%s"
+                " | IP=%u.%u.%u.%u"
+                " | Address=%u"
+                " | Priority=%d",
+                deviceIndex,
+                runtimeDeviceIndex,
+                device.GetName(),
+                device.GetZone(),
+                device.GetInstallationLocation(),
+                static_cast<unsigned>(
+                    device.GetIp()[0]
+                ),
+                static_cast<unsigned>(
+                    device.GetIp()[1]
+                ),
+                static_cast<unsigned>(
+                    device.GetIp()[2]
+                ),
+                static_cast<unsigned>(
+                    device.GetIp()[3]
+                ),
+                static_cast<unsigned>(
+                    device.GetDeviceAddress()
+                ),
+                static_cast<int>(
+                    device.GetPriority()
+                )
+            );
+
+            delay(500);
+
+    #endif
+
+
+            // ----------------------------------------------------
+            // CHANNEL LOOP
+            // ----------------------------------------------------
+
+            const int channelCount =
+                static_cast<int>(
+                    device.GetChannelsSize()
+                );
+
+
+            for (int channel = 0;
+                channel < channelCount;
+                ++channel)
+            {
+                const auto& channelInfo =
+                    device.GetChannelInfo(
+                        channel
+                    );
+
+
+                if (channelInfo.type !=
+                        GenericPrgDevice::DI &&
+                    channelInfo.type !=
+                        GenericPrgDevice::AI)
+                {
+                    continue;
+                }
+
+
+                // ------------------------------------------------
+                // MODBUS READ
+                // ------------------------------------------------
+
+                const auto readResult =
+                    device.Read(
+                        modbusTCPCli,
+                        channel,
+                        mbRead.data(),
+                        now
+                    );
+
+
+                if (!readResult.ok)
+                {
+                    LOG_DF(
+                        "MDB::READ",
+                        "Device read failed"
+                        " | DeviceIndex=%d"
+                        " | RuntimeIndex=%d"
+                        " | Name=%s"
+                        " | Zone=%s"
+                        " | Installation=%s"
+                        " | IP=%u.%u.%u.%u"
+                        " | Address=%u"
+                        " | Channel=%d"
+                        " | ChannelType=%d"
+                        " | HardwareType=%d",
+                        deviceIndex,
+                        runtimeDeviceIndex,
+                        device.GetName(),
+                        device.GetZone(),
+                        device.GetInstallationLocation(),
+                        static_cast<unsigned>(
+                            device.GetIp()[0]
+                        ),
+                        static_cast<unsigned>(
+                            device.GetIp()[1]
+                        ),
+                        static_cast<unsigned>(
+                            device.GetIp()[2]
+                        ),
+                        static_cast<unsigned>(
+                            device.GetIp()[3]
+                        ),
+                        static_cast<unsigned>(
+                            device.GetDeviceAddress()
+                        ),
+                        channel,
+                        static_cast<int>(
+                            channelInfo.type
+                        ),
+                        static_cast<int>(
+                            channelInfo.hwType
+                        )
+                    );
+
+
+                    error =
+                        true;
+
+                    break;
+                }
+
+
+    #ifdef DEBUG_VIEW
+
+                LOG_IF(
+                    "MDB::READ",
+                    "Channel read completed"
+                    " | Name=%s"
+                    " | Zone=%s"
+                    " | Installation=%s"
+                    " | Channel=%d"
+                    " | StartIndex=%d"
+                    " | Items=%d"
+                    " | ItemsPerCall=%d",
+                    device.GetName(),
+                    device.GetZone(),
+                    device.GetInstallationLocation(),
+                    channel,
+                    readResult.startIndex,
+                    readResult.items,
+                    readResult.itemsPerCall
+                );
+
+    #endif
+
+
+                // ------------------------------------------------
+                // PROCESS READ DATA
+                // ------------------------------------------------
+
+                for (int item = 0;
+                    item < readResult.items;
+                    ++item)
+                {
+                    const int itemIndex =
+                        readResult.startIndex +
+                        item;
+
+
+                    const int area =
+                        device.GetArea(
+                            channel,
+                            itemIndex
+                        );
+
+
+                    if (area < 0 ||
+                        area >=
+                            static_cast<int>(
+                                buffer.size()
+                            ))
+                    {
+                        LOG_EF(
+                            "MDB::READ",
+                            "Invalid area returned by device"
+                            " | Name=%s"
+                            " | Zone=%s"
+                            " | Installation=%s"
+                            " | Channel=%d"
+                            " | ItemIndex=%d"
+                            " | Area=%d",
+                            device.GetName(),
+                            device.GetZone(),
+                            device.GetInstallationLocation(),
+                            channel,
+                            itemIndex,
+                            area
+                        );
+
+
+                        error =
+                            true;
+
+                        break;
+                    }
+
+
+                    const BufferSourceInfo& bufferEntry =
+                        buffer.getFieldEntry(
+                            area
+                        );
+
+
+                    // --------------------------------------------
+                    // DIGITAL / ANALOG VALUE
+                    // --------------------------------------------
+
+                    long value =
+                        0;
+
+
+                    if (readResult.itemsPerCall == 1)
+                    {
+                        value =
+                            mbRead[item];
+                    }
+                    else
+                    {
+                        const int registerIndex =
+                            item *
+                            readResult.itemsPerCall;
+
+
+                        if (registerIndex + 1 >=
+                            static_cast<int>(
+                                mbRead.size()
+                            ))
+                        {
+                            LOG_EF(
+                                "MDB::READ",
+                                "Read buffer index out of range"
+                                " | Name=%s"
+                                " | Zone=%s"
+                                " | Installation=%s"
+                                " | Channel=%d"
+                                " | Item=%d"
+                                " | RegisterIndex=%d"
+                                " | BufferSize=%u",
+                                device.GetName(),
+                                device.GetZone(),
+                                device.GetInstallationLocation(),
+                                channel,
+                                item,
+                                registerIndex,
+                                static_cast<unsigned>(
+                                    mbRead.size()
+                                )
+                            );
+
+
+                            error =
+                                true;
+
+                            break;
+                        }
+
+
+                        const uint32_t raw =
+                            (
+                                static_cast<uint32_t>(
+                                    mbRead[registerIndex]
+                                ) << 16
+                            ) |
+                            mbRead[
+                                registerIndex + 1
+                            ];
+
+
+                        float floatValue =
+                            0.0f;
+
+
+                        memcpy(
+                            &floatValue,
+                            &raw,
+                            sizeof(float)
+                        );
+
+
+                        value =
+                            floatValue < 0
+                                ? 0
+                                : static_cast<unsigned long>(
+                                    floatValue * 100
+                                );
+                    }
+
+
+                    bool process =
+                        false;
+
+
+                    // --------------------------------------------
+                    // ANALOG INPUT
+                    // --------------------------------------------
+
+                    if (channelInfo.type ==
+                        GenericPrgDevice::AI)
+                    {
+                        const int threshold =
+                            thresholds.getThreshold(
+                                area,
+                                value
+                            );
+
+
+                        process =
+                            abs(
+                                value -
+                                bufferEntry.value
+                            ) > threshold;
+
+
+                        process =
+                            process ||
+                            (
+                                bufferEntry.value == 0 &&
+                                value != 0
+                            );
+                    }
+
+                    // --------------------------------------------
+                    // DIGITAL INPUT
+                    // --------------------------------------------
+
+                    else
+                    {
+                        if (buffer.IsReverse(area))
+                            value = !value;
+
+
+                        process =
+                            value !=
+                            bufferEntry.value;
+                    }
+
+
+                    if (!process)
+                        continue;
+
+
+                    // --------------------------------------------
+                    // REAL VALUE CHANGE LOG
+                    // --------------------------------------------
+
+                    if (value > 0 &&
+                        area >= 10)
+                    {
+                        LOG_IF(
+                            "ModbusManager",
+                            "%s"
+                            " | %s"
+                            ", %s"
+                            " | IP=%u.%u.%u.%u"
+                            " | Addr.=%u"
+                            " | Ch.=%d"
+                            " | Item=%d"
+                            " | Value=%ld"
+                            " | Buf.=%ld"
+                            " | Prev. Buf.=%ld"
+                            " | Area=%d"
+                            " | A.Name=%s",
+                            device.GetName(),
+                            device.GetZone(),
+                            device.GetInstallationLocation(),
+                            static_cast<unsigned>(
+                                device.GetIp()[0]
+                            ),
+                            static_cast<unsigned>(
+                                device.GetIp()[1]
+                            ),
+                            static_cast<unsigned>(
+                                device.GetIp()[2]
+                            ),
+                            static_cast<unsigned>(
+                                device.GetIp()[3]
+                            ),
+                            static_cast<unsigned>(
+                                device.GetDeviceAddress()
+                            ),
+                            channel,
+                            itemIndex,
+                            value,
+                            bufferEntry.value,
+                            bufferEntry.prevValue,
+                            area,
+                            buffer.GetName(area)
+                        );
+                    }
+
+
+                    // --------------------------------------------
+                    // CONSUMER POLICY
+                    // --------------------------------------------
+
+                    const bool skipForward =
+                        readAreaPolicy &&
+                        readAreaPolicy(
+                            area,
+                            value,
+                            buffer
+                        );
+
+
+                    // --------------------------------------------
+                    // BUFFER + EVENT
+                    // --------------------------------------------
+
+                    DeviceManagement_Read_SetOut(
+                        buffer,
+                        area,
+                        value,
+                        now,
+                        skipForward
+                    );
+
+
+                    // --------------------------------------------
+                    // CONSUMED SOURCE AREA
+                    // --------------------------------------------
+
+                    if (skipForward)
+                    {
+                        buffer.ResetElement(
+                            area
+                        );
+                    }
+                }
+
+
+                if (error)
+                    break;
+
+
+                // ------------------------------------------------
+                // IMMEDIATE LOCAL WRITE
+                // ------------------------------------------------
+
+                if (hasWriteForIp(
+                        ipIndex))
+                {
+                    LOG_DF(
+                        "ModbusManager",
+                        "Local write detected during read cycle"
+                        " | Device=%s"
+                        " | Zone=%s"
+                        " | Installation=%s"
+                        " | IP=%u.%u.%u.%u"
+                        " | Address=%u"
+                        " | IpIndex=%d",
+                        device.GetName(),
+                        device.GetZone(),
+                        device.GetInstallationLocation(),
+                        static_cast<unsigned>(
+                            device.GetIp()[0]
+                        ),
+                        static_cast<unsigned>(
+                            device.GetIp()[1]
+                        ),
+                        static_cast<unsigned>(
+                            device.GetIp()[2]
+                        ),
+                        static_cast<unsigned>(
+                            device.GetIp()[3]
+                        ),
+                        static_cast<unsigned>(
+                            device.GetDeviceAddress()
+                        ),
+                        static_cast<int>(
+                            ipIndex
+                        )
+                    );
+
+
+                    return true;
+                }
+            }
+
+
+            if (error)
+                break;
+        }
+
+
+        // --------------------------------------------------------
+        // READ CYCLE COMPLETED
+        // --------------------------------------------------------
+
+        if (!priorityExecution.Interrupted)
+        {
+            ipManager.UpdatePriorityAfterRead(
+                ipIndex,
+                false,
+                -1,
+                itemCount
             );
         }
 

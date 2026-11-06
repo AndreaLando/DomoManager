@@ -24,6 +24,7 @@
 #include "DMBaseClassCore.hpp"
 #include "DMEthernet.hpp"
 #include "DMPlatformModbus.hpp"
+#include "DMPlatform.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -57,72 +58,200 @@ public:
 };
 
 
-class GenericPrgDevice {
-  public:  
-    enum GenericPrgDeviceEnum {
-      NOTSET=-1,
-      AI=0,
-      AO=1,
-      DI=2,
-      DO=3
+class GenericPrgDevice
+{
+public:
+    enum GenericPrgDeviceEnum
+    {
+        NOTSET = -1,
+        AI = 0,
+        AO = 1,
+        DI = 2,
+        DO = 3
     };
 
-    enum GenericPrgDeviceHwEnum {
-      Coil=0, //Coil
-      Input=1,
-      Hold=2, //Holding register
-      Discrete=3 //DiscreteInput
+
+    enum GenericPrgDeviceHwEnum
+    {
+        Coil = 0,
+        Input = 1,
+        Hold = 2,
+        Discrete = 3
     };
 
-    typedef struct {
-      GenericPrgDeviceEnum type;
-      GenericPrgDeviceHwEnum hwType;
-      int startingAddr;
-      int items;
-      int ItemsPerCall; //If I need more bytes to build 1 call
-    }GenericPrgDeviceChannel;  
 
-    typedef struct {
-      short itemsPerCall;
-      short items;
-      int startIndex;
-      bool ok;
-    }structRead; 
+    struct GenericPrgDeviceChannel
+    {
+        GenericPrgDeviceEnum type;
 
-    GenericPrgDevice(const char* name, DMIPAddress ip, unsigned int deviceAddress, std::vector<GenericPrgDeviceChannel> channels, std::vector<int> ioAreas, short ErrorCnt, Priority priority);     
+        GenericPrgDeviceHwEnum hwType;
+
+        int startingAddr;
+
+        int items;
+
+        int ItemsPerCall;
+    };
+
+
+    struct structRead
+    {
+        short itemsPerCall;
+
+        short items;
+
+        int startIndex;
+
+        bool ok;
+    };
+
+
+    GenericPrgDevice(
+        const char* name,
+        DMIPAddress ip,
+        unsigned int deviceAddress,
+        std::vector<GenericPrgDeviceChannel> channels,
+        std::vector<int> ioAreas,
+        short errorCount,
+        Priority priority,
+        const char* zone = nullptr,
+        const char* installationLocation = nullptr
+    );
+
+
     bool Run();
-    structRead Read(DMPlatform::Modbus::TCPClient &mb, int channel, uint16_t* outBuffer, unsigned long now);
-    bool Write(DMPlatform::Modbus::TCPClient &mb, int channel, int address, int value, unsigned long now);
-    int GetArea(int channel, int address);
-    bool FindChannelByArea(int area, int &channel, int &item);
-    //GenericPrgDeviceChannel GetChannelInfo(int channel);
-    const GenericPrgDeviceChannel& GetChannelInfo(int channel) const;
+
+
+    structRead Read(
+        DMPlatform::Modbus::TCPClient& mb,
+        int channel,
+        uint16_t* outBuffer,
+        unsigned long now
+    );
+
+
+    bool Write(
+        DMPlatform::Modbus::TCPClient& mb,
+        int channel,
+        int address,
+        int value,
+        unsigned long now
+    );
+
+
+    int GetArea(
+        int channel,
+        int address
+    );
+
+
+    bool FindChannelByArea(
+        int area,
+        int& channel,
+        int& item
+    );
+
+
+    const GenericPrgDeviceChannel&
+    GetChannelInfo(
+        int channel
+    ) const;
+
 
     const DMIPAddress& GetIp() const;
 
-    Priority GetPriority();
-    size_t GetChannelsSize();
-    const char* GetName();
-    unsigned int GetDeviceAddress();
-    Errors& GetError() { return Error; }
-    void SetErrorCallback(std::function<void(GenericPrgDevice*)> fn) {
-        _onErrorChanged = fn;
-        Error.SetStateChangedCallback([this]() {
-            if (_onErrorChanged) _onErrorChanged(this);
-        });
+    size_t GetChannelsSize() const;
+    Priority GetPriority() const;
+
+
+    const char* GetName() const;
+
+    const char* GetZone() const;
+
+    const char* GetInstallationLocation() const;
+
+    unsigned int GetDeviceAddress() const;
+
+
+    Errors& GetError()
+    {
+        return Error;
     }
 
-  private:  
+
+    const Errors& GetError() const
+    {
+        return Error;
+    }
+
+
+    void SetErrorCallback(
+        std::function<void(GenericPrgDevice*)> fn)
+    {
+        _onErrorChanged =
+            fn;
+
+
+        Error.SetStateChangedCallback(
+            [this]()
+            {
+                if (_onErrorChanged)
+                {
+                    _onErrorChanged(
+                        this
+                    );
+                }
+            }
+        );
+    }
+
+
+private:
     short bank;
-    std::vector<int> _ioAreas;
-    Priority _priority;
-    const char* _name;
-    unsigned int _deviceAddress;
-    DMIPAddress _ip;
-    std::vector<GenericPrgDeviceChannel> _channels;
-    Errors Error;
-    const short MAX_CALLS=8;
-    std::function<void(GenericPrgDevice*)> _onErrorChanged = nullptr;
+
+
+    std::vector<int>
+        _ioAreas;
+
+
+    Priority
+        _priority;
+
+
+    const char*
+        _name;
+
+
+    const char*
+        _zone;
+
+
+    const char*
+        _installationLocation;
+
+
+    unsigned int
+        _deviceAddress;
+
+
+    DMIPAddress
+        _ip;
+
+
+    std::vector<GenericPrgDeviceChannel>
+        _channels;
+
+
+    Errors
+        Error;
+
+
+    const short
+        MAX_CALLS = 8;
+
+
+    std::function<void(GenericPrgDevice*)>
+        _onErrorChanged = nullptr;
 };
 
 class GenericPrgDeviceManager {
@@ -171,61 +300,90 @@ public:
     // ---------------------------------------------------------
     // AUTO
     // ---------------------------------------------------------
-    void addDeviceAuto(const char* name,
-                       const IPAddress& ip,
-                       int deviceAddress,
-                       const std::vector<GenericPrgDevice::GenericPrgDeviceChannel>& channels,
-                       int retry,
-                       Priority priority)
+
+    void addDeviceAuto(
+        const char* name,
+        const IPAddress& ip,
+        int deviceAddress,
+        const std::vector<
+            GenericPrgDevice::GenericPrgDeviceChannel
+        >& channels,
+        int retry,
+        Priority priority,
+        const char* zone = nullptr,
+        const char* installationLocation = nullptr)
     {
         int count = 0;
-        for (auto& ch : channels)
-            count += ch.items;
+
+        for (const auto& channel : channels)
+            count += channel.items;
 
         std::vector<int> areas;
         areas.reserve(count);
 
-        for (int i = 0; i < count; i++)
+        for (int i = 0; i < count; ++i)
             areas.push_back(nextArea++);
 
         PrgDevices.emplace_back(
             name,
             ip,
-            deviceAddress,
+            static_cast<unsigned int>(deviceAddress),
             channels,
             areas,
-            retry,
-            priority
+            static_cast<short>(retry),
+            priority,
+            zone,
+            installationLocation
         );
     }
 
     // ---------------------------------------------------------
     // MANUAL
     // ---------------------------------------------------------
-    void addDeviceManual(const char* name,
-                     const IPAddress& ip,
-                     int deviceAddress,
-                     const std::vector<GenericPrgDevice::GenericPrgDeviceChannel>& channels,
-                     const std::vector<int>& areas,
-                     int retry,
-                     Priority priority)
+
+    void addDeviceManual(
+        const char* name,
+        const IPAddress& ip,
+        int deviceAddress,
+        const std::vector<
+            GenericPrgDevice::GenericPrgDeviceChannel
+        >& channels,
+        const std::vector<int>& areas,
+        int retry,
+        Priority priority,
+        const char* zone = nullptr,
+        const char* installationLocation = nullptr)
     {
-        // 1. Aggiungi il device
         PrgDevices.emplace_back(
             name,
             ip,
-            deviceAddress,
+            static_cast<unsigned int>(
+                deviceAddress
+            ),
             channels,
             areas,
-            retry,
-            priority
+            static_cast<short>(
+                retry
+            ),
+            priority,
+            zone,
+            installationLocation
         );
 
-        // 2. Aggiorna nextArea in base alle aree manuali
-        if (!areas.empty()) {
-            int maxArea = *std::max_element(areas.begin(), areas.end());
-            if (maxArea + 1 > nextArea)
-                nextArea = maxArea + 1;
+        if (areas.empty())
+            return;
+
+        const auto maxAreaIt =
+            std::max_element(
+                areas.begin(),
+                areas.end()
+            );
+
+        if (maxAreaIt != areas.end() &&
+            *maxAreaIt + 1 > nextArea)
+        {
+            nextArea =
+                *maxAreaIt + 1;
         }
     }
 
@@ -262,31 +420,67 @@ public:
         return maxSize;
     }
 
-    int DeviceHasErrors() {
-        static unsigned long Mask = 0;
-        short errors = 0;
+    int DeviceHasErrors()
+    {
+        static uint64_t errorMask = 0;
 
-        int index = 0;
-        for (auto& dev : PrgDevices) {
-            if (dev.GetError().IsInError()) {
-                errors++;
+        int errorCount = 0;
 
-                if (!bitRead(Mask, index)) {
-                    LOG_WF("DeviceManager",
-                           "MAX ERRORS REACHED - DEVICE EXCLUSION %s IP=%d.%d.%d.%d Addr=%d",
-                           dev.GetName(),
-                           dev.GetIp()[0], dev.GetIp()[1],
-                           dev.GetIp()[2], dev.GetIp()[3],
-                           dev.GetDeviceAddress());
-                    bitSet(Mask, index);
-                }
-            } else {
-                bitClear(Mask, index);
+        for (size_t index = 0;
+            index < PrgDevices.size();
+            ++index)
+        {
+            GenericPrgDevice& device =
+                PrgDevices[index];
+
+            const bool inError =
+                device.GetError().IsInError();
+
+            if (inError)
+            {
+                ++errorCount;
+
+                if (index >= 64)
+                    continue;
+
+                const uint64_t bit =
+                    1ULL << index;
+
+                if ((errorMask & bit) != 0)
+                    continue;
+
+                LOG_WF(
+                    "DeviceManager",
+                    "DEVICE EXCLUSION"
+                    " | Index=%u"
+                    " | %s"
+                    " | Zona=%s"
+                    " | Installazione=%s"
+                    " | IP=%u.%u.%u.%u"
+                    " | Addr=%u",
+                    static_cast<unsigned>(index),
+                    device.GetName(),
+                    device.GetZone(),
+                    device.GetInstallationLocation(),
+                    static_cast<unsigned>(device.GetIp()[0]),
+                    static_cast<unsigned>(device.GetIp()[1]),
+                    static_cast<unsigned>(device.GetIp()[2]),
+                    static_cast<unsigned>(device.GetIp()[3]),
+                    static_cast<unsigned>(
+                        device.GetDeviceAddress()
+                    )
+                );
+
+                errorMask |= bit;
             }
-            index++;
+            else if (index < 64)
+            {
+                errorMask &=
+                    ~(1ULL << index);
+            }
         }
 
-        return errors;
+        return errorCount;
     }
 
     int getMaxAreaUsed() {
@@ -308,6 +502,262 @@ public:
 
         return maxArea;
     }
+
+    // =========================================================
+    // DIAGNOSTIC
+    // =========================================================
+
+    class Diagnostic
+    {
+    public:
+        static void ReportErrors(
+            const DeviceManager& manager)
+        {
+            const auto& devices =
+                manager.getDevices();
+
+            uint64_t errorMask =
+                0;
+
+            uint64_t parkedMask =
+                0;
+
+            size_t totalErrors =
+                0;
+
+            size_t totalParked =
+                0;
+
+            size_t totalOk =
+                0;
+
+
+            Serial.println(
+                "\n===== DEVICE ERROR REPORT ====="
+            );
+
+
+            for (size_t index = 0;
+                index < devices.size();
+                ++index)
+            {
+                const GenericPrgDevice& device =
+                    devices[index];
+
+                const Errors& error =
+                    device.GetError();
+
+                const DMIPAddress& ip =
+                    device.GetIp();
+
+
+                if (error.IsVisibleParked())
+                {
+                    ++totalParked;
+
+                    if (index < 64)
+                    {
+                        parkedMask |=
+                            1ULL << index;
+                    }
+
+
+                    PrintDevice(
+                        index,
+                        "PARKED",
+                        device,
+                        ip
+                    );
+
+                    continue;
+                }
+
+
+                if (error.IsVisibleError())
+                {
+                    ++totalErrors;
+
+                    if (index < 64)
+                    {
+                        errorMask |=
+                            1ULL << index;
+                    }
+
+
+                    PrintDevice(
+                        index,
+                        "ERROR",
+                        device,
+                        ip
+                    );
+
+                    continue;
+                }
+
+
+                ++totalOk;
+            }
+
+
+            Serial.println(
+                "\n____ SUMMARY ____"
+            );
+
+            Serial.print(
+                "Total devices: "
+            );
+
+            Serial.println(
+                devices.size()
+            );
+
+
+            Serial.print(
+                "OK: "
+            );
+
+            Serial.println(
+                totalOk
+            );
+
+
+            Serial.print(
+                "Errors: "
+            );
+
+            Serial.println(
+                totalErrors
+            );
+
+
+            Serial.print(
+                "Parked: "
+            );
+
+            Serial.println(
+                totalParked
+            );
+
+
+            PrintMask(
+                "Error bitmask",
+                errorMask
+            );
+
+            PrintMask(
+                "Parked bitmask",
+                parkedMask
+            );
+
+
+            if (totalErrors == 0 &&
+                totalParked == 0)
+            {
+                Serial.println(
+                    "Nessun device in errore o parked."
+                );
+            }
+
+
+            Serial.println(
+                "===== END DEVICE ERROR REPORT =====\n"
+            );
+        }
+
+
+    private:
+        static void PrintDevice(
+            size_t index,
+            const char* state,
+            const GenericPrgDevice& device,
+            const DMIPAddress& ip)
+        {
+            DMPlatform::SerialPrintf(
+                "Device %u -> %s"
+                " | %s"
+                " | Zona=%s"
+                " | Installazione=%s"
+                " | IP=%u.%u.%u.%u"
+                " | Addr=%u"
+                "\n",
+                static_cast<unsigned>(
+                    index
+                ),
+                state
+                    ? state
+                    : "?",
+                device.GetName(),
+                device.GetZone(),
+                device.GetInstallationLocation(),
+                static_cast<unsigned>(
+                    ip[0]
+                ),
+                static_cast<unsigned>(
+                    ip[1]
+                ),
+                static_cast<unsigned>(
+                    ip[2]
+                ),
+                static_cast<unsigned>(
+                    ip[3]
+                ),
+                static_cast<unsigned>(
+                    device.GetDeviceAddress()
+                )
+            );
+        }
+
+
+        static void PrintMask(
+            const char* label,
+            uint64_t mask)
+        {
+            Serial.print(
+                label
+                    ? label
+                    : "Mask"
+            );
+
+            Serial.print(
+                " = 0x"
+            );
+
+
+            const uint32_t high =
+                static_cast<uint32_t>(
+                    mask >> 32
+                );
+
+            const uint32_t low =
+                static_cast<uint32_t>(
+                    mask &
+                    0xFFFFFFFFULL
+                );
+
+
+            if (high != 0)
+            {
+                DMPlatform::SerialPrintf(
+                    "%08lX%08lX\n",
+                    static_cast<unsigned long>(
+                        high
+                    ),
+                    static_cast<unsigned long>(
+                        low
+                    )
+                );
+            }
+            else
+            {
+                DMPlatform::SerialPrintf(
+                    "%lX\n",
+                    static_cast<unsigned long>(
+                        low
+                    )
+                );
+            }
+        }
+    };
 };
 
 class ToggleManager {

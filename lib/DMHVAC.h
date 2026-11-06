@@ -94,6 +94,16 @@ public:
             updateRequests();
         }
 
+        void updateHumidity(float h)
+        {
+            humidity = h;
+        }
+
+        float getHumidity() const
+        {
+            return humidity;
+        }
+
         bool needsHeating()  { return heatRequest; }
         bool needsCooling()  { return coolRequest; }
 
@@ -112,6 +122,7 @@ public:
 
         String name;
         float  temperature;
+        float humidity = 0.0f;
         float  setpoint;
         int    fanCoilNumber;
 
@@ -286,10 +297,16 @@ public:
 
         struct Zone {
             const char* name;
-            float setpoint;
+
+            int setpointArea;
+
             int temperatureArea;
+
+            int humidityArea;
+
             int fanCoilId;
         };
+
 
         Zone* zones = nullptr;
         size_t zoneCount = 0;
@@ -335,7 +352,7 @@ public:
         hp = HeatPumpController(cfg.initialMode, cfg.initialSetpoint, cfg.hpConfig);
 
         for (size_t i = 0; i < cfg.zoneCount; i++)
-            hp.createZone(cfg.zones[i].name, cfg.zones[i].setpoint, cfg.zones[i].fanCoilId);
+            hp.createZone(cfg.zones[i].name, cfg.zones[i].setpointArea , cfg.zones[i].fanCoilId);
 
         hp.enableACS(cfg.acs.enabled);
         hp.setACSPriority(cfg.acs.dhwPriority);

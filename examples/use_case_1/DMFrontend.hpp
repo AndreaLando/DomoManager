@@ -203,92 +203,332 @@ public:
 // ============================================================
 //  POWER FRONTEND
 // ============================================================
-class PowerEngine {
+class PowerEngine
+{
 private:
 
-    // ------------------------------------------------------------
-    // CALLBACKS FRONTEND (rimangono qui)
-    // ------------------------------------------------------------
-    static void onLoadChange(const String& name, bool state) {
-        LOG_IF("POWER", "[EVENT] %s -> %s",
-               name.c_str(),
-               state ? "ON" : "OFF");
+    // ============================================================
+    // REPORTING
+    // ============================================================
+
+    /**
+     * @brief Abilita o disabilita i report diagnostici automatici.
+     *
+     * Il valore viene inizializzato da:
+     *
+     * FrontendConfig::Power::reporting
+     */
+    static inline bool reportingEnabled =
+        false;
+
+    /**
+     * @brief Impedisce l'esecuzione ricorsiva del report.
+     */
+    static inline bool reportInProgress =
+        false;
+
+    /**
+     * @brief Genera il report diagnostico completo del PowerManager.
+     *
+     * Il report viene eseguito solamente quando reportingEnabled
+     * è true.
+     *
+     * La stampa effettiva viene delegata al DiagnosticManager
+     * tramite PowerManager::Diagnostic.
+     *
+     * @param eventName Nome dell'evento che ha generato il report.
+     */
+    static void reportChange(
+        const char* eventName)
+    {
+        if (!reportingEnabled)
+            return;
+
+        if (reportInProgress)
+            return;
+
+        reportInProgress =
+            true;
+
+        LOG_IF(
+            "POWER",
+            "Diagnostic report triggered by: %s",
+            eventName != nullptr
+                ? eventName
+                : "UNKNOWN");
+
+        PowerManager::Diagnostic::FullReport(
+            PowerOrchestrator::Get());
+
+        reportInProgress =
+            false;
     }
 
-    static void onLimitWarning(float netPower, float limit) {
-        LOG_IF("POWER", "[WARNING] net=%0.2f W, limit=%0.2f",
-               netPower, limit);
+    // ============================================================
+    // CALLBACK CARICHI
+    // ============================================================
+
+    /**
+     * @brief Riceve la conferma del cambio di stato di un carico.
+     *
+     * La callback viene eseguita sia per i carichi elettrici sia
+     * per il carico termico.
+     *
+     * @param name Nome del carico.
+     * @param state Nuovo stato reale.
+     */
+    static void onLoadChange(
+        const String& name,
+        bool state)
+    {
+        LOG_IF(
+            "POWER",
+            "[EVENT] %s -> %s",
+            name.c_str(),
+            state
+                ? "ON"
+                : "OFF");
+
+        reportChange(
+            state
+                ? "LOAD_ON"
+                : "LOAD_OFF");
     }
 
-    static void onLimitExceeded(float netPower, float limit) {
-        LOG_IF("POWER", "[EXCEEDED] net=%0.2f W, limit=%0.2f",
-               netPower, limit);
+    // ============================================================
+    // CALLBACK LIMITI
+    // ============================================================
+
+    /**
+     * @brief Riceve la transizione nello stato WARNING.
+     *
+     * @param netPower Potenza netta corrente.
+     * @param limit Limite operativo corrente.
+     */
+    static void onLimitWarning(
+        float netPower,
+        float limit)
+    {
+        LOG_IF(
+            "POWER",
+            "[WARNING] net=%0.2f W, limit=%0.2f W",
+            netPower,
+            limit);
+
+        reportChange(
+            "LIMIT_WARNING");
     }
 
-    static void onPowerError(int code, const String& msg) {
-        LOG_IF("POWER", "[ERROR] code=%d msg=%s",
-               code, msg.c_str());
+    /**
+     * @brief Riceve la transizione nello stato EXCEEDED.
+     *
+     * @param netPower Potenza netta corrente.
+     * @param limit Limite operativo corrente.
+     */
+    static void onLimitExceeded(
+        float netPower,
+        float limit)
+    {
+        LOG_IF(
+            "POWER",
+            "[EXCEEDED] net=%0.2f W, limit=%0.2f W",
+            netPower,
+            limit);
+
+        reportChange(
+            "LIMIT_EXCEEDED");
     }
 
-    static void onSuggestion(const String& suggestion, int severity, const String& reason) {
-        LOG_IF("POWER", "[SUGGESTION] sev=%d %s reason=%s",
-               severity,
-               suggestion.c_str(),
-               reason.c_str());
+    // ============================================================
+    // CALLBACK ERRORI
+    // ============================================================
+
+    /**
+     * @brief Riceve un errore dal PowerManager.
+     *
+     * @param code Codice numerico dell'errore.
+     * @param message Descrizione dell'errore.
+     */
+    static void onPowerError(
+        int code,
+        const String& message)
+    {
+        LOG_IF(
+            "POWER",
+            "[ERROR] code=%d msg=%s",
+            code,
+            message.c_str());
+
+        reportChange(
+            "POWER_ERROR");
+    }
+
+    // ============================================================
+    // CALLBACK SUGGESTION
+    // ============================================================
+
+    /**
+     * @brief Riceve una suggestion di attacco o distacco.
+     *
+     * La suggestion rappresenta una richiesta ancora in attesa
+     * di conferma da parte dell'attuatore.
+     *
+     * @param suggestion Azione richiesta.
+     * @param severity Severità della richiesta.
+     * @param reason Motivazione della richiesta.
+     */
+    static void onSuggestion(
+        const String& suggestion,
+        int severity,
+        const String& reason)
+    {
+        LOG_IF(
+            "POWER",
+            "[SUGGESTION] sev=%d %s reason=%s",
+            severity,
+            suggestion.c_str(),
+            reason.c_str());
+
+        /*
+         * Il nome dell'evento diagnostico distingue i distacchi
+         * causati dall'hard limit dalle suggestion ordinarie.
+         */
+        if (reason == "hard limit" ||
+            reason == "hard limit forced")
+        {
+            reportChange(
+                "HARD_LIMIT_SHED");
+        }
+        else
+        {
+            reportChange(
+                "SUGGESTION");
+        }
     }
 
 public:
 
-    // ------------------------------------------------------------
+    // ============================================================
     // SETUP FRONTEND POWER
-    // ------------------------------------------------------------
-    static void Setup(const FrontendConfig::Power& cfg)
+    // ============================================================
+
+    /**
+     * @brief Configura il frontend Power.
+     *
+     * La funzione:
+     * - acquisisce il flag di reporting;
+     * - inizializza PowerOrchestrator;
+     * - registra tutte le callback frontend.
+     *
+     * Non genera un report durante il setup perché i dati runtime
+     * potrebbero non essere ancora inizializzati.
+     *
+     * @param cfg Configurazione del sottosistema Power.
+     */
+    static void Setup(
+        const FrontendConfig::Power& cfg)
     {
+        reportingEnabled =
+            cfg.reporting;
+
+        reportInProgress =
+            false;
+
         PowerOrchestrator::Setup(
             cfg,
-            3000,      // fallbackSoft
-            3500,      // fallbackHard (non usato dal nuovo PM)
+            3000,
+            3500,
             onLoadChange,
             onLimitWarning,
             onLimitExceeded,
             onPowerError,
-            onSuggestion
-        );
+            onSuggestion);
 
-        LOG_IF("POWER", "Frontend Power setup completed");
+        LOG_IF(
+            "POWER",
+            "Frontend Power setup completed, reporting=%s",
+            reportingEnabled
+                ? "ON"
+                : "OFF");
     }
 
-    // ------------------------------------------------------------
+    // ============================================================
     // LOOP FRONTEND POWER
-    // ------------------------------------------------------------
-    static void Loop(unsigned long now,
-                     int gridPower,
-                     float lux,
-                     float tempExt,
-                     float actualProduction,
-                     float meanTemperature,
-                     int month,
-                     int hour,
-                     int minute)
+    // ============================================================
+
+    /**
+     * @brief Esegue il ciclo del sottosistema Power.
+     *
+     * Il reporting non viene eseguito direttamente nel loop.
+     * I report vengono prodotti solamente dalle callback quando
+     * si verifica un cambiamento reale.
+     *
+     * @param now Timestamp corrente.
+     * @param gridPower Potenza di scambio con la rete.
+     */
+    static void Loop(
+        unsigned long now,
+        int gridPower)
     {
         PowerOrchestrator::Loop(
             now,
-            gridPower,
-            lux,
-            tempExt,
-            actualProduction,
-            meanTemperature,
-            month,
-            hour,
-            minute
-        );
+            gridPower);
     }
 
-    // ------------------------------------------------------------
+    // ============================================================
+    // CONTROLLO REPORTING RUNTIME
+    // ============================================================
+
+    /**
+     * @brief Abilita o disabilita il reporting a runtime.
+     *
+     * @param enabled true per abilitare i report.
+     */
+    static void SetReporting(
+        bool enabled)
+    {
+        reportingEnabled =
+            enabled;
+
+        LOG_IF(
+            "POWER",
+            "Reporting changed to %s",
+            reportingEnabled
+                ? "ON"
+                : "OFF");
+    }
+
+    /**
+     * @brief Restituisce lo stato corrente del reporting.
+     */
+    static bool IsReportingEnabled()
+    {
+        return
+            reportingEnabled;
+    }
+
+    /**
+     * @brief Forza manualmente un report diagnostico.
+     *
+     * Il metodo rispetta comunque il flag reportingEnabled.
+     */
+    static void Report()
+    {
+        reportChange(
+            "MANUAL_REPORT");
+    }
+
+    // ============================================================
     // ACCESSOR
-    // ------------------------------------------------------------
-    static PowerManager& Get() {
-        return PowerOrchestrator::Get();
+    // ============================================================
+
+    /**
+     * @brief Restituisce l'istanza del PowerManager.
+     */
+    static PowerManager& Get()
+    {
+        return
+            PowerOrchestrator::Get();
     }
 };
 
@@ -496,319 +736,674 @@ public:
 };
 
 
+// ============================================================
+// DOMO MANAGER FRONTEND ENGINE - REFACTORED
+//
+// Requires these types to be defined before this class:
+//   FrontendRuntime, FrontendNetwork, MQTTEngine,
+//   HAMQTTTransport, DMHAOrchestrator, DomoIntrospection,
+//   HMIEngine and the existing frontend engines/orchestrators.
+// ============================================================
+
 class DomoManagerFrontendEngine : public FrontendRuntime
 {
 private:
-    // ============================================================
-    // INSTANCE
-    // ============================================================
-
     static inline DomoManagerFrontendEngine* instance = nullptr;
-
-    // ============================================================
-    // NETWORK
-    // ============================================================
-
     static inline FrontendNetwork* network = nullptr;
-
-    // ============================================================
-    // AEE
-    // ============================================================
-
     static inline AEERegistry* aee = nullptr;
-
-    // ============================================================
-    // CALLBACKS / CONFIG
-    // ============================================================
 
     static inline void (*fullCycleCallback)(DomoManager&) = nullptr;
     static inline FrontendConfig config;
     static inline DomoManager* Manager = nullptr;
     static HMIEngine hmiEngine;
 
-    // ============================================================
-    // FULL CYCLE
-    // ============================================================
+    static inline DomoIntrospection introspection;
+    static inline DMHAOrchestrator homeAssistantOrchestrator;
+    static inline uint8_t mqttEventSource = 255;
+            
+    // ========================================================
+    // NETWORK REGISTRATION
+    // ========================================================
+
+    static inline DMNetworkManager::ProtocolId
+        webApiClientProtocolId = -1;
+
+    static inline DMNetworkManager::ProtocolId
+        webApiServerProtocolId = -1;
+
+    static inline DMNetworkManager::ProtocolId
+        solarProtocolId = -1;
+
+    // ========================================================
+    // FRONTEND GENERAL CALLBACKS
+    // ========================================================
 
     static void CheckFullCycle()
     {
-        auto* dm = DomoManager::instance;
-        if (!dm) return;
+        DomoManager* dm = DomoManager::instance;
+        if (!dm)
+            return;
+
         const bool backend = dm->hasBackendCycleCompleted();
         const bool frontend = TaskEngine::hasFrontendCycleCompleted();
-        if (backend && frontend)
-        {
-            dm->resetBackendCycleFlag();
-            TaskEngine::resetFrontendCycleFlag();
-            if (fullCycleCallback) fullCycleCallback(*DomoManager::instance);
-        }
-    }
 
-    // ============================================================
-    // SOMETHING CHANGED
-    // ============================================================
+        if (!backend || !frontend)
+            return;
+
+        dm->resetBackendCycleFlag();
+        TaskEngine::resetFrontendCycleFlag();
+
+        if (fullCycleCallback)
+            fullCycleCallback(*dm);
+    }
 
     static void SomethingChanged(const std::unordered_set<int>& changed)
     {
-        /* Esempio per accedere al database delle variabili
-        auto& manager = *DomoManager::instance;
-        auto& buffer = manager.getBuffer(); */
+        if (changed.empty())
+            return;
 
-        if (!changed.empty())
+        for (const int area : changed)
         {
-            for (const auto& area : changed)
-            {
-                
-            }
+            (void)area;
         }
     }
-
-    // ============================================================
-    // WATCHDOG
-    // ============================================================
 
     static void watchdogHandler(const Watchdog::WatchdogStatus& st)
     {
         LOG_WF("Main", "===== WATCHDOG EVENT =====");
         LOG_WF("Main", "Reason: %s", st.reason);
         LOG_WF("Main", "Value: %ld", st.value);
-        if (st.blocked) LOG_WF("Main", "Type: BLOCKED");
+
+        if (st.blocked)  LOG_WF("Main", "Type: BLOCKED");
         if (st.overload) LOG_WF("Main", "Type: OVERLOAD");
         if (st.unstable) LOG_WF("Main", "Type: UNSTABLE");
         if (st.inactive) LOG_WF("Main", "Type: INACTIVE");
+
         if (st.blocked)
         {
             LOG_EF("Main", "<<<<<<<<+>>>>>>>>");
             LOG_EF("Main", "Action: System reset due to BLOCKED callback");
             DMPlatform::Restart();
         }
+
         if (st.overload && st.value > 200)
             LOG_WF("Main", "Action: Severe overload detected");
+
         if (st.unstable)
             LOG_WF("Main", "Action: System unstable, logging event");
+
         LOG_WF("Main", "==========================");
     }
-
-    // ============================================================
-    // ETHERNET SETUP
-    // ============================================================
 
     static void SetupEthernet(const FrontendConfig& cfg)
     {
         uint8_t mac[6];
-        for (uint8_t i = 0; i < 6; ++i) mac[i] = cfg.net.mac[i];
+        for (uint8_t i = 0; i < 6; ++i)
+            mac[i] = cfg.net.mac[i];
 
-        if (!DMPlatform::Network::BeginEthernet(mac, cfg.net.ip, cfg.net.gateway, cfg.net.subnet))
+        if (!DMPlatform::Network::BeginEthernet(
+                mac,
+                cfg.net.ip,
+                cfg.net.gateway,
+                cfg.net.subnet))
         {
             LOG_EF("DomoManagerFrontendEngine", "Ethernet hardware unavailable");
-            while (true) delay(100);
+            while (true)
+                delay(100);
         }
 
         if (!DMPlatform::Network::WaitForLink(1500UL))
         {
             LOG_EF("DomoManagerFrontendEngine", "Ethernet link is DOWN");
             DMPlatform::WriteOutputPin(DMPlatform::LedUser, true);
+            return;
         }
-        else
-        {
-            LOG_IF("DomoManagerFrontendEngine", "Ethernet interface started");
-            const IPAddress ip = DMPlatform::Network::LocalIP();
-            LOG_IF("DomoManagerFrontendEngine", "My IP address: %u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
-        }
+
+        LOG_IF("DomoManagerFrontendEngine", "Ethernet interface started");
+
+        const IPAddress ip = DMPlatform::Network::LocalIP();
+        LOG_IF(
+            "DomoManagerFrontendEngine",
+            "My IP address: %u.%u.%u.%u",
+            ip[0], ip[1], ip[2], ip[3]
+        );
     }
 
-    // ============================================================
-    // INIT ENGINES
-    // ============================================================
-
-    static void InitEngines(DomoManager& manager)
+    static bool SetupPulseOutputs()
     {
+        bool success =
+            true;
+
+        if (
+            !PulseManager::Add(
+                AREA_CUCINA_LUCE_1,
+                1500UL
+            )
+        )
+        {
+            LOG_EF(
+                "PULSE",
+                "Unable to register entrance relay pulse"
+            );
+
+            success =
+                false;
+        }
+
+        /*
+        * Eventuali altre uscite:
+        *
+        * PulseManager::Add(
+        *     AREA_RELAY_SECONDARIO,
+        *     1500UL
+        * );
+        */
+
+        return success;
+    }
+
+    static void InitEngines(
+        DomoManager& manager)
+    {
+        // ====================================================
+        // SECURITY
+        // ====================================================
+
         if (config.security.enabled)
-            SecurityOrchestrator::Setup(&config.security);
+        {
+            SecurityOrchestrator::Setup(
+                &config.security
+            );
+        }
+
+        // ====================================================
+        // HVAC
+        // ====================================================
 
         if (config.hvac.enabled)
-            HVACEngine::Setup(config.hvac);
+        {
+            HVACEngine::Setup(
+                config.hvac
+            );
+        }
+
+        // ====================================================
+        // WEATHER
+        // ====================================================
 
         if (config.weather.enabled)
-            WeatherEngine::Setup(config.weather);
+        {
+            WeatherEngine::Setup(
+                config.weather
+            );
+        }
+
+        // ====================================================
+        // POWER
+        // ====================================================
 
         if (config.power.enabled)
-            PowerEngine::Setup(config.power);
+        {
+            PowerEngine::Setup(
+                config.power
+            );
+        }
+
+        // ====================================================
+        // POWER SUPERVISOR
+        // ====================================================
 
         if (config.ps.enabled)
-            PowerSupervisorEngine::Setup(config.ps);
+        {
+            PowerSupervisorEngine::Setup(
+                config.ps
+            );
+        }
+
+        // ====================================================
+        // JOBS
+        // ====================================================
 
         JobsEngine::Setup();
 
-        if (config.domoManager.automation.json)
-            manager.loadAutomationJson(config.domoManager.automation.json);
+        // ====================================================
+        // AUTOMATION
+        // ====================================================
 
-        WebAPIEngine::Setup(config.webApi);
+        if (config.domoManager.automation.json)
+        {
+            manager.loadAutomationJson(
+                config.domoManager.automation.json
+            );
+        }
+
+        /*
+        * WebAPI non viene inizializzata qui.
+        *
+        * Client e server WebAPI vengono registrati nel
+        * DMNetworkManager e inizializzati da SetupWebAPI().
+        */
+
+        // ====================================================
+        // WATCH
+        // ====================================================
 
         if (config.watch.enabled)
-            WatchEngine::attach(manager, config.watch);
+        {
+            WatchEngine::attach(
+                manager,
+                config.watch
+            );
+        }
 
-        instance->RegisterFrontendDiagnostics();
+        // ====================================================
+        // FRONTEND DIAGNOSTICS
+        // ====================================================
+
+        if (instance)
+        {
+            instance->RegisterFrontendDiagnostics();
+        }
     }
 
-    // ============================================================
-    // FULL CYCLE CALLBACK
-    // ============================================================
+    // ========================================================
+    // SETUP WEB API
+    //
+    // Registra nel DMNetworkManager:
+    //
+    //   - HTTP client, se abilitato
+    //   - HTTP server, se abilitato
+    //
+    // Gli endpoint server non appartengono più a FrontendConfig.
+    // Vengono costruiti internamente da WebAPIEngine usando
+    // la configurazione autonoma config.access.
+    // ========================================================
+
+    static void SetupWebAPI()
+    {
+        // ====================================================
+        // RESET PROTOCOL IDS
+        // ====================================================
+
+        webApiClientProtocolId =
+            -1;
+
+        webApiServerProtocolId =
+            -1;
+
+
+        // ====================================================
+        // VALIDATE MANAGER
+        // ====================================================
+
+        if (!Manager)
+        {
+            LOG_EF(
+                "WEBAPI",
+                "DomoManager unavailable"
+            );
+
+            return;
+        }
+
+
+        // ====================================================
+        // CONFIGURATION STATUS
+        // ====================================================
+
+        const bool clientEnabled =
+            config.webApi.client.enabled;
+
+        const bool serverEnabled =
+            config.webApi.server.enabled &&
+            config.access.enabled;
+
+        const bool accessEnabled =
+            config.access.enabled;
+
+
+        // ====================================================
+        // COMPLETELY DISABLED
+        // ====================================================
+
+        if (
+            !clientEnabled &&
+            !serverEnabled &&
+            !accessEnabled
+        )
+        {
+            LOG_IF(
+                "WEBAPI",
+                "HTTP client, server and access control disabled"
+            );
+
+            return;
+        }
+
+
+        // ====================================================
+        // CONFIGURATION CONSISTENCY
+        // ====================================================
+
+        if (
+            accessEnabled &&
+            !serverEnabled
+        )
+        {
+            LOG_EF(
+                "WEBAPI",
+                "Access control enabled while HTTP server is disabled"
+            );
+        }
+
+
+        // ====================================================
+        // HTTP CLIENT / POLLING REGISTRATION
+        // ====================================================
+
+        if (clientEnabled)
+        {
+            const auto& clientCfg =
+                config.webApi.client;
+
+            if (
+                !clientCfg.devices ||
+                clientCfg.deviceCount == 0
+            )
+            {
+                LOG_WF(
+                    "WEBAPI-CLIENT",
+                    "Client enabled without devices"
+                );
+            }
+            else if (clientCfg.timeoutMs == 0)
+            {
+                LOG_EF(
+                    "WEBAPI-CLIENT",
+                    "Client enabled with invalid timeout"
+                );
+            }
+            else
+            {
+                constexpr uint8_t
+                    CLIENT_SOCKET_DEMAND = 1;
+
+                webApiClientProtocolId =
+                    Manager->net.registerProtocol(
+                        "WebAPI-Client",
+                        20,
+                        20,
+                        CLIENT_SOCKET_DEMAND,
+                        true
+                    );
+
+                if (webApiClientProtocolId < 0)
+                {
+                    LOG_EF(
+                        "WEBAPI-CLIENT",
+                        "Protocol registration failed"
+                    );
+                }
+                else
+                {
+                    LOG_IF(
+                        "WEBAPI-CLIENT",
+                        "Protocol registered: "
+                        "id=%d devices=%u sockets=%u",
+                        static_cast<int>(
+                            webApiClientProtocolId
+                        ),
+                        static_cast<unsigned>(
+                            clientCfg.deviceCount
+                        ),
+                        static_cast<unsigned>(
+                            CLIENT_SOCKET_DEMAND
+                        )
+                    );
+                }
+            }
+        }
+        else
+        {
+            LOG_IF(
+                "WEBAPI-CLIENT",
+                "HTTP client disabled"
+            );
+        }
+
+
+        // ====================================================
+        // HTTP SERVER / WEBHOOK REGISTRATION
+        // ====================================================
+
+        if (serverEnabled)
+        {
+            const auto& serverCfg =
+                config.webApi.server;
+
+            if (serverCfg.port == 0)
+            {
+                LOG_EF(
+                    "WEBAPI-SERVER",
+                    "Server enabled with invalid port"
+                );
+            }
+            else if (serverCfg.timeoutMs == 0)
+            {
+                LOG_EF(
+                    "WEBAPI-SERVER",
+                    "Server enabled with invalid timeout"
+                );
+            }
+            else
+            {
+                /*
+                * Domanda massima dichiarata:
+                *
+                *   1 socket listener TCP
+                *   1 socket client HTTP in ingresso
+                *
+                * Il numero degli endpoint non influenza
+                * la domanda socket.
+                */
+                constexpr uint8_t
+                    SERVER_SOCKET_DEMAND = 2;
+
+                webApiServerProtocolId =
+                    Manager->net.registerProtocol(
+                        "WebAPI-Server",
+                        10,
+                        10,
+                        SERVER_SOCKET_DEMAND,
+                        true
+                    );
+
+                if (webApiServerProtocolId < 0)
+                {
+                    LOG_EF(
+                        "WEBAPI-SERVER",
+                        "Protocol registration failed"
+                    );
+                }
+                else
+                {
+                    LOG_IF(
+                        "WEBAPI-SERVER",
+                        "Protocol registered: "
+                        "id=%d port=%u sockets=%u "
+                        "access=%u",
+                        static_cast<int>(
+                            webApiServerProtocolId
+                        ),
+                        static_cast<unsigned>(
+                            serverCfg.port
+                        ),
+                        static_cast<unsigned>(
+                            SERVER_SOCKET_DEMAND
+                        ),
+                        accessEnabled
+                            ? 1U
+                            : 0U
+                    );
+                }
+            }
+        }
+        else
+        {
+            LOG_IF(
+                "WEBAPI-SERVER",
+                "HTTP server disabled"
+            );
+        }
+
+
+        // ====================================================
+        // FRONTEND CALLBACKS
+        // ====================================================
+        SetupPulseOutputs();
+
+        WebAPIEngine::SetWebRequestCallback(
+            WebAPIRequestCallback
+        );
+
+        WebAPIEngine::SetAccessEventCallback(
+            AccessEventCallback
+        );
+
+        WebAPIEngine::SetAccessAuthorizedCallback(
+            AccessAuthorizedCallback
+        );
+
+        WebAPIEngine::SetDeviceResponseCallback(
+            WebAPIDeviceResponseCallback
+        );
+
+        // ====================================================
+        // ENGINE SETUP
+        //
+        // WebAPIEngine costruisce internamente:
+        //
+        //   - AccessControlService
+        //   - FanvilWebAPI
+        //   - X3WebAPI
+        //   - endpoint HTTP runtime
+        // ====================================================
+
+        WebAPIEngine::Setup(
+            config.webApi,
+            config.access
+        );
+
+
+        // ====================================================
+        // RESULT
+        // ====================================================
+
+        LOG_IF(
+            "WEBAPI",
+            "Setup completed: "
+            "clientProtocol=%d serverProtocol=%d "
+            "clientRunning=%u serverRunning=%u "
+            "accessRunning=%u endpoints=%u",
+            static_cast<int>(
+                webApiClientProtocolId
+            ),
+            static_cast<int>(
+                webApiServerProtocolId
+            ),
+            WebAPIEngine::IsClientRunning()
+                ? 1U
+                : 0U,
+            WebAPIEngine::IsServerRunning()
+                ? 1U
+                : 0U,
+            WebAPIEngine::IsAccessRunning()
+                ? 1U
+                : 0U,
+            static_cast<unsigned>(
+                WebAPIEngine::
+                    GetServerEndpointCount()
+            )
+        );
+    }
 
     static void SetFullCycleCallback(void (*fn)(DomoManager&))
     {
         fullCycleCallback = fn;
     }
 
-    // ============================================================
-    // AEE EVENT
-    // ============================================================
+    // ========================================================
+    // EVENT CALLBACKS
+    // ========================================================
 
     static void AEEEventCallback(const EventManager::Event& event)
     {
-        if (!Manager) return;
-
-        std::vector<DMAEE::Update> updates;
-        if (!DMAEE::BuildUpdatesFromBufferArea(AEEEngine::getMgr(), event.area, event.value, updates))
+        if (!Manager)
             return;
 
-        if (updates.empty()) return;
+        std::vector<DMAEE::Update> updates;
+
+        if (!DMAEE::BuildUpdatesFromBufferArea(
+                AEEEngine::getMgr(),
+                event.area,
+                event.value,
+                updates))
+        {
+            return;
+        }
+
+        if (updates.empty())
+            return;
 
         const unsigned long now = Manager->getTimeManager().nowMs();
         DMAEE::ApplyUpdates(updates, now);
     }
 
-    // ============================================================
-    // SECURITY EVENT
-    // ============================================================
-
-    static void SecurityEventCallback(
-        const EventManager::Event& event)
+    static void SecurityEventCallback(const EventManager::Event& event)
     {
-        if(!Manager ||
-        !config.security.enabled)
+        if (!Manager || !config.security.enabled)
+            return;
+
+        const auto& security = config.security;
+        const unsigned long now = Manager->getTimeManager().nowMs();
+
+        if (security.panelBitCommandArea >= 0 &&
+            event.area == security.panelBitCommandArea)
         {
+            SecurityEngine::ApplyCommand(event.area, event.value, now);
             return;
         }
 
-        const auto& security =
-            config.security;
-
-        const unsigned long now =
-            Manager->getTimeManager().nowMs();
-
-        // --------------------------------------------------------
-        // SECURITY AREAS
-        // --------------------------------------------------------
-
-        if(security.panelBitCommandArea >= 0 &&
-        event.area == security.panelBitCommandArea)
+        if (security.panelCommandArea >= 0 &&
+            event.area == security.panelCommandArea)
         {
-            SecurityEngine::ApplyCommand(
-                event.area,
-                event.value,
-                now
-            );
-
+            SecurityEngine::ApplyCommand(event.area, event.value, now);
             return;
         }
 
-        if(security.panelCommandArea >= 0 &&
-        event.area == security.panelCommandArea)
+        for (size_t i = 0; i < security.zoneCount; ++i)
         {
-            SecurityEngine::ApplyCommand(
-                event.area,
-                event.value,
-                now
-            );
-
-            return;
-        }
-
-        // --------------------------------------------------------
-        // ZONE COMMAND AREAS
-        // --------------------------------------------------------
-
-        for(size_t i = 0;
-            i < security.zoneCount;
-            ++i)
-        {
-            if(security.zones[i].cmdArea < 0)
-                continue;
-
-            if(event.area !=
-            security.zones[i].cmdArea)
+            if (security.zones[i].cmdArea >= 0 &&
+                event.area == security.zones[i].cmdArea)
             {
-                continue;
+                SecurityEngine::ApplyCommand(event.area, event.value, now);
+                return;
             }
-
-            SecurityEngine::ApplyCommand(
-                event.area,
-                event.value,
-                now
-            );
-
-            return;
         }
 
-        // --------------------------------------------------------
-        // SENSOR COMMAND AREAS
-        // --------------------------------------------------------
-
-        if(!security.sensors)
+        if (!security.sensors)
             return;
 
-        for(size_t i = 0;
-            i < security.count;
-            ++i)
+        for (size_t i = 0; i < security.count; ++i)
         {
-            if(security.sensors[i].cmdArea < 0)
-                continue;
-
-            if(event.area !=
-            security.sensors[i].cmdArea)
+            if (security.sensors[i].cmdArea >= 0 &&
+                event.area == security.sensors[i].cmdArea)
             {
-                continue;
+                SecurityEngine::ApplyCommand(event.area, event.value, now);
+                return;
             }
-
-            SecurityEngine::ApplyCommand(
-                event.area,
-                event.value,
-                now
-            );
-
-            return;
         }
     }
-    
-
-    // ============================================================
-    // SECURITY ALARM CALLBACK
-    //
-    // Riceve lo stato dell'allarme dal SecurityEngine.
-    //
-    // I relay seguono lo stato sicurezza aggregato.
-    //
-    // MEMORIE CENTRALE
-    // ------------------------------------------------------------
-    // bit 6  = Intrusion MEM
-    // bit 7  = Intrusion H24 MEM
-    // bit 8  = Flood MEM
-    // bit 9  = Smoke MEM
-    // bit 10 = Windows Open MEM
-    // bit 11 = Doors Open MEM
-    //
-    // ALLARMI SERVIZIO (Realtime)
-    // ------------------------------------------------------------
-    // bit 12 = Tamper
-    // bit 13 = Panic
-    //
-    // Comportamento:
-    // ------------------------------------------------------------
-    // - Intrusion/Flood/Smoke usano le MEMORIE centrale.
-    // - Tamper e Panic sono realtime.
-    // - Tamper e Panic rimangono attivi anche a centrale DISARMED.
-    // ============================================================
 
     static void SecurityAlarmCallback(
         bool engaged,
@@ -817,59 +1412,110 @@ private:
         uint64_t effectiveAlarmMask,
         uint64_t systemBitmask)
     {
-        if(!Manager ||
-        !config.security.enabled)
-        {
+        if (!Manager || !config.security.enabled)
             return;
-        }
 
         (void)active;
         (void)currentAlarmMask;
         (void)effectiveAlarmMask;
 
-        // --------------------------------------------------------
-        // MEMORIE CENTRALE
-        // --------------------------------------------------------
+        const auto hasFlag =
+            [&](SecurityOrchestrator::SystemManager::Field field)
+            {
+                return
+                    (
+                        systemBitmask &
+                        (
+                            1ULL <<
+                            static_cast<uint64_t>(field)
+                        )
+                    ) != 0;
+            };
 
         const bool alarmIntrusionMem =
-            (systemBitmask & (1ULL << 6)) != 0;
+            hasFlag(
+                SecurityOrchestrator::
+                    SystemManager::
+                        ALARM_INTRUSION_MEM
+            );
 
         const bool alarmIntrusionH24Mem =
-            (systemBitmask & (1ULL << 7)) != 0;
+            hasFlag(
+                SecurityOrchestrator::
+                    SystemManager::
+                        ALARM_INTRUSION_H24_MEM
+            );
 
         const bool alarmFloodMem =
-            (systemBitmask & (1ULL << 8)) != 0;
+            hasFlag(
+                SecurityOrchestrator::
+                    SystemManager::
+                        ALARM_FLOOD_MEM
+            );
 
         const bool alarmSmokeMem =
-            (systemBitmask & (1ULL << 9)) != 0;
+            hasFlag(
+                SecurityOrchestrator::
+                    SystemManager::
+                        ALARM_SMOKE_MEM
+            );
 
         const bool windowsOpenMem =
-            (systemBitmask & (1ULL << 10)) != 0;
+            hasFlag(
+                SecurityOrchestrator::
+                    SystemManager::
+                        WINDOWS_OPEN_MEM
+            );
 
         const bool doorsOpenMem =
-            (systemBitmask & (1ULL << 11)) != 0;
-
-        // --------------------------------------------------------
-        // ALLARMI SERVIZIO REALTIME
-        // --------------------------------------------------------
+            hasFlag(
+                SecurityOrchestrator::
+                    SystemManager::
+                        DOORS_OPEN_MEM
+            );
 
         const bool alarmTamper =
-            (systemBitmask & (1ULL << 12)) != 0;
+            hasFlag(
+                SecurityOrchestrator::
+                    SystemManager::
+                        ALARM_TAMPER
+            );
 
         const bool alarmPanic =
-            (systemBitmask & (1ULL << 13)) != 0;
+            hasFlag(
+                SecurityOrchestrator::
+                    SystemManager::
+                        ALARM_PANIC
+            );
+
+        const bool alarmCamera =
+            hasFlag(
+                SecurityOrchestrator::
+                    SystemManager::
+                        ALARM_CAMERA
+            );
 
         const bool serviceAlarm =
             alarmTamper ||
             alarmPanic;
 
-        // --------------------------------------------------------
-        // CENTRALE DISARMATA
-        //
-        // Tamper e Panic devono comunque essere gestiti.
-        // --------------------------------------------------------
+        LOG_IF(
+            "SECURITY",
+            "AlarmCallback engaged=%u active=%u systemMask=0x%016llX",
+            engaged ? 1 : 0,
+            active ? 1 : 0,
+            (unsigned long long)systemBitmask
+        );
 
-        if(!engaged && !serviceAlarm)
+        if (alarmCamera)
+        {
+            LOG_IF(
+                "SECURITY",
+                "Camera detection active"
+            );
+        }
+
+        if (!engaged && !serviceAlarm)
         {
             DMPlatform::WriteOutputPin(
                 DMPlatform::SIREN,
@@ -884,23 +1530,12 @@ private:
             return;
         }
 
-        // --------------------------------------------------------
-        // USCITA SIRENA
-        //
-        // Panic genera immediatamente sirena.
-        // --------------------------------------------------------
-
         const bool siren =
             alarmIntrusionMem ||
             windowsOpenMem ||
             doorsOpenMem ||
-            alarmPanic;
-
-        // --------------------------------------------------------
-        // USCITA ALARM
-        //
-        // Tamper e Panic condividono la stessa logica.
-        // --------------------------------------------------------
+            alarmPanic ||
+            alarmCamera;
 
         const bool alarmOutput =
             alarmIntrusionH24Mem ||
@@ -919,30 +1554,659 @@ private:
         );
     }
 
-    // ============================================================
-    // MQTT EVENT
-    // ============================================================
+    static void HMIEventCallback(const EventManager::Event& event)
+    {
+        LOG_DF(
+            "HMI",
+            "RX area=%d value=%ld source=%u",
+            event.area,
+            event.value,
+            event.source
+        );
 
-    static void OnMQTTCommand(
+        if (!hmiEngine.enabled())
+            return;
+
+        hmiEngine.PushEvent(event);
+
+        if (Manager &&
+            Manager->getLeds().hasChannel(LedController::THREE))
+        {
+            static bool ledState = false;
+            ledState = !ledState;
+            Manager->getLeds().set(LedController::THREE, ledState);
+        }
+    }
+
+    // ========================================================
+    // SOLAR CALLBACKS
+    // ========================================================
+
+    static void OnSolarSnapshot(
+        uint8_t orchestratorId,
+        const SolarEngine::Snapshot& snapshot)
+    {
+        if (
+            orchestratorId >=
+            config.solarInverters.count ||
+            orchestratorId >=
+            FrontendConfig::MAX_SOLAR_INVERTERS)
+        {
+            return;
+        }
+
+        const auto& solar =
+            config.solarInverters
+                .inverter[orchestratorId];
+
+        if (!solar.reportOnChange)
+            return;
+
+        LOG_IF(
+            "SOLAR",
+            "[%u] "
+            "PV=%0.1fV %0.1fA %0.0fW "
+            "BAT=%0.1fV %+0.1fA SOC=%d "
+            "GRID=%0.1fV %0.1fHz "
+            "OUT=%0.1fV %0.1fHz %0.0fW "
+            "LOAD=%u%%",
+            static_cast<unsigned>(
+                orchestratorId
+            ),
+            snapshot.pv.electrical.voltage,
+            snapshot.pv.electrical.current,
+            snapshot.pv.electrical.power,
+            snapshot.battery.electrical.voltage,
+            snapshot.battery.electrical.current,
+            snapshot.battery.capacity.soc,
+            snapshot.grid.electrical.voltage,
+            snapshot.grid.electrical.frequency,
+            snapshot.output.electrical.voltage,
+            snapshot.output.electrical.frequency,
+            snapshot.output.electrical.activePower,
+            static_cast<unsigned>(
+                snapshot.output.load.percent
+            )
+        );
+
+        static unsigned long
+            lastDump[
+                FrontendConfig::
+                    MAX_SOLAR_INVERTERS
+            ] {};
+
+        const unsigned long now =
+            millis();
+
+        if (
+            now - lastDump[orchestratorId] >
+            30000UL)
+        {
+            lastDump[orchestratorId] =
+                now;
+
+            SolarEngine::DiagnosticReport(
+                orchestratorId
+            );
+        }
+    }
+
+    static void OnSolarFrame(
+        uint8_t orchestratorId,
+        const SolarEngine::Diagnostics::Frame& frame)
+    {
+        LOG_DF(
+            "SOLAR",
+            "[%u] %s result=%d latency=%lu "
+            "TX=[%s] RX=[%s]",
+            static_cast<unsigned>(
+                orchestratorId
+            ),
+            frame.command.c_str(),
+            static_cast<int>(
+                frame.result
+            ),
+            frame.latencyMs,
+            frame.tx.c_str(),
+            frame.rx.c_str()
+        );
+    }
+
+    static void OnSolarCommandState(
+        uint8_t orchestratorId,
+        const SolarEngine::Diagnostics::Command& command)
+    {
+        LOG_DF(
+            "SOLAR",
+            "[%u] %s state=%d "
+            "ok=%lu fail=%lu",
+            static_cast<unsigned>(
+                orchestratorId
+            ),
+            command.name.c_str(),
+            static_cast<int>(
+                command.state
+            ),
+            command.successes,
+            command.failures
+        );
+    }
+
+    // ========================================================
+    // MQTT / HOME ASSISTANT COMPOSITION ROOT
+    // ========================================================
+
+    static const FrontendConfig::MQTT::Client* FindHAClientConfig()
+    {
+        if (!config.mqtt.clients)
+            return nullptr;
+
+        for (size_t i = 0; i < config.mqtt.clientCount; ++i)
+        {
+            const FrontendConfig::MQTT::Client& client =
+                config.mqtt.clients[i];
+
+            if (client.enabled &&
+                client.backend ==
+                    FrontendConfig::MQTT::Client::Backend::HOME_ASSISTANT)
+            {
+                return &client;
+            }
+        }
+
+        return nullptr;
+    }
+
+    static bool HAIsConnected(void* context)
+    {
+        (void)context;
+
+        return MQTTEngine::IsConnected(
+            FrontendConfig::MQTT::Client::Backend::HOME_ASSISTANT
+        );
+    }
+
+    static bool HAPublish(
+        void* context,
+        const char* topic,
+        const char* payload,
+        bool retain)
+    {
+        (void)context;
+
+        return MQTTEngine::PublishRaw(
+            FrontendConfig::MQTT::Client::Backend::HOME_ASSISTANT,
+            topic,
+            payload,
+            retain
+        );
+    }
+
+    static bool HASubscribe(void* context, const char* topic)
+    {
+        (void)context;
+
+        return MQTTEngine::SubscribeRaw(
+            FrontendConfig::MQTT::Client::Backend::HOME_ASSISTANT,
+            topic
+        );
+    }
+
+    static void OnMQTTRawMessage(
         uint8_t clientIndex,
-        const FrontendConfig::MQTT::Device* device,
-        const FrontendConfig::MQTT::Mapping* mapping,
+        FrontendConfig::MQTT::Client::Backend backend,
+        const char* topic,
+        const char* payload,
+        size_t length)
+    {
+        if (backend !=
+            FrontendConfig::MQTT::Client::Backend::HOME_ASSISTANT)
+        {
+            return;
+        }
+
+        homeAssistantOrchestrator.onRawMessage(
+            clientIndex,
+            topic,
+            payload,
+            length
+        );
+    }
+
+    static void OnHACommand(
+        void* context,
+        uint8_t originClientIndex,
+        int area,
         long value)
     {
-        LOG_IF("APP", "MQTT RX client=%u device=%s field=%s value=%ld",
-            (unsigned)clientIndex,
-            device ? device->id : "?",
-            mapping ? mapping->field : "?",
-            value);
+        (void)context;
+
+        if (!Manager || area < 0)
+            return;
+
+        Manager->forceEvent(
+            area,
+            value,
+            mqttEventSource
+        );
+
+        MQTTEngine::PublishEventFromMQTT(
+            originClientIndex,
+            area,
+            value
+        );
+
+        LOG_IF(
+            "HA_COMMAND",
+            "Comando applicato dal frontend: client=%u area=%d value=%ld",
+            static_cast<unsigned>(originClientIndex),
+            area,
+            value
+        );
+    }
+
+    static void OnMQTTRoutedEvent(
+        uint8_t originClientIndex,
+        int area,
+        long value)
+    {
+        (void)originClientIndex;
+        homeAssistantOrchestrator.publishEvent(area, value);
+    }
+
+    static void HAServiceLoop(unsigned long now)
+    {
+        homeAssistantOrchestrator.loop(now);
+    }
+
+    static bool SetupHAOrchestrator()
+    {
+        if (!Manager)
+        {
+            LOG_EF(
+                "HA_ORCHESTRATOR",
+                "Setup fallito: Manager NULL"
+            );
+
+            return false;
+        }
+
+        const FrontendConfig::MQTT::Client*
+            haClientConfig =
+                FindHAClientConfig();
+
+        if (!haClientConfig)
+        {
+            LOG_WF(
+                "HA_ORCHESTRATOR",
+                "Client HOME_ASSISTANT non configurato"
+            );
+
+            return false;
+        }
+
+        HAMQTTTransport transport;
+
+        transport.context =
+            nullptr;
+
+        transport.connected =
+            HAIsConnected;
+
+        transport.publish =
+            HAPublish;
+
+        transport.subscribe =
+            HASubscribe;
+
+        DMHAOrchestrator::Config haConfig;
+
+        haConfig.transport =
+            transport;
+
+        haConfig.mqttClientConfig =
+            haClientConfig;
+
+        haConfig.manager =
+            Manager;
+
+        haConfig.introspection =
+            &introspection;
+
+        haConfig.commandContext =
+            nullptr;
+
+        haConfig.commandCallback =
+            OnHACommand;
+
+        /*
+        * I comandi Home Assistant già interpretati vengono
+        * inoltrati allo stesso callback applicativo usato dai
+        * normali mapping MQTT.
+        */
+        haConfig.inboundMessageCallback =
+            OnMQTTInboundMessage;
+
+        if (!homeAssistantOrchestrator.setup(
+                haConfig))
+        {
+            LOG_EF(
+                "HA_ORCHESTRATOR",
+                "Inizializzazione fallita"
+            );
+
+            return false;
+        }
+
+        LOG_IF(
+            "HA_ORCHESTRATOR",
+            "Inizializzazione completata"
+        );
+
+        return true;
+    }
+
+    // ============================================================
+    // MQTT INBOUND MESSAGE
+    //
+    // Punto applicativo unico per tutti i messaggi MQTT normalizzati.
+    //
+    // Origini supportate:
+    //
+    //   MAPPING_NUMERIC
+    //   MAPPING_TEXT
+    //   HOME_ASSISTANT_AREA
+    //   HOME_ASSISTANT_RUNTIME
+    //   RAW
+    //
+    // I puntatori topic, payload, device, mapping e runtimeId sono
+    // validi solamente durante l'esecuzione sincrona della callback.
+    // ============================================================
+
+    static void OnMQTTInboundMessage(
+        const MQTTInboundMessage& message)
+    {
+        using Origin =
+            MQTTInboundMessage::Origin;
+
+        if (!message.valid())
+        {
+            LOG_WF(
+                "MQTT_IN",
+                "Messaggio non valido: "
+                "client=%u origin=%u",
+                static_cast<unsigned>(
+                    message.clientIndex
+                ),
+                static_cast<unsigned>(
+                    message.origin
+                )
+            );
+
+            return;
+        }
+
+        switch (message.origin)
+        {
+            // ====================================================
+            // MAPPING NUMERICO
+            // ====================================================
+
+            case Origin::MAPPING_NUMERIC:
+            {
+                LOG_IF(
+                    "MQTT_IN",
+                    "Mapping numerico: "
+                    "client=%u backend=%u "
+                    "device=%s field=%s "
+                    "area=%d value=%ld",
+                    static_cast<unsigned>(
+                        message.clientIndex
+                    ),
+                    static_cast<unsigned>(
+                        message.backend
+                    ),
+                    message.device &&
+                    message.device->id
+                        ? message.device->id
+                        : "?",
+                    message.mapping &&
+                    message.mapping->field
+                        ? message.mapping->field
+                        : "?",
+                    message.area,
+                    message.integerValue
+                );
+
+                break;
+            }
+
+            // ====================================================
+            // MAPPING TESTUALE / JSON
+            // ====================================================
+
+            case Origin::MAPPING_TEXT:
+            {
+                LOG_IF(
+                    "MQTT_IN",
+                    "Mapping testuale: "
+                    "client=%u backend=%u "
+                    "device=%s field=%s "
+                    "type=%u bytes=%u value='%.*s'",
+                    static_cast<unsigned>(
+                        message.clientIndex
+                    ),
+                    static_cast<unsigned>(
+                        message.backend
+                    ),
+                    message.device &&
+                    message.device->id
+                        ? message.device->id
+                        : "?",
+                    message.mapping &&
+                    message.mapping->field
+                        ? message.mapping->field
+                        : "?",
+                    static_cast<unsigned>(
+                        message.valueType
+                    ),
+                    static_cast<unsigned>(
+                        message.payloadLength
+                    ),
+                    static_cast<int>(
+                        message.payloadLength
+                    ),
+                    message.payload
+                        ? message.payload
+                        : ""
+                );
+
+                break;
+            }
+
+            // ====================================================
+            // HOME ASSISTANT AREA
+            // ====================================================
+
+            case Origin::HOME_ASSISTANT_AREA:
+            {
+                LOG_IF(
+                    "MQTT_IN",
+                    "Home Assistant area: "
+                    "client=%u area=%d value=%ld",
+                    static_cast<unsigned>(
+                        message.clientIndex
+                    ),
+                    message.area,
+                    message.integerValue
+                );
+
+                break;
+            }
+
+            // ====================================================
+            // HOME ASSISTANT RUNTIME STORE
+            // ====================================================
+
+            case Origin::HOME_ASSISTANT_RUNTIME:
+            {
+                if (message.runtimeHandle ==
+                        MQTTInboundMessage::
+                            INVALID_RUNTIME_HANDLE ||
+                    !message.runtimeId)
+                {
+                    LOG_WF(
+                        "MQTT_IN",
+                        "Runtime message non valido: "
+                        "client=%u handle=%u",
+                        static_cast<unsigned>(
+                            message.clientIndex
+                        ),
+                        static_cast<unsigned>(
+                            message.runtimeHandle
+                        )
+                    );
+
+                    return;
+                }
+
+                // ------------------------------------------------
+                // ROOM 01 CARD CODE
+                // ------------------------------------------------
+
+                if (message.runtimeHandle ==
+                    RuntimeHandles::room1Card)
+                {
+                    LOG_IF(
+                        "MQTT_IN",
+                        "Room1Card aggiornata: "
+                        "client=%u handle=%u id=%s "
+                        "type=%u bytes=%u value='%.*s'",
+                        static_cast<unsigned>(
+                            message.clientIndex
+                        ),
+                        static_cast<unsigned>(
+                            message.runtimeHandle
+                        ),
+                        message.runtimeId,
+                        static_cast<unsigned>(
+                            message.runtimeType
+                        ),
+                        static_cast<unsigned>(
+                            message.payloadLength
+                        ),
+                        message.runtimeSensitive
+                            ? 8
+                            : static_cast<int>(
+                                message.payloadLength
+                            ),
+                        message.runtimeSensitive
+                            ? "********"
+                            : (
+                                message.payload
+                                    ? message.payload
+                                    : ""
+                            )
+                    );
+
+                    /*
+                    * La scrittura nel RuntimeStore è già stata
+                    * effettuata dal DMHAOrchestrator.
+                    *
+                    * Qui va solamente l'eventuale reazione
+                    * applicativa al cambiamento.
+                    */
+
+                    break;
+                }
+
+                LOG_DF(
+                    "MQTT_IN",
+                    "Runtime aggiornato: "
+                    "client=%u handle=%u id=%s "
+                    "type=%u bytes=%u",
+                    static_cast<unsigned>(
+                        message.clientIndex
+                    ),
+                    static_cast<unsigned>(
+                        message.runtimeHandle
+                    ),
+                    message.runtimeId,
+                    static_cast<unsigned>(
+                        message.runtimeType
+                    ),
+                    static_cast<unsigned>(
+                        message.payloadLength
+                    )
+                );
+
+                break;
+            }
+
+            // ====================================================
+            // RAW NON RISOLTO
+            // ====================================================
+
+            case Origin::RAW:
+            {
+                LOG_DF(
+                    "MQTT_IN",
+                    "Raw: "
+                    "client=%u backend=%u "
+                    "topic=%s bytes=%u payload='%.*s'",
+                    static_cast<unsigned>(
+                        message.clientIndex
+                    ),
+                    static_cast<unsigned>(
+                        message.backend
+                    ),
+                    message.topic
+                        ? message.topic
+                        : "?",
+                    static_cast<unsigned>(
+                        message.payloadLength
+                    ),
+                    static_cast<int>(
+                        message.payloadLength
+                    ),
+                    message.payload
+                        ? message.payload
+                        : ""
+                );
+
+                break;
+            }
+
+            case Origin::UNKNOWN:
+            default:
+            {
+                LOG_WF(
+                    "MQTT_IN",
+                    "Origine MQTT non gestita: "
+                    "client=%u origin=%u",
+                    static_cast<unsigned>(
+                        message.clientIndex
+                    ),
+                    static_cast<unsigned>(
+                        message.origin
+                    )
+                );
+
+                break;
+            }
+        }
     }
 
     static void MQTTEventCallback(const EventManager::Event& event)
     {
-        if (!config.mqtt.enabled) return;
+        if (!config.mqtt.enabled)
+            return;
 
         MQTTEngine::PublishEvent(event);
+        homeAssistantOrchestrator.publishEvent(event.area, event.value);
 
-        if (Manager->getLeds().hasChannel(LedController::THREE))
+        if (Manager &&
+            Manager->getLeds().hasChannel(LedController::THREE))
         {
             static bool ledState = false;
             ledState = !ledState;
@@ -950,26 +2214,424 @@ private:
         }
     }
 
-    // ============================================================
-    // HMI EVENT
-    // ============================================================
-    static void HMIEventCallback(const EventManager::Event& event)
+    // ========================================================
+    // WEB API REQUEST CALLBACK
+    //
+    // Chiamata dopo ogni richiesta HTTP gestita da un endpoint.
+    // ========================================================
+
+    static void WebAPIRequestCallback(
+        const char* endpointName,
+        const HttpServerRequest& request,
+        const HttpServerResponse& response)
     {
-        if (!hmiEngine.enabled()) return;
+        LOG_IF(
+            "FRONTEND-WEBAPI",
+            "endpoint=%s method=%s path=%s "
+            "status=%d response='%s'",
+            endpointName
+                ? endpointName
+                : "",
+            request.method.c_str(),
+            request.path.c_str(),
+            response.statusCode,
+            response.body.c_str()
+        );
+    }
 
-        hmiEngine.PushEvent(event);
+    static void WebAPIDeviceResponseCallback(
+        const WebApiDevice& device,
+        const DeviceMessageProfile::OutMessage& message,
+        const String& rawResponse,
+        const ParsedResponse& parsed)
+    {
+        // ====================================================
+        // REOLINK AI STATE
+        // ====================================================
 
-        if (Manager->getLeds().hasChannel(LedController::THREE))
+        if (
+            !ReolinkWebAPI::IsProfile(
+                device.profile
+            ) ||
+            strcmp(
+                message.key
+                    ? message.key
+                    : "",
+                ReolinkWebAPI::MESSAGE_AI_STATE
+            ) != 0
+        )
         {
-            static bool ledState = false;
-            ledState = !ledState;
-            Manager->getLeds().set(LedController::THREE, ledState);
+            return;
         }
-    } 
 
-    // ============================================================
-    // CUSTOM TASK
-    // ============================================================
+        // ====================================================
+        // JSON VALIDATION
+        // ====================================================
+
+        if (!parsed.jsonValid)
+        {
+            LOG_WF(
+                "FRONTEND-REOLINK",
+                "Invalid AI response: "
+                "device=%s bytes=%u",
+                device.name
+                    ? device.name
+                    : "",
+                static_cast<unsigned>(
+                    rawResponse.length()
+                )
+            );
+
+            return;
+        }
+
+        // ====================================================
+        // PARSE ALARM MASK
+        // ====================================================
+
+        uint8_t alarmMask =
+            ReolinkWebAPI::ALARM_NONE;
+
+        int channel =
+            -1;
+
+        if (
+            !ReolinkWebAPI::ParseAlarmMask(
+                parsed.json
+                    .as<JsonVariantConst>(),
+                alarmMask,
+                channel
+            )
+        )
+        {
+            LOG_WF(
+                "FRONTEND-REOLINK",
+                "Unable to parse AI response: "
+                "device=%s",
+                device.name
+                    ? device.name
+                    : ""
+            );
+
+            return;
+        }
+
+        // ====================================================
+        // CHANGE DETECTION
+        //
+        // La configurazione corrente prevede una sola
+        // telecamera Reolink.
+        // ====================================================
+
+        static int previousAlarmMask =
+            -1;
+
+        const int currentAlarmMask =
+            static_cast<int>(
+                alarmMask
+            );
+
+        if (
+            currentAlarmMask ==
+            previousAlarmMask
+        )
+        {
+            return;
+        }
+
+        const int oldAlarmMask =
+            previousAlarmMask;
+
+        previousAlarmMask =
+            currentAlarmMask;
+
+        // ====================================================
+        // AREA UPDATE
+        // ====================================================
+
+        if (!DomoManager::instance)
+        {
+            LOG_WF(
+                "FRONTEND-REOLINK",
+                "Unable to publish AI alarm: "
+                "DomoManager not initialized"
+            );
+
+            return;
+        }
+
+        DomoManager::instance
+            ->forceInternalEvent(
+                AREA_REOLINK_INGRESSO_ALARM,
+                currentAlarmMask
+            );
+
+        // ====================================================
+        // DIAGNOSTICS
+        // ====================================================
+
+        LOG_IF(
+            "FRONTEND-REOLINK",
+            "AI alarm changed: "
+            "device=%s channel=%d "
+            "old=0x%02X new=0x%02X "
+            "person=%u vehicle=%u animal=%u",
+            device.name
+                ? device.name
+                : "",
+            channel,
+            static_cast<unsigned>(
+                oldAlarmMask < 0
+                    ? 0
+                    : oldAlarmMask
+            ),
+            static_cast<unsigned>(
+                currentAlarmMask
+            ),
+            ReolinkWebAPI::HasPerson(
+                alarmMask
+            )
+                ? 1U
+                : 0U,
+            ReolinkWebAPI::HasVehicle(
+                alarmMask
+            )
+                ? 1U
+                : 0U,
+            ReolinkWebAPI::HasAnimal(
+                alarmMask
+            )
+                ? 1U
+                : 0U
+        );
+    }
+
+    // ========================================================
+    // ACCESS EVENT CALLBACK
+    //
+    // Chiamata per ogni decisione del controllo accessi.
+    // ========================================================
+
+    static void AccessEventCallback(
+        const AccessControlService::Request& request,
+        const AccessControlService::Decision& decision)
+    {
+        const char* readerName =
+            (
+                decision.reader &&
+                decision.reader->name
+            )
+                ? decision.reader->name
+                : request.readerName.c_str();
+
+        LOG_IF(
+            "FRONTEND-ACCESS",
+            "reader=%s card=%s authorized=%u result=%s",
+            readerName,
+            decision.cardCode.c_str(),
+            decision.authorized
+                ? 1U
+                : 0U,
+            AccessControlService::ResultToString(
+                decision.result
+            )
+        );
+    }
+
+    // ========================================================
+    // ACCESS AUTHORIZED CALLBACK
+    //
+    // Chiamata solamente per una decisione positiva.
+    // ========================================================
+
+    static void AccessAuthorizedCallback(
+        const AccessControlService::Request& request,
+        const AccessControlService::Decision& decision)
+    {
+        // ====================================================
+        // READER NAME
+        // ====================================================
+
+        const char* readerName =
+            (
+                decision.reader &&
+                decision.reader->name
+            )
+                ? decision.reader->name
+                : request.readerName.c_str();
+
+
+        const int area =
+            decision.reader
+                ? decision.reader->area
+                : -1;
+
+
+        LOG_IF(
+            "FRONTEND-ACCESS",
+            "Authorized: reader=%s card=%s "
+            "relay=%d time=%d area=%d",
+            readerName,
+            decision.cardCode.c_str(),
+            decision.relayIndex,
+            decision.relayTime,
+            area
+        );
+
+
+        // ====================================================
+        // READER VALIDATION
+        // ====================================================
+
+        if (!decision.reader)
+        {
+            LOG_EF(
+                "FRONTEND-ACCESS",
+                "Authorized decision without resolved reader: "
+                "reader=%s card=%s",
+                readerName,
+                decision.cardCode.c_str()
+            );
+
+            return;
+        }
+
+
+        const AccessReader& reader =
+            *decision.reader;
+
+
+        // ====================================================
+        // LOCAL DOMOMANAGER PULSE
+        //
+        // L'impulso locale è opzionale.
+        //
+        // Un errore o la sua mancata configurazione non deve
+        // impedire l'eventuale comando remoto Fanvil.
+        // ====================================================
+
+        if (area >= 0)
+        {
+            if (
+                !PulseManager::Exists(
+                    area
+                )
+            )
+            {
+                LOG_EF(
+                    "FRONTEND-ACCESS",
+                    "Pulse output not registered: "
+                    "reader=%s area=%d",
+                    readerName,
+                    area
+                );
+            }
+            else if (
+                !PulseManager::Trigger(
+                    area
+                )
+            )
+            {
+                LOG_EF(
+                    "FRONTEND-ACCESS",
+                    "Unable to trigger relay pulse: "
+                    "reader=%s area=%d",
+                    readerName,
+                    area
+                );
+            }
+            else
+            {
+                LOG_IF(
+                    "FRONTEND-ACCESS",
+                    "Relay pulse triggered: "
+                    "reader=%s area=%d card=%s",
+                    readerName,
+                    area,
+                    decision.cardCode.c_str()
+                );
+            }
+        }
+        else
+        {
+            LOG_DF(
+                "FRONTEND-ACCESS",
+                "No local pulse configured: "
+                "reader=%s",
+                readerName
+            );
+        }
+
+
+        // ====================================================
+        // OUTBOUND AUTHORIZED COMMAND
+        //
+        // Il comportamento è interamente configurato nel reader.
+        // Nessuna dipendenza dal protocollo concreto.
+        // ====================================================
+
+        if (
+            reader.authorizedMessageKey &&
+            reader.authorizedMessageKey[0] != '\0'
+        )
+        {
+            if (
+                !WebAPIEngine::IsClientRunning()
+            )
+            {
+                LOG_EF(
+                    "FRONTEND-ACCESS",
+                    "Unable to send authorized command: "
+                    "HTTP client not running "
+                    "reader=%s message=%s",
+                    readerName,
+                    reader.authorizedMessageKey
+                );
+
+                return;
+            }
+
+            if (
+                !WebAPIEngine::Send(
+                    readerName,
+                    reader.authorizedMessageKey
+                )
+            )
+            {
+                LOG_EF(
+                    "FRONTEND-ACCESS",
+                    "Unable to queue authorized command: "
+                    "reader=%s message=%s",
+                    readerName,
+                    reader.authorizedMessageKey
+                );
+
+                return;
+            }
+
+            LOG_IF(
+                "FRONTEND-ACCESS",
+                "Authorized command queued: "
+                "reader=%s message=%s",
+                readerName,
+                reader.authorizedMessageKey
+            );
+        }
+    }
+
+    // ========================================================
+    // CUSTOM TASKS
+    // ========================================================
+    static void Task_Solar(
+        DomoManager& manager,
+        unsigned long now)
+    {
+        (void)manager;
+
+        SolarEngine::Loop(
+            now
+        );
+    }
 
     static void Task_Jobs(DomoManager& manager, unsigned long now)
     {
@@ -994,55 +2656,21 @@ private:
         auto& buffer = manager.getBuffer();
         auto& averages = manager.getAverages();
 
-        // --------------------------------------------------------
-        // INPUTS
-        // --------------------------------------------------------
-
-        const int gridPower = buffer.getValueFast(13, 100);
-        const float lux = 800.0f;
-        const float tempExt = 7.0f;
-        const float actualProduction = 0.0f;
-
-        // --------------------------------------------------------
-        // TIME
-        // --------------------------------------------------------
-
-        struct tm t;
-        manager.getTimeManager().getDateTime(t);
-
-        // --------------------------------------------------------
-        // POWER ENGINE
-        // --------------------------------------------------------
-
+        const int gridPower = buffer.getValueFast(AREA_INVERTER_PV_POWER, 100);
+        
         PowerEngine::Loop(
             now,
-            gridPower,
-            lux,
-            tempExt,
-            actualProduction,
-            averages.groupAverage("Temperature"),
-            t.tm_mon + 1,
-            t.tm_hour,
-            t.tm_min
+            gridPower
         );
-
-        // --------------------------------------------------------
-        // DIAGNOSTICS
-        // --------------------------------------------------------
 
         auto& pm = PowerEngine::Get();
 
-        LOG_DF("Power",
-            "grid=%0.2f solar=%0.2f tempExt=%0.2f lux=%0.2f",
-            pm.getGridPower(),
-            pm.getSolarPower(),
-            tempExt,
-            lux);
+        LOG_DF(
+            "Power",
+            "grid=%0.2f",
+            pm.getGridPower()
+        );
     }
-
-    // ============================================================
-    // CONSTRUCTOR
-    // ============================================================
 
     DomoManagerFrontendEngine(
         DomoManager& dm,
@@ -1051,89 +2679,79 @@ private:
     {
     }
 
-    // ============================================================
+    // ========================================================
     // INTROSPECTION
-    // ============================================================
-
-    static inline DomoIntrospection introspection;
+    // ========================================================
 
     static void BuildIntrospection()
     {
-        if (!Manager) return;
+        if (!Manager)
+        {
+            LOG_E(
+                "DomoIntrospection",
+                "BuildIntrospection: Manager == nullptr"
+            );
+            return;
+        }
+
+        static DeviceProfiles deviceProfiles;
 
         DomoIntrospection::Context ctx;
 
-        // --------------------------------------------------------
-        // DOMO MANAGER
-        // --------------------------------------------------------
-
         ctx.domo = &config.domoManager;
-
-        // --------------------------------------------------------
-        // RUNTIME
-        // --------------------------------------------------------
-
+        ctx.deviceProfiles = &deviceProfiles;
         ctx.buffer = &Manager->getBuffer();
-        ctx.averages = &Manager->getAverages();
+        ctx.runtimeStore =
+            &Manager->getRuntimeStore();
+
+        ctx.averages =
+            &Manager->getAverages();
+
+        ctx.averagesConfig =
+            &config.averages;
+
         ctx.time = &Manager->getTimeManager();
-
-        // --------------------------------------------------------
-        // AUTOMATION ENGINE
-        // --------------------------------------------------------
-
         ctx.automationEngine = &Manager->getAutomation();
-
-        // --------------------------------------------------------
-        // AEE
-        // --------------------------------------------------------
-
         ctx.aeeRegistry = &AEEEngine::getAEE();
-
-        // --------------------------------------------------------
-        // MQTT
-        // --------------------------------------------------------
-
         ctx.mqtt = &config.mqtt;
-
-        // --------------------------------------------------------
-        // WEB API
-        // --------------------------------------------------------
-
         ctx.webApi = &config.webApi;
+        ctx.hvac = &config.hvac;
+        ctx.solar =
+            config.solarInverters.count > 0
+                ? &config.solarInverters.inverter[0]
+                : nullptr;
 
-        // --------------------------------------------------------
-        // BUILD
-        // --------------------------------------------------------
+        if (!ctx.domo ||
+            !ctx.deviceProfiles ||
+            !ctx.buffer ||
+            !ctx.runtimeStore)
+        {
+            LOG_E(
+                "DomoIntrospection",
+                "BuildIntrospection: context non valido"
+            );
+
+            return;
+        }
 
         introspection.build(ctx);
     }
 
 protected:
-
-    // ============================================================
-    // FRONTEND RUNTIME HOOKS
-    // ============================================================
-
     void onFrontendDiagnostics() override
     {
-        // HMI
         if (hmiEngine.enabled())
         {
             Serial.print("HMI enabled: ");
             Serial.println(hmiEngine.enabled() ? "YES" : "NO");
-
             Serial.print("HMI running: ");
             Serial.println(hmiEngine.running() ? "YES" : "NO");
-
             Serial.print("HMI loop enabled: ");
             Serial.println(hmiEngine.loopEnabled() ? "YES" : "NO");
-
             Serial.print("HMI port: ");
             Serial.println(hmiEngine.port());
-
             Serial.print("HMI active clients: ");
             Serial.println(hmiEngine.activeClients());
-
             Serial.print("HMI max clients: ");
             Serial.println(hmiEngine.maxClients());
         }
@@ -1144,136 +2762,56 @@ protected:
         if (config.power.enabled)
             PowerManager::Diagnostic::FullReport(PowerEngine::Get());
 
-        // eventuale diagnostica specifica del frontend
-        // ...
-
-        // eventuale diagnostica utente
-        // ...
+        if (config.solarInverters.count > 0)
+        {
+            SolarEngine::DiagnosticReport();
+        }
     }
-
-    // ------------------------------------------------------------
-    // USER BUTTON
-    // ------------------------------------------------------------
 
     void onStartupButton(unsigned long now) override
     {
         (void)now;
-
-        /*
-         * Per ora nessuna logica aggiuntiva.
-         *
-         * La gestione generica del pulsante viene già eseguita
-         * da FrontendRuntime.
-         */
     }
 
     void onButtonPressed(unsigned long now) override
     {
         (void)now;
-
-        /*
-         * Punto di estensione per eventuale logica frontend
-         * personalizzata sul pulsante.
-         */
     }
-
-    // ------------------------------------------------------------
-    // DEVELOPER MODE
-    // ------------------------------------------------------------
 
     void onDeveloperMode() override
     {
-        /*
-         * Punto di estensione.
-         *
-         * FrontendRuntime ha già eseguito:
-         *
-         * manager.getOwner().setDeveloper(
-         *     OwnerManager::SYSTEM_REBOOT
-         * );
-         */
     }
 
 #if HOTSTANDBY_ENABLED
-
-    // ------------------------------------------------------------
-    // MASTER
-    // ------------------------------------------------------------
-
     void onBecomeMaster() override
     {
         LOG_I("Main", "Passo a MASTER -> abilito Ethernet");
         SetupEthernet(config);
     }
 
-    // ------------------------------------------------------------
-    // SLAVE
-    // ------------------------------------------------------------
-
     void onBecomeSlave() override
     {
         LOG_I("Main", "Passo a SLAVE -> disabilito Ethernet");
         DMPlatform::Network::EndEthernet();
     }
-
 #endif
 
 public:
-
-    // ============================================================
-    // SETUP COMPLETO
-    // ============================================================
-
     static void Setup(const FrontendConfig& cfg)
     {
-        // --------------------------------------------------------
-        // Config globale
-        // --------------------------------------------------------
-
         config = cfg;
-
-        // --------------------------------------------------------
-        // AEE
-        // --------------------------------------------------------
 
         AEEEngine::instance().Setup(cfg.bridge.aee);
 
-        // --------------------------------------------------------
-        // DOMO MANAGER
-        // --------------------------------------------------------
-
         Manager = new DomoManager(cfg.pins.leds);
-
-        // --------------------------------------------------------
-        // FRONTEND RUNTIME
-        // --------------------------------------------------------
-
         instance = new DomoManagerFrontendEngine(*Manager, cfg);
-
-        // --------------------------------------------------------
-        // NETWORK
-        // --------------------------------------------------------
-
         network = new FrontendNetwork(cfg.mqtt.clientCount);
 
-        LOG_I(
-            "DomoManagerFrontendEngine",
-            "DomoManager is starting..."
-        );
-
-        // --------------------------------------------------------
-        // ETHERNET + HMI
-        // --------------------------------------------------------
+        LOG_I("DomoManagerFrontendEngine", "DomoManager is starting...");
 
         SetupEthernet(cfg);
 
-        // --------------------------------------------------------
-        // MODBUS TCP CLIENT
-        // --------------------------------------------------------
-
-        network->modbusTCP().modbus.setTimeout(
-            cfg.modbus.timeoutMs
-        );
+        network->modbusTCP().modbus.setTimeout(cfg.modbus.timeoutMs);
 
         LOG_IF(
             "DomoManagerFrontendEngine",
@@ -1283,18 +2821,62 @@ public:
 
         delay(2000);
 
-        // --------------------------------------------------------
-        // TASK ENGINE
-        // --------------------------------------------------------
-
         TaskEngine::Setup(cfg);
 
-        TaskEngine::AddTask(
-            [](DomoManager& dm, unsigned long now)
+        //Inverter solari
+        bool solarEnabled =
+            false;
+
+        uint32_t solarIntervalMs =
+            1000UL;
+
+        const uint8_t solarCount =
+            cfg.solarInverters.count <
+                FrontendConfig::MAX_SOLAR_INVERTERS
+            ? cfg.solarInverters.count
+            : FrontendConfig::MAX_SOLAR_INVERTERS;
+
+        for (
+            uint8_t i = 0;
+            i < solarCount;
+            ++i)
+        {
+            const auto& solar =
+                cfg.solarInverters.inverter[i];
+
+            if (!solar.enabled)
+                continue;
+
+            if (!solarEnabled)
             {
-                (void)dm;
-                JobsEngine::Loop(now);
-            },
+                solarEnabled =
+                    true;
+
+                solarIntervalMs =
+                    solar.intervalMs > 0
+                        ? solar.intervalMs
+                        : 1UL;
+
+                continue;
+            }
+
+            if (
+                solar.intervalMs > 0 &&
+                solar.intervalMs < solarIntervalMs)
+            {
+                solarIntervalMs =
+                    solar.intervalMs;
+            }
+        }
+
+        TaskEngine::AddTask(
+            Task_Solar,
+            solarIntervalMs,
+            solarEnabled
+        );
+
+        TaskEngine::AddTask(
+            Task_Jobs,
             cfg.jobs.intervalMs,
             cfg.jobs.enabled
         );
@@ -1309,11 +2891,7 @@ public:
         );
 
         TaskEngine::AddTask(
-            [](DomoManager& dm, unsigned long now)
-            {
-                (void)dm;
-                WeatherEngine::Loop(now);
-            },
+            Task_Meteo,
             cfg.weather.intervalMs,
             cfg.weather.enabled
         );
@@ -1330,27 +2908,18 @@ public:
             cfg.power.enabled
         );
 
-        // --------------------------------------------------------
-        // WATCHDOG CALLBACK
-        // --------------------------------------------------------
-
         Manager->SetWatchdogCallback(watchdogHandler);
 
-        // ========================================================
-        // EVENT SOURCES
-        // ========================================================
+        static int solarSource =
+            Manager->getEventManager().add(
+                "SOLAR"
+            );
 
         static int hmiSource =
-            Manager->getEventManager().add(
-                HMIEventCallback,
-                "HMI"
-            );
+            Manager->getEventManager().add(HMIEventCallback, "HMI");
 
         static int aeeSource =
-            Manager->getEventManager().add(
-                AEEEventCallback,
-                "AEE"
-            );
+            Manager->getEventManager().add(AEEEventCallback, "AEE");
 
         AEEEngine::instance().attachReceiveContext(
             Manager->getBuffer(),
@@ -1358,27 +2927,23 @@ public:
             aeeSource
         );
 
-        // --------------------------------------------------------
-        // DOMO MANAGER CORE
-        // --------------------------------------------------------
-
         DMNetworkManager::ProtocolId modbusRTUProtocol = -1;
 
         if (cfg.modbus.enabled)
         {
-            modbusRTUProtocol =
-                Manager->net.registerProtocol(
-                    "Mbus-RTU",
-                    200,
-                    550,
-                    1
-                );
-
-            Manager->net.setPacingEnabled(
-                modbusRTUProtocol,
-                false
+            modbusRTUProtocol = Manager->net.registerProtocol(
+                "Mbus-RTU",
+                200,
+                550,
+                1
             );
+
+            Manager->net.setPacingEnabled(modbusRTUProtocol, false);
         }
+
+        // ========================================================
+        // DOMO MANAGER SETUP
+        // ========================================================
 
         if (!Manager->setup(
                 SomethingChanged,
@@ -1386,18 +2951,42 @@ public:
                 config.domoManager,
                 modbusRTUProtocol))
         {
-            while (true) delay(100);
+            LOG_EF(
+                "DomoManagerFrontendEngine",
+                "DomoManager setup failed"
+            );
+
+            while (true)
+                delay(100);
         }
 
-        // Questo va dopo Manager->setup per avere il dimensionamento dinamico del buffer
+        // --------------------------------------------------
+        // RuntimeStore initialization
+        // --------------------------------------------------
+
+        if (!RegisterRuntimeTags(*Manager))
+        {
+            LOG_EF(
+                "RUNTIME",
+                "Runtime tags initialization failed"
+            );
+
+            return;
+        }
+
+        // ========================================================
+        // HMI
+        // ========================================================
+
         if (cfg.domoManager.hmi.enabled)
         {
             const uint8_t hmiSocketDemand =
                 static_cast<uint8_t>(
-                    1 + cfg.domoManager.hmi.maxClients
+                    1 +
+                    cfg.domoManager.hmi.maxClients
                 );
 
-            auto hmiProtocolId =
+            const auto hmiProtocolId =
                 Manager->net.registerProtocol(
                     "HMI",
                     cfg.domoManager.hmi.pollingMs,
@@ -1405,33 +2994,214 @@ public:
                     hmiSocketDemand
                 );
 
-            hmiEngine.Setup(
-                config.domoManager.hmi,
-                Manager->net,
-                Manager->net.getProtocol(hmiProtocolId).socketOwner,
-                hmiProtocolId,
-                cfg.domoManager.hmi.maxClients,
-                Manager->getBuffer().size(),
-                hmiSource
-            );
+            if (hmiProtocolId < 0)
+            {
+                LOG_EF(
+                    "DomoManagerFrontendEngine",
+                    "HMI protocol registration failed"
+                );
+            }
+            else
+            {
+                const SocketManager::OwnerId
+                    hmiSocketOwner =
+                        Manager->net
+                            .getProtocol(
+                                hmiProtocolId
+                            )
+                            .socketOwner;
+
+                hmiEngine.Setup(
+                    config.domoManager.hmi,
+                    Manager->net,
+                    hmiSocketOwner,
+                    hmiProtocolId,
+                    cfg.domoManager.hmi.maxClients,
+                    Manager->getBuffer().size(),
+                    static_cast<uint8_t>(
+                        hmiSource
+                    )
+                );
+            }
         }
+        
+        // ========================================================
+        // WEB API
+        //
+        // La registrazione viene eseguita dopo Manager->setup(),
+        // perché DMNetworkManager e SocketManager sono ora
+        // disponibili.
+        //
+        // Client e server possono essere abilitati separatamente.
+        // ========================================================
 
-        Manager->getOwner().setCallback(
-            FrontendOwnerMode::OnChanged
-        );
+        SetupWebAPI();
 
-        // --------------------------------------------------------
-        // ENGINES
-        // --------------------------------------------------------
+        Manager->getOwner().setCallback(FrontendOwnerMode::OnChanged);
 
         InitEngines(*Manager);
 
-        // --------------------------------------------------------
-        // AEE FRONTEND CALLBACK
-        // --------------------------------------------------------
+        // ========================================================
+        // SOLAR INVERTERS
+        // ========================================================
 
-        BridgeEngine::get().onFrontendAEEChange =
-            OnAEEVarChanged;
+        const uint8_t configuredSolarCount =
+            cfg.solarInverters.count <
+                FrontendConfig::MAX_SOLAR_INVERTERS
+            ? cfg.solarInverters.count
+            : FrontendConfig::MAX_SOLAR_INVERTERS;
+
+        if (configuredSolarCount > 0)
+        {
+            bool anySolarEnabled =
+                false;
+
+            uint8_t solarSocketDemand =
+                0;
+
+            uint32_t minimumIntervalMs =
+                1000UL;
+
+            uint32_t maximumQueryTimeoutMs =
+                3000UL;
+
+            for (
+                uint8_t i = 0;
+                i < configuredSolarCount;
+                ++i)
+            {
+                const auto& solar =
+                    cfg.solarInverters.inverter[i];
+
+                if (!solar.enabled)
+                    continue;
+
+                if (!anySolarEnabled)
+                {
+                    anySolarEnabled =
+                        true;
+
+                    minimumIntervalMs =
+                        solar.intervalMs > 0
+                            ? solar.intervalMs
+                            : 1UL;
+
+                    maximumQueryTimeoutMs =
+                        solar.queryTimeoutMs > 0
+                            ? solar.queryTimeoutMs
+                            : 3000UL;
+                }
+                else
+                {
+                    if (
+                        solar.intervalMs > 0 &&
+                        solar.intervalMs <
+                            minimumIntervalMs)
+                    {
+                        minimumIntervalMs =
+                            solar.intervalMs;
+                    }
+
+                    if (
+                        solar.queryTimeoutMs >
+                            maximumQueryTimeoutMs)
+                    {
+                        maximumQueryTimeoutMs =
+                            solar.queryTimeoutMs;
+                    }
+                }
+
+                if (
+                    solar.transport ==
+                    FrontendConfig::Solar::
+                        TransportType::TCP_CLIENT)
+                {
+                    solarSocketDemand++;
+                }
+            }
+
+            if (anySolarEnabled)
+            {
+                solarProtocolId =
+                    Manager->net.registerProtocol(
+                        "Solar",
+                        minimumIntervalMs,
+                        maximumQueryTimeoutMs,
+                        solarSocketDemand,
+                        true
+                    );
+
+                if (solarProtocolId < 0)
+                {
+                    LOG_EF(
+                        "SOLAR",
+                        "Protocol registration failed"
+                    );
+                }
+                else
+                {
+                    LOG_IF(
+                        "SOLAR",
+                        "Protocol registered: "
+                        "id=%d inverters=%u sockets=%u "
+                        "interval=%lu timeout=%lu",
+                        static_cast<int>(
+                            solarProtocolId
+                        ),
+                        static_cast<unsigned>(
+                            configuredSolarCount
+                        ),
+                        static_cast<unsigned>(
+                            solarSocketDemand
+                        ),
+                        minimumIntervalMs,
+                        maximumQueryTimeoutMs
+                    );
+
+                    // Callback registrate prima del Setup per non perdere
+                    // eventuali notifiche generate durante begin().
+
+                    SolarEngine::SetSnapshotChangedCallback(
+                        OnSolarSnapshot
+                    );
+
+                    SolarEngine::SetFrameReceivedCallback(
+                        OnSolarFrame
+                    );
+
+                    SolarEngine::SetCommandStateCallback(
+                        OnSolarCommandState
+                    );
+
+                    SolarEngine::Setup(
+                        *Manager,
+                        Manager->net,
+                        *network,
+                        cfg.solarInverters,
+                        solarProtocolId,
+                        static_cast<uint8_t>(
+                            solarSource
+                        )
+                    );
+                }
+            }
+            else
+            {
+                LOG_IF(
+                    "SOLAR",
+                    "All configured inverters are disabled"
+                );
+            }
+        }
+        else
+        {
+            LOG_IF(
+                "SOLAR",
+                "No solar inverters configured"
+            );
+        }
+
+        BridgeEngine::get().onFrontendAEEChange = OnAEEVarChanged;
 
         LOG_IF(
             "AEE",
@@ -1439,25 +3209,17 @@ public:
             cfg.bridge.aee.count
         );
 
-        // --------------------------------------------------------
-        // HOTSTANDBY / MQTT / BRIDGE
-        // --------------------------------------------------------
-
 #if HOTSTANDBY_ENABLED
-
         Manager->enableHotStandby(false);
-
 #else
-
         if (cfg.bridge.enabled)
         {
-            int bridgeProtocolId =
-                Manager->net.registerProtocol(
-                    "Bridge",
-                    50,
-                    300,
-                    1
-                );
+            const int bridgeProtocolId = Manager->net.registerProtocol(
+                "Bridge",
+                50,
+                300,
+                1
+            );
 
             static UdpAdapter transport(
                 cfg.bridge.ip,
@@ -1467,9 +3229,7 @@ public:
 
             transport.setSocketContext(
                 Manager->net,
-                Manager->net.getProtocol(
-                    bridgeProtocolId
-                ).socketOwner
+                Manager->net.getProtocol(bridgeProtocolId).socketOwner
             );
 
             BridgeEngine::get().init(
@@ -1484,42 +3244,38 @@ public:
             );
         }
 
-        // --------------------------------------------------------
-        // DOMO INTROSPECTION
-        // --------------------------------------------------------
-
         BuildIntrospection();
 
         DomoSemanticResolver semanticResolver;
-
-        auto semanticResult =
-            semanticResolver.resolve(
-                introspection
-            );
+        const auto semanticResult = semanticResolver.resolve(introspection);
+        (void)semanticResult;
 
         semanticResolver.report(
             introspection
         );
 
-        // --------------------------------------------------------
-        // MQTT
-        // --------------------------------------------------------
-
         if (cfg.mqtt.enabled)
         {
-            int mqttProtocolId =
+            const int mqttProtocolId =
                 Manager->net.registerProtocol(
                     "MQTT",
                     50,
                     20,
-                    (uint8_t)cfg.mqtt.clientCount,
+                    static_cast<uint8_t>(
+                        cfg.mqtt.clientCount
+                    ),
                     true
                 );
 
-            static int mqttSource =
+            static int registeredMQTTSource =
                 Manager->getEventManager().add(
                     MQTTEventCallback,
                     "MQTT"
+                );
+
+            mqttEventSource =
+                static_cast<uint8_t>(
+                    registeredMQTTSource
                 );
 
             MQTTEngine::Setup(
@@ -1529,17 +3285,56 @@ public:
                 network->mqttClientCount(),
                 cfg.mqtt,
                 mqttProtocolId,
-                (uint8_t)mqttSource
+                mqttEventSource
             );
 
-            MQTTEngine::setCommandReceivedCallback(
-                OnMQTTCommand
-            );
+            // ====================================================
+            // CALLBACK APPLICATIVO UNICO
+            // ====================================================
+
+            MQTTEngine::
+                setInboundMessageReceivedCallback(
+                    OnMQTTInboundMessage
+                );
+
+            // ====================================================
+            // HOME ASSISTANT
+            // ====================================================
+
+            if (SetupHAOrchestrator())
+            {
+                /*
+                * Il raw callback è solamente il ponte interno:
+                *
+                * MQTT
+                *   -> DMHAOrchestrator
+                *   -> MQTTInboundMessage normalizzato
+                *   -> OnMQTTInboundMessage
+                */
+                MQTTEngine::
+                    setRawMessageReceivedCallback(
+                        OnMQTTRawMessage
+                    );
+
+                MQTTEngine::
+                    setRoutedEventCallback(
+                        OnMQTTRoutedEvent
+                    );
+
+                MQTTEngine::
+                    setServiceLoopCallback(
+                        HAServiceLoop
+                    );
+            }
+            else
+            {
+                LOG_WF(
+                    "HA_ORCHESTRATOR",
+                    "Home Assistant disabilitato "
+                    "per setup fallito"
+                );
+            }
         }
-
-        // --------------------------------------------------------
-        // SECURITY
-        // --------------------------------------------------------
 
         if (config.security.enabled)
         {
@@ -1552,162 +3347,82 @@ public:
             SecurityEngine::Setup(
                 *Manager,
                 config.security,
-                (uint8_t)securitySource
+                static_cast<uint8_t>(securitySource)
             );
 
-            // ====================================================
-            // SECURITY ALARM CALLBACK
-            // ====================================================
-
-            SecurityEngine::setAlarmCallback(
-                SecurityAlarmCallback
-            );
+            SecurityEngine::setAlarmCallback(SecurityAlarmCallback);
         }
-
 #endif
 
-        // --------------------------------------------------------
-        // FULL CYCLE
-        // --------------------------------------------------------
-
-        DomoManagerFrontendEngine::SetFullCycleCallback(
+        SetFullCycleCallback(
             [](DomoManager& dm)
             {
-                const int OLDER = 5000;
+                static constexpr int OLDER = 5000;
 
                 auto& buffer = dm.getBuffer();
 
                 std::vector<DMAEE::Update> updates;
                 updates.reserve(16);
 
-                const unsigned long now =
-                    dm.getTimeManager().nowMs();
+                const unsigned long now = dm.getTimeManager().nowMs();
 
-                // ------------------------------------------------
-                // POLLING AEE
-                // ------------------------------------------------
-
-                const bool hasUpdates =
-                    DMAEE::BuildUpdatesFromPolledSources(
+                if (DMAEE::BuildUpdatesFromPolledSources(
                         AEEEngine::getMgr(),
                         buffer,
-                        updates
-                    );
-
-                if (hasUpdates)
+                        updates))
                 {
-                    DMAEE::ApplyUpdates(
-                        updates,
-                        now
-                    );
+                    DMAEE::ApplyUpdates(updates, now);
                 }
 
-                // ------------------------------------------------
-                // Pulizia variazioni Buffer
-                // ------------------------------------------------
-
-                buffer.ResetAll(
-                    now,
-                    OLDER
-                );
+                buffer.ResetAll(now, OLDER);
             }
         );
-
-        // --------------------------------------------------------
-        // WATCHDOG
-        // --------------------------------------------------------
 
         Manager->enableWatchdog();
 
         LOG_IF(
             "DOMO MANAGER",
-            "********************* 08.2026 build 02"
+            "********************* 10.2026 build 01"
         );
 
         Manager->net.sockets().dump();
     }
 
-    // ============================================================
-    // LOOP COMPLETO
-    // ============================================================
-
     static void loop()
     {
-        if (!instance) return;
+        if (!instance || !Manager || !network)
+            return;
 
-        // ========================================================
-        // FRONTEND RUNTIME
-        //
-        // Qui vengono eseguiti:
-        //
-        //   - acquisizione now
-        //   - ButtonManager
-        //   - Developer Mode
-        //   - HotStandby
-        //
-        // ========================================================
+        const unsigned long now = instance->updateRuntime();
 
-        const unsigned long now =
-            instance->updateRuntime();
-
-        // ========================================================
-        // APPLICATION LOOP
-        // ========================================================
-
-#if HOTSTANDBY_ENABLED
-
-        if (instance->getIsMaster())
-
-#else
-
-        if (true)
-
-#endif
+        #if HOTSTANDBY_ENABLED
+            if (instance->getIsMaster())
+        #else
+            if (true)
+        #endif
         {
-            // ----------------------------------------------------
-            // HMI
-            // ----------------------------------------------------
-
             hmiEngine.SetLoopEnabled(
                 Manager->getPowerOnCycleCompleted()
             );
 
-            hmiEngine.ProcessNetwork(
-                *Manager,
-                now
-            );
+            hmiEngine.ProcessNetwork(*Manager, now);
 
-            // ----------------------------------------------------
-            // DOMO MANAGER
-            // ----------------------------------------------------
+            Manager->loop(network->modbusTCP().modbus);
 
-            Manager->loop(
-                network->modbusTCP().modbus
-            );
+            CheckFullCycle();
         }
         else
         {
-            // ----------------------------------------------------
-            // SLAVE
-            // ----------------------------------------------------
-
-            Manager->loop(
-                network->modbusTCP().modbus
-            );
+            //Do nothing
         }
-
-        // ========================================================
-        // FULL CYCLE
-        // ========================================================
-
-        CheckFullCycle();
     }
 };
 
 // ============================================================
-// DEFINIZIONE ISTANZA HMI
+// STATIC HMI INSTANCE
 // ============================================================
 
 HMIEngine DomoManagerFrontendEngine::hmiEngine;
+
 
 #endif

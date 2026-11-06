@@ -12,7 +12,20 @@
 
    ============================================================================ */
 
-// #include "DMUsb.hpp"
+// ============================================================================
+// HARDWARE TARGET
+// ============================================================================
+//
+// La piattaforma viene selezionata automaticamente da DMPlatform.hpp in base
+// alla scheda scelta nel menu Tools -> Board dell'IDE Arduino.
+//
+//   Opta                -> ARDUINO_ARCH_MBED
+//   ESP32-S3-POE-ETH    -> ARDUINO_ARCH_ESP32
+//
+// Assicurarsi che la scheda configurata nell'IDE corrisponda all'hardware
+// fisicamente utilizzato.
+// ============================================================================             
+
 #include "DMFrontend.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
@@ -123,8 +136,6 @@ static FrontendConfig mainConfig = [](){
 
 
     // --- WEATHER ---
-    c.weather.enabled    = false;
-    c.weather.intervalMs=5000;
     c.weather = WEATHER_PARAMS;
 
     // --- POWER SUPERVISOR ---
@@ -140,7 +151,7 @@ static FrontendConfig mainConfig = [](){
 
     // --- SECURITY ---
     c.security.enabled    = true;
-    c.security.intervalMs = 300;
+    c.security.intervalMs = 350;
     c.security.reportOnChange  = false;                      //Abilito la visualizzazione del report ogni volta che cambia un sensore
     c.security.eventArea = -1;                              //Non mi interessa accedere al buffer eventi
     c.security.panelCommandArea = AREA_SECURITY_CMD_AREA;   //Area comandi centralina
@@ -172,17 +183,84 @@ static FrontendConfig mainConfig = [](){
     c.watch.aree = watchAreas;
     c.watch.count = sizeof(watchAreas) / sizeof(watchAreas[0]);
 
-    // --- WEB API (Fanvil example) ---
-    c.webApi.enabled = false;
-    c.webApi.intervalMs=1500;
-    c.webApi.groups = API_DEVICE_GROUPS;
-    c.webApi.groupCount = sizeof(API_DEVICE_GROUPS) / sizeof(API_DEVICE_GROUPS[0]);
-    c.webApi.baseUrl = "http://192.168.1.100";   // Fanvil
-    c.webApi.timeoutMs = 3000;
+    // ============================================================
+    // WEB API CLIENT / POLLING
+    // ============================================================
+    c.webApi.client.enabled = false;
+    c.webApi.client.devices = WEB_API_DEVICES;
+    c.webApi.client.deviceCount = sizeof(WEB_API_DEVICES) / sizeof(WEB_API_DEVICES[0]);
+    c.webApi.client.timeoutMs = 3000;
+
+    // ============================================================
+    // WEB API SERVER / WEBHOOK
+    // ============================================================
+    c.webApi.server.enabled = false;
+    c.webApi.server.port = 8080;
+    c.webApi.server.timeoutMs = 3000;
+
+    // ============================================================
+    // ACCESS CONTROL
+    // ============================================================
+    c.access.enabled = false;
+    c.access.readers = ACCESS_READERS;
+    c.access.readerCount = sizeof(ACCESS_READERS) / sizeof(ACCESS_READERS[0]);;
+    c.access.commonCardCode = "12345"; //Codice valido su tutti i lettori.
+    c.access.defaultRelayIndex = 1;
+    c.access.defaultRelayTime = 10;     // 10 decimi = 1 secondo.
 
     // --- JOBS ---
-    c.jobs.enabled = true;
+    c.jobs.enabled = false;
     c.jobs.intervalMs=5500;
+
+    // ============================================================
+    // SOLAR INVERTER (gestisce piu inverter)
+    // ============================================================
+    c.solarInverters.count = 1;
+
+    auto& solar0 =
+        c.solarInverters.inverter[0];
+
+    solar0.enabled        = false;
+    solar0.reportOnChange = false;
+    solar0.autoDiscovery  = true;
+    solar0.intervalMs     = 5; // Loop veloce: protocollo non bloccante
+
+    solar0.transport =
+        FrontendConfig::Solar::
+            TransportType::TCP_CLIENT;
+
+    solar0.serial =
+    {
+        &Serial1,
+        2400
+    };
+
+    solar0.tcp =
+    {
+        IPAddress(192, 168, 12, 206),
+        8899,
+        3000
+    };
+
+    solar0.areas =
+    {
+        AREA_INVERTER_PV_VOLTAGE,
+        AREA_INVERTER_PV_CURRENT,
+        AREA_INVERTER_PV_POWER,
+
+        AREA_INVERTER_BATTERY_VOLTAGE,
+        AREA_INVERTER_BATTERY_SOC,
+
+        -1, // gridVoltage
+        -1, // gridPower
+
+        -1, // outputPower
+        -1, // loadPercent
+
+        AREA_INVERTER_TEMP,
+        AREA_INVERTER_STATUS,
+        AREA_INVERTER_FRONTEND_STATUS
+    };
 
     return c;
 }();
@@ -191,31 +269,7 @@ void setup() {
     Serial.begin(19200);
 
     DMPlatform::SetupPlatformIO();
-
-    /* USBConfigLoader::Init([](bool ok){
-        if (ok) {
-            LOG_I("USB", "USB inizializzato");
-        } else {
-            LOG_E("USB", "Errore inizializzazione USB");
-        }
-    });
-
-      🔥 NUOVO: tentiamo di caricare config.json dalla USB
-     FrontendConfig cfg;
-    if (USBConfigLoader::LoadFromUSB(cfg)) {
-        LOG_I("CFG", "Caricata configurazione da USB");
-        DomoManagerFrontendEngine::Setup(cfg);
-
-        LOG_I("USB", "Config valida, salvata in flash");
-        LOG_I("USB", "Riavvio...");
-        NVIC_SystemReset();
-
-    } else {
-        LOG_I("CFG", "Uso configurazione interna");
-        DomoManagerFrontendEngine::Setup(mainConfig);
-    }*/
-
-     DomoManagerFrontendEngine::Setup(mainConfig);
+    DomoManagerFrontendEngine::Setup(mainConfig);
 }
 
 void loop() {

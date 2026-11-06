@@ -577,6 +577,557 @@ public:
     }
 };
 
+// ============================================================================
+// PULSE OUTPUT MANAGER
+//
+// Gestisce impulsi non bloccanti su singole aree di uscita.
+//
+// Ogni uscita:
+//   - viene attivata immediatamente con start()
+//   - rimane attiva per pulseTime
+//   - viene disattivata automaticamente da update()
+//
+// Una nuova chiamata start() durante l'impulso:
+//   - mantiene l'uscita attiva
+//   - riavvia il timer
+// ============================================================================
+class PulseOutputManager
+{
+public:
+
+    struct Pulse
+    {
+        int area =
+            -1;
+
+        unsigned long pulseTime =
+            0;
+    };
+
+
+    struct Item
+    {
+        Pulse pulse;
+
+        bool running =
+            false;
+
+        unsigned long startedAt =
+            0;
+    };
+
+
+    using CallbackFn =
+        void (*)(
+            const Pulse& pulse,
+            bool active
+        );
+
+
+private:
+
+    static constexpr size_t
+        MAX_PULSES =
+            32;
+
+    static constexpr int
+        MAX_AREAS =
+            1024;
+
+
+    Item items[
+        MAX_PULSES
+    ];
+
+
+    size_t count =
+        0;
+
+
+    int indexByArea[
+        MAX_AREAS
+    ];
+
+
+    uint8_t activeList[
+        MAX_PULSES
+    ];
+
+
+    uint8_t activeCount =
+        0;
+
+
+    CallbackFn callback =
+        nullptr;
+
+
+public:
+
+    explicit PulseOutputManager(
+        CallbackFn cb)
+        : callback(
+              cb
+          )
+    {
+        for (
+            int area = 0;
+            area < MAX_AREAS;
+            ++area
+        )
+        {
+            indexByArea[area] =
+                -1;
+        }
+    }
+
+
+    // ========================================================================
+    // ADD
+    // ========================================================================
+
+    bool add(
+        int area,
+        unsigned long pulseTime)
+    {
+        if (
+            area < 0 ||
+            area >= MAX_AREAS
+        )
+        {
+            LOG_WF(
+                "PulseOutputManager",
+                "Invalid area: %d",
+                area
+            );
+
+            return false;
+        }
+
+        if (pulseTime == 0)
+        {
+            LOG_WF(
+                "PulseOutputManager",
+                "Invalid pulse time: area=%d",
+                area
+            );
+
+            return false;
+        }
+
+        if (count >= MAX_PULSES)
+        {
+            LOG_WF(
+                "PulseOutputManager",
+                "MAX_PULSES exceeded: %u",
+                static_cast<unsigned>(
+                    MAX_PULSES
+                )
+            );
+
+            return false;
+        }
+
+        if (indexByArea[area] >= 0)
+        {
+            LOG_WF(
+                "PulseOutputManager",
+                "Area already registered: %d",
+                area
+            );
+
+            return false;
+        }
+
+        Item& item =
+            items[count];
+
+        item.pulse.area =
+            area;
+
+        item.pulse.pulseTime =
+            pulseTime;
+
+        item.running =
+            false;
+
+        item.startedAt =
+            0;
+
+        indexByArea[area] =
+            static_cast<int>(
+                count
+            );
+
+        ++count;
+
+        return true;
+    }
+
+
+    // ========================================================================
+    // EXISTS
+    // ========================================================================
+
+    bool exists(
+        int area) const
+    {
+        return
+            area >= 0 &&
+            area < MAX_AREAS &&
+            indexByArea[area] >= 0;
+    }
+
+
+    // ========================================================================
+    // GET
+    // ========================================================================
+
+    Item* get(
+        int area)
+    {
+        if (
+            area < 0 ||
+            area >= MAX_AREAS
+        )
+        {
+            return nullptr;
+        }
+
+        const int index =
+            indexByArea[area];
+
+        if (index < 0)
+        {
+            return nullptr;
+        }
+
+        return
+            &items[index];
+    }
+
+
+    const Item* get(
+        int area) const
+    {
+        if (
+            area < 0 ||
+            area >= MAX_AREAS
+        )
+        {
+            return nullptr;
+        }
+
+        const int index =
+            indexByArea[area];
+
+        if (index < 0)
+        {
+            return nullptr;
+        }
+
+        return
+            &items[index];
+    }
+
+
+    // ========================================================================
+    // START
+    //
+    // Se l'impulso è già attivo, riavvia il timeout senza
+    // richiamare la callback di attivazione.
+    // ========================================================================
+
+    bool start(
+        int area,
+        unsigned long now)
+    {
+        Item* item =
+            get(
+                area
+            );
+
+        if (!item)
+        {
+            LOG_WF(
+                "PulseOutputManager",
+                "Start failed: area=%d not found",
+                area
+            );
+
+            return false;
+        }
+
+        item->startedAt =
+            now;
+
+        if (item->running)
+        {
+            LOG_DF(
+                "PulseOutputManager",
+                "Pulse restarted: area=%d time=%lu",
+                area,
+                item->pulse.pulseTime
+            );
+
+            return true;
+        }
+
+        item->running =
+            true;
+
+        const int itemIndex =
+            indexByArea[area];
+
+        if (activeCount >= MAX_PULSES)
+        {
+            item->running =
+                false;
+
+            LOG_EF(
+                "PulseOutputManager",
+                "Active list full"
+            );
+
+            return false;
+        }
+
+        activeList[
+            activeCount
+        ] =
+            static_cast<uint8_t>(
+                itemIndex
+            );
+
+        ++activeCount;
+
+        if (callback)
+        {
+            callback(
+                item->pulse,
+                true
+            );
+        }
+
+        LOG_DF(
+            "PulseOutputManager",
+            "Pulse started: area=%d time=%lu",
+            area,
+            item->pulse.pulseTime
+        );
+
+        return true;
+    }
+
+
+    bool start(
+        int area)
+    {
+        return start(
+            area,
+            millis()
+        );
+    }
+
+
+    // ========================================================================
+    // STOP
+    // ========================================================================
+
+    bool stop(
+        int area)
+    {
+        Item* item =
+            get(
+                area
+            );
+
+        if (!item)
+        {
+            return false;
+        }
+
+        if (!item->running)
+        {
+            return true;
+        }
+
+        const int itemIndex =
+            indexByArea[area];
+
+        item->running =
+            false;
+
+        item->startedAt =
+            0;
+
+        removeActiveIndex(
+            itemIndex
+        );
+
+        if (callback)
+        {
+            callback(
+                item->pulse,
+                false
+            );
+        }
+
+        LOG_DF(
+            "PulseOutputManager",
+            "Pulse stopped: area=%d",
+            area
+        );
+
+        return true;
+    }
+
+
+    // ========================================================================
+    // UPDATE
+    // ========================================================================
+
+    void update(
+        unsigned long now)
+    {
+        uint8_t activePosition =
+            0;
+
+        while (
+            activePosition <
+            activeCount
+        )
+        {
+            const uint8_t itemIndex =
+                activeList[
+                    activePosition
+                ];
+
+            Item& item =
+                items[
+                    itemIndex
+                ];
+
+            if (!item.running)
+            {
+                activeList[
+                    activePosition
+                ] =
+                    activeList[
+                        --activeCount
+                    ];
+
+                continue;
+            }
+
+            if (
+                static_cast<unsigned long>(
+                    now -
+                    item.startedAt
+                ) <
+                item.pulse.pulseTime
+            )
+            {
+                ++activePosition;
+
+                continue;
+            }
+
+            item.running =
+                false;
+
+            item.startedAt =
+                0;
+
+            if (callback)
+            {
+                callback(
+                    item.pulse,
+                    false
+                );
+            }
+
+            LOG_DF(
+                "PulseOutputManager",
+                "Pulse expired: area=%d",
+                item.pulse.area
+            );
+
+            activeList[
+                activePosition
+            ] =
+                activeList[
+                    --activeCount
+                ];
+        }
+    }
+
+
+    void update()
+    {
+        update(
+            millis()
+        );
+    }
+
+
+    // ========================================================================
+    // STATUS
+    // ========================================================================
+
+    bool isRunning(
+        int area) const
+    {
+        const Item* item =
+            get(
+                area
+            );
+
+        return
+            item &&
+            item->running;
+    }
+
+
+    bool hasActivePulses() const
+    {
+        return
+            activeCount > 0;
+    }
+
+
+private:
+
+    void removeActiveIndex(
+        int itemIndex)
+    {
+        for (
+            uint8_t activePosition = 0;
+            activePosition < activeCount;
+            ++activePosition
+        )
+        {
+            if (
+                activeList[
+                    activePosition
+                ] != itemIndex
+            )
+            {
+                continue;
+            }
+
+            activeList[
+                activePosition
+            ] =
+                activeList[
+                    --activeCount
+                ];
+
+            return;
+        }
+    }
+};
+
 class Errors {
 public:
     using StateChangedFn = std::function<void()>;
@@ -1268,50 +1819,6 @@ private:
 
     BlinkState m_blink[CHANNEL_COUNT];
 };
-
-/*
-class ButtonManager {
-public:
-    struct ButtonState {
-        bool pressedNow = false;
-        bool pressedAtStartup = false;  // evento una tantum
-    };
-
-private:
-    int pin;
-    bool startupState = false;
-    bool startupConsumed = false;   // <-- AGGIUNTO
-    bool lastState = false;
-
-public:
-        ButtonManager(int pin) : pin(pin) {}
-
-        void begin() {
-            pinMode(pin, INPUT);  // Opta: NO pullup
-            delay(50);            // stabilizzazione PC13
-
-            startupState = (digitalRead(pin) == LOW);
-            lastState = startupState;
-        }
-
-        ButtonState update(unsigned long now) {
-            ButtonState st;
-
-            bool nowState = (digitalRead(pin) == LOW);
-
-            // fronte di discesa
-            st.pressedNow = (nowState && !lastState);
-
-            // evento startup → SOLO UNA VOLTA
-            if (!startupConsumed && startupState) {
-                st.pressedAtStartup = true;
-                startupConsumed = true;   // <-- evita ripetizioni
-            }
-
-            lastState = nowState;
-            return st;
-        }
-}; */
 
 class ButtonManager {
 public:

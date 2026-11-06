@@ -408,32 +408,92 @@ public:
     {
     public:
 
+        // ====================================================================
+        // CALLBACK TYPES
+        // ====================================================================
+
         Fn callback = nullptr;
 
         FnCtx callbackCtx = nullptr;
 
         void* userCtx = nullptr;
 
-        unsigned long interval;
-        unsigned long lastRun;
+
+        // ====================================================================
+        // SCHEDULING
+        // ====================================================================
+
+        unsigned long interval = 0;
+
+        unsigned long lastRun = 0;
+
+
+        // ====================================================================
+        // INTROSPECTION LIMITS
+        // ====================================================================
+        //
+        // Questi array non duplicano la configurazione operativa.
+        //
+        // Contengono solamente una vista strutturale delle aree utilizzate
+        // dall'automazione dinamica, necessaria per:
+        //
+        //   - diagnostica
+        //   - introspection
+        //   - semantic resolver
+        //   - frontend automatici
+        //
+        // Nessun buffer e nessuna AREA_* vengono cablati nella classe.
+        //
+        // ====================================================================
+
+        static constexpr uint8_t MAX_INPUT_AREAS = 16;
+
+        static constexpr uint8_t MAX_OUTPUT_AREAS = 8;
+
+
+        // ====================================================================
+        // INTROSPECTION METADATA
+        // ====================================================================
+
+        const char* name = nullptr;
+
+        int inputAreas[MAX_INPUT_AREAS];
+
+        int outputAreas[MAX_OUTPUT_AREAS];
+
+        uint8_t inputAreaCount = 0;
+
+        uint8_t outputAreaCount = 0;
+
+
+        // ====================================================================
+        // READY
+        // ====================================================================
 
         inline bool isReady(
-            unsigned long now
-        ) const
+            unsigned long now) const
         {
-            return (now - lastRun) >= interval;
+            return
+                (now - lastRun) >= interval;
         }
+
+
+        // ====================================================================
+        // RUN
+        // ====================================================================
 
         inline void run(
             AutomationEngine::SchedulerContext* ctx,
-            unsigned long now
-        )
+            unsigned long now)
         {
             lastRun = now;
 
             if (callback)
             {
-                callback(ctx, now);
+                callback(
+                    ctx,
+                    now
+                );
             }
             else if (callbackCtx)
             {
@@ -445,29 +505,217 @@ public:
             }
         }
 
+
+        // ====================================================================
+        // SET NAME
+        // ====================================================================
+        //
+        // Il puntatore deve riferirsi a una stringa con durata almeno pari
+        // a quella della DynamicAutomation.
+        //
+        // ====================================================================
+
+        void setName(
+            const char* automationName)
+        {
+            name = automationName;
+        }
+
+
+        // ====================================================================
+        // ADD INPUT AREA
+        // ====================================================================
+
+        bool addInputArea(
+            int area)
+        {
+            if (area < 0)
+                return false;
+
+            /*
+            * Evita duplicati.
+            */
+
+            for (uint8_t i = 0;
+                i < inputAreaCount;
+                i++)
+            {
+                if (inputAreas[i] == area)
+                    return true;
+            }
+
+            if (inputAreaCount >=
+                MAX_INPUT_AREAS)
+            {
+                return false;
+            }
+
+            inputAreas[inputAreaCount++] =
+                area;
+
+            return true;
+        }
+
+
+        // ====================================================================
+        // ADD OUTPUT AREA
+        // ====================================================================
+
+        bool addOutputArea(
+            int area)
+        {
+            if (area < 0)
+                return false;
+
+            /*
+            * Evita duplicati.
+            */
+
+            for (uint8_t i = 0;
+                i < outputAreaCount;
+                i++)
+            {
+                if (outputAreas[i] == area)
+                    return true;
+            }
+
+            if (outputAreaCount >=
+                MAX_OUTPUT_AREAS)
+            {
+                return false;
+            }
+
+            outputAreas[outputAreaCount++] =
+                area;
+
+            return true;
+        }
+
+
+        // ====================================================================
+        // HAS INPUT AREA
+        // ====================================================================
+
+        bool hasInputArea(
+            int area) const
+        {
+            if (area < 0)
+                return false;
+
+            for (uint8_t i = 0;
+                i < inputAreaCount;
+                i++)
+            {
+                if (inputAreas[i] == area)
+                    return true;
+            }
+
+            return false;
+        }
+
+
+        // ====================================================================
+        // HAS OUTPUT AREA
+        // ====================================================================
+
+        bool hasOutputArea(
+            int area) const
+        {
+            if (area < 0)
+                return false;
+
+            for (uint8_t i = 0;
+                i < outputAreaCount;
+                i++)
+            {
+                if (outputAreas[i] == area)
+                    return true;
+            }
+
+            return false;
+        }
+
+
+        // ====================================================================
+        // IS TECHNICAL STATE AREA
+        // ====================================================================
+        //
+        // Un'area utilizzata dalla stessa automazione sia come ingresso
+        // sia come uscita è candidata a stato tecnico interno.
+        //
+        // ====================================================================
+
+        bool isTechnicalStateArea(
+            int area) const
+        {
+            return
+                hasInputArea(area) &&
+                hasOutputArea(area);
+        }
+
+
+        // ====================================================================
+        // CONSTRUCTOR: CALLBACK WITHOUT USER CONTEXT
+        // ====================================================================
+
         DynamicAutomation(
             Fn fn,
-            unsigned long ms
-        )
+            unsigned long ms)
             : callback(fn),
-              callbackCtx(nullptr),
-              userCtx(nullptr),
-              interval(ms),
-              lastRun(0)
+            callbackCtx(nullptr),
+            userCtx(nullptr),
+            interval(ms),
+            lastRun(0),
+            name(nullptr),
+            inputAreaCount(0),
+            outputAreaCount(0)
         {
+            initializeAreaStorage();
         }
+
+
+        // ====================================================================
+        // CONSTRUCTOR: CALLBACK WITH USER CONTEXT
+        // ====================================================================
 
         DynamicAutomation(
             FnCtx fn,
             void* ctx,
-            unsigned long ms
-        )
+            unsigned long ms)
             : callback(nullptr),
-              callbackCtx(fn),
-              userCtx(ctx),
-              interval(ms),
-              lastRun(0)
+            callbackCtx(fn),
+            userCtx(ctx),
+            interval(ms),
+            lastRun(0),
+            name(nullptr),
+            inputAreaCount(0),
+            outputAreaCount(0)
         {
+            initializeAreaStorage();
+        }
+
+
+    private:
+
+        // ====================================================================
+        // INITIALIZE AREA STORAGE
+        // ====================================================================
+
+        void initializeAreaStorage()
+        {
+            for (uint8_t i = 0;
+                i < MAX_INPUT_AREAS;
+                i++)
+            {
+                inputAreas[i] = -1;
+            }
+
+            for (uint8_t i = 0;
+                i < MAX_OUTPUT_AREAS;
+                i++)
+            {
+                outputAreas[i] = -1;
+            }
         }
     };
 

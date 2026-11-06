@@ -49,6 +49,7 @@ enum class SensorCategory {
     SMOKE,
     TAMPER,
     PANIC,
+    CAMERA,
     OTHER
 };
 
@@ -1227,6 +1228,7 @@ public:
         bool smoke = false;
         bool windowsOpen = false;
         bool doorsOpen = false;
+        bool camera = false;
     };
 
     struct AggregateState
@@ -1236,6 +1238,7 @@ public:
         bool mask = false;
         bool tamper = false;
         bool panic = false;
+        bool camera = false;
     };
 
     struct ProcessResult
@@ -1357,6 +1360,18 @@ public:
 
                     break;
                 }
+
+                case SensorCategory::CAMERA:
+                {
+                    st.normal.camera |=
+                        out.rt || out.h24;
+
+                    st.mem.camera |=
+                        out.rtMem || out.h24Mem;
+
+                    break;
+                }
+
 
                 case SensorCategory::WINDOW:
                     st.normal.windowsOpen |=

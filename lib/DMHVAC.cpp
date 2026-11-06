@@ -483,7 +483,9 @@ void HeatPumpController::Diagnostic::Report(const HeatPumpController& hp) {
         Serial.print(z->getName());
         Serial.print(" | T=");
         Serial.print(z->getTemperature());
-        Serial.print("°C | SP=");
+        Serial.print("°C | H=");
+        Serial.print(z->getHumidity());
+        Serial.print("% | SP=");
         Serial.print(z->getSetpoint());
         Serial.print("°C | ");
 

@@ -40,6 +40,47 @@
 class DomoIntrospection
 {
 public:
+    // ========================================================================
+    // PHYSICAL I/O TYPE
+    // ========================================================================
+    //
+    // Descrive il ruolo fisico dell'area all'interno del profilo device.
+    //
+    // Il valore viene ricavato strutturalmente da:
+    //
+    //     DeviceConfig.profile
+    //         -> DeviceProfiles
+    //             -> GenericPrgDeviceChannel.type
+    //
+    // Non viene dedotto:
+    //
+    //     - dalla label
+    //     - dal numero area
+    //     - dai prefissi testuali "DI:" / "DO:"
+    //     - dal tipo semantico Home Assistant
+    //
+    // ========================================================================
+
+    enum class IOType
+    {
+        UNKNOWN,
+
+        DIGITAL_INPUT,
+        DIGITAL_OUTPUT,
+
+        ANALOG_INPUT,
+        ANALOG_OUTPUT,
+
+        VIRTUAL
+    };
+
+    enum class EntityGroup : uint8_t
+    {
+        ROOT = 0,
+        PHYSICAL_DEVICE,
+        SECURITY,
+        SOLAR
+    };
 
     // ========================================================================
     // ENTITY KIND
@@ -57,7 +98,7 @@ public:
         CLIMATE,
         BUTTON,
         NUMBER,
-
+        TEXT,
         STATUS
     };
 
@@ -73,8 +114,10 @@ public:
         SECURITY,
         HVAC,
         AVERAGE,
+        SOLAR,
         POWER,
         AEE,
+        RUNTIME,
         EXTERNAL_SOURCE
     };
 
@@ -126,7 +169,23 @@ public:
         // DOMOMANAGER
         // --------------------------------------------------------------------
 
-        const DomoManagerConfig* domo = nullptr;
+        const DomoManagerConfig*
+            domo = nullptr;
+
+
+        // --------------------------------------------------------------------
+        // DEVICE PROFILES
+        // --------------------------------------------------------------------
+        //
+        // Deve puntare alla stessa istanza utilizzata dal runtime Modbus.
+        //
+        // In questo modo l'introspection vede anche gli eventuali profili
+        // custom registrati durante l'inizializzazione.
+        //
+        // --------------------------------------------------------------------
+
+        const DeviceProfiles*
+            deviceProfiles = nullptr;
 
 
         // --------------------------------------------------------------------
@@ -156,6 +215,9 @@ public:
         Buffer*
             buffer = nullptr;
 
+        DMRuntimeStore*
+            runtimeStore = nullptr;
+
         AverageCalculator*
             averages = nullptr;
 
@@ -172,11 +234,20 @@ public:
 
 
         // --------------------------------------------------------------------
-        // WEB API
+        // OTHERS
         // --------------------------------------------------------------------
 
         const FrontendConfig::webApiDeviceMessaging*
             webApi = nullptr;
+
+        const FrontendConfig::HVAC* hvac = nullptr;
+
+        const FrontendConfig::Averages*
+            averagesConfig = nullptr;
+
+        const FrontendConfig::Solar*
+            solar = nullptr;
+
     };
 
 
@@ -189,6 +260,47 @@ public:
     // I dati originali restano in AreaConfig / DeviceConfig.
     //
     // ========================================================================
+    struct ClimateInfo
+    {
+        int setpointArea = -1;
+
+        int temperatureArea = -1;
+
+        int humidityArea = -1;
+
+        int fanCoilId = -1;
+    };
+
+    struct NumberConfig
+    {
+        enum class Mode
+        {
+            AUTO,
+            BOX,
+            SLIDER
+        };
+
+        bool enabled = false;
+
+        float minimumValue = 0.0f;
+        float maximumValue = 100.0f;
+
+        float stepValue = 1.0f;
+
+        float scale = 1.0f;
+
+        uint8_t displayDecimals = 0;
+
+        Mode mode = Mode::BOX;
+
+        bool valid() const
+        {
+            return
+                maximumValue >= minimumValue &&
+                stepValue > 0.0f &&
+                scale > 0.0f;
+        }
+    };
 
     struct Entity
     {
@@ -204,6 +316,30 @@ public:
         EntityOrigin origin =
             EntityOrigin::AREA;
 
+        EntityGroup group =
+            EntityGroup::ROOT;
+
+        // --------------------------------------------------------------------
+        // TIPO FISICO
+        // --------------------------------------------------------------------
+        //
+        // Indica il ruolo fisico del canale da cui deriva l'area:
+        //
+        //   DI -> DIGITAL_INPUT
+        //   DO -> DIGITAL_OUTPUT
+        //   AI -> ANALOG_INPUT
+        //   AO -> ANALOG_OUTPUT
+        //
+        // Le aree senza device fisico possono essere marcate VIRTUAL.
+        //
+        // UNKNOWN indica che l'introspection non possiede ancora elementi
+        // sufficienti per determinare il tipo fisico.
+        //
+        // --------------------------------------------------------------------
+
+        IOType ioType =
+            IOType::UNKNOWN;
+
 
         // --------------------------------------------------------------------
         // RIFERIMENTI ORIGINALI
@@ -216,6 +352,33 @@ public:
             device = nullptr;
 
         int deviceIndex = -1;
+
+        DMRuntimeStore::Handle
+            runtimeHandle =
+                DMRuntimeStore::INVALID_HANDLE;
+
+        const DMRuntimeStore::Entry*
+            runtimeEntry =
+                nullptr;
+
+        // --------------------------------------------------------------------
+        // POSIZIONE NEL DEVICE
+        // --------------------------------------------------------------------
+        //
+        // Indice dell'area all'interno dell'array areas[] del device.
+        //
+        // Esempio:
+        //
+        //   MA01_AXCX4020
+        //
+        //   areas[0..3] -> DI
+        //   areas[4..5] -> DO
+        //
+        // Serve per correlare deterministicamente l'area con il profilo.
+        //
+        // --------------------------------------------------------------------
+
+        int deviceAreaIndex = -1;
 
 
         // --------------------------------------------------------------------
@@ -265,6 +428,13 @@ public:
 
 
         // --------------------------------------------------------------------
+        // RUOLO STRUTTURALE
+        // --------------------------------------------------------------------
+
+        bool isTechnicalState = false;
+
+
+        // --------------------------------------------------------------------
         // INTEGRAZIONI
         // --------------------------------------------------------------------
 
@@ -274,21 +444,24 @@ public:
 
 
         // --------------------------------------------------------------------
-        // ALTRE SORGENTI SEMANTICHE
+        // SORGENTI SPECIALISTICHE
         // --------------------------------------------------------------------
 
         bool fromSecurity = false;
         bool fromHVAC = false;
         bool fromAverage = false;
         bool fromPower = false;
-
+        bool fromSolar = false;
 
         // --------------------------------------------------------------------
         // SCALING
         // --------------------------------------------------------------------
 
         float scale = 1.0f;
+        NumberConfig number;
 
+
+        ClimateInfo climate;
 
         // --------------------------------------------------------------------
         // HELPERS
@@ -299,12 +472,63 @@ public:
             return areaCfg != nullptr;
         }
 
+
         bool hasDevice() const
         {
             return device != nullptr;
         }
-    };
 
+
+        bool isInput() const
+        {
+            return
+                ioType == IOType::DIGITAL_INPUT ||
+                ioType == IOType::ANALOG_INPUT;
+        }
+
+
+        bool isOutput() const
+        {
+            return
+                ioType == IOType::DIGITAL_OUTPUT ||
+                ioType == IOType::ANALOG_OUTPUT;
+        }
+
+
+        bool isDigitalInput() const
+        {
+            return
+                ioType == IOType::DIGITAL_INPUT;
+        }
+
+
+        bool isDigitalOutput() const
+        {
+            return
+                ioType == IOType::DIGITAL_OUTPUT;
+        }
+
+
+        bool isAnalogInput() const
+        {
+            return
+                ioType == IOType::ANALOG_INPUT;
+        }
+
+
+        bool isAnalogOutput() const
+        {
+            return
+                ioType == IOType::ANALOG_OUTPUT;
+        }
+
+
+        bool isVirtual() const
+        {
+            return
+                ioType == IOType::VIRTUAL;
+        }
+    };
 
     // ========================================================================
     // RELATION
@@ -378,8 +602,8 @@ public:
         const DeviceMessageProfile*
             webApiProfile = nullptr;
 
-        const DeviceMessageProfile::InToRegistryMap*
-            webApiMap = nullptr;
+        const WebApiDevice*
+            webApiDevice = nullptr;
     };
 
 
@@ -487,15 +711,76 @@ public:
     // ========================================================================
     // BUILD COMPLETO
     // ========================================================================
-   
-    void build(const Context& ctx)
+    //
+    // Unico percorso consentito per costruire DomoIntrospection.
+    //
+    // Dipendenze obbligatorie:
+    //
+    //   - DomoManagerConfig
+    //   - DeviceProfiles
+    //
+    // Dipendenze opzionali:
+    //
+    //   - AutomationEngine
+    //   - AEERegistry
+    //   - Buffer
+    //   - AverageCalculator
+    //   - TimeManager
+    //   - MQTT
+    //   - WebAPI
+    //
+    // ========================================================================
+
+    void build(
+        const Context& ctx)
     {
+        // --------------------------------------------------------------------
+        // RESET
+        // --------------------------------------------------------------------
+
         clear();
 
-        _ctx = ctx;
+        _ctx =
+            ctx;
+
+
+        // --------------------------------------------------------------------
+        // REQUIRED: DOMOMANAGER CONFIG
+        // --------------------------------------------------------------------
 
         if (!_ctx.domo)
+        {
+            LOG_E(
+                "DomoIntrospection",
+                "Build FULL fallita: domo == nullptr"
+            );
+
             return;
+        }
+
+
+        // --------------------------------------------------------------------
+        // REQUIRED: DEVICE PROFILES
+        // --------------------------------------------------------------------
+
+        if (!_ctx.deviceProfiles)
+        {
+            LOG_E(
+                "DomoIntrospection",
+                "Build FULL fallita: deviceProfiles == nullptr"
+            );
+
+            return;
+        }
+
+
+        LOG_IF(
+            "DomoIntrospection",
+            "Build FULL avviata: devices=%u",
+            static_cast<unsigned>(
+                _ctx.domo->devices.list.size()
+            )
+        );
 
 
         // --------------------------------------------------------------------
@@ -507,7 +792,8 @@ public:
         );
 
         inspectDevices(
-            _ctx.domo->devices
+            _ctx.domo->devices,
+            *_ctx.deviceProfiles
         );
 
         inspectRoutes(
@@ -571,53 +857,117 @@ public:
         }
 
 
-        finalize();
-    }
+        // --------------------------------------------------------------------
+        // HVAC
+        // --------------------------------------------------------------------
 
+        if (_ctx.hvac)
+        {
+            inspectHVAC(
+                *_ctx.hvac
+            );
+        }
 
-    // ========================================================================
-    // BUILD MINIMO
-    // ========================================================================
-    //
-    // Utilizzato attualmente da DMRuntime:
-    //
-    //     introspection.build(config);
-    //
-    // ========================================================================
+        if (_ctx.averagesConfig)
+        {
+            inspectAverages(
+                *_ctx.averagesConfig
+            );
+        }
 
-    void build(const DomoManagerConfig& cfg)
-    {
-        clear();
+        if (_ctx.solar)
+        {
+            inspectSolar(
+                *_ctx.solar
+            );
+        }
 
-        _ctx = Context{};
+        if (_ctx.runtimeStore)
+        {
+            inspectRuntimeStore();
+        }
 
-        _ctx.domo = &cfg;
-
-
-        inspectAreas(
-            cfg.areas
-        );
-
-        inspectDevices(
-            cfg.devices
-        );
-
-        inspectRoutes(
-            cfg.routes
-        );
-
-        inspectToggles(
-            cfg.toggles
-        );
-
-        inspectSplits(
-            cfg.splits
-        );
-
+        // --------------------------------------------------------------------
+        // FINALIZE
+        // --------------------------------------------------------------------
 
         finalize();
-    }
 
+
+        // --------------------------------------------------------------------
+        // IO SUMMARY
+        // --------------------------------------------------------------------
+
+        size_t digitalInputs = 0;
+        size_t digitalOutputs = 0;
+        size_t analogInputs = 0;
+        size_t analogOutputs = 0;
+        size_t virtualAreas = 0;
+        size_t unknownIO = 0;
+
+
+        for (const Entity& entity :
+            _entities)
+        {
+            switch (entity.ioType)
+            {
+                case IOType::DIGITAL_INPUT:
+                    ++digitalInputs;
+                    break;
+
+                case IOType::DIGITAL_OUTPUT:
+                    ++digitalOutputs;
+                    break;
+
+                case IOType::ANALOG_INPUT:
+                    ++analogInputs;
+                    break;
+
+                case IOType::ANALOG_OUTPUT:
+                    ++analogOutputs;
+                    break;
+
+                case IOType::VIRTUAL:
+                    ++virtualAreas;
+                    break;
+
+                case IOType::UNKNOWN:
+                default:
+                    ++unknownIO;
+                    break;
+            }
+        }
+
+
+        LOG_IF(
+            "DomoIntrospection",
+            "Build FULL completata: "
+            "entities=%u DI=%u DO=%u AI=%u AO=%u "
+            "virtual=%u unknownIO=%u",
+            static_cast<unsigned>(
+                _entities.size()
+            ),
+            static_cast<unsigned>(
+                digitalInputs
+            ),
+            static_cast<unsigned>(
+                digitalOutputs
+            ),
+            static_cast<unsigned>(
+                analogInputs
+            ),
+            static_cast<unsigned>(
+                analogOutputs
+            ),
+            static_cast<unsigned>(
+                virtualAreas
+            ),
+            static_cast<unsigned>(
+                unknownIO
+            )
+        );
+    }
+    
 
     // ========================================================================
     // CLEAR
@@ -735,13 +1085,37 @@ public:
         const Entity* entity =
             findEntity(area);
 
+        // ----------------------------------------------------
+        // HVAC virtual entities
+        // ----------------------------------------------------
+
+        if (entity &&
+            entity->origin ==
+                EntityOrigin::HVAC)
+        {
+            const int index =
+                (-1000 - area);
+
+            if (_ctx.hvac &&
+                index >= 0 &&
+                static_cast<size_t>(index) <
+                    _ctx.hvac->zoneCount)
+            {
+                return
+                    _ctx.hvac->zones[index].name;
+            }
+        }
+
+        // ----------------------------------------------------
+        // Normal areas
+        // ----------------------------------------------------
+
         if (entity &&
             entity->areaCfg &&
             entity->areaCfg->label.length() > 0)
         {
             return entity->areaCfg->label.c_str();
         }
-
 
         return getRegistryAreaName(area);
     }
@@ -994,7 +1368,7 @@ public:
 
 
 private:
-
+    
     // ========================================================================
     // STORAGE
     // ========================================================================
@@ -1056,50 +1430,471 @@ private:
         }
     }
 
+    // ========================================================================
+    // MAP DEVICE CHANNEL TYPE
+    // ========================================================================
+    //
+    // Converte il tipo fisico definito nel DeviceProfiles nel tipo I/O
+    // indipendente utilizzato da DomoIntrospection.
+    //
+    // Il parametro viene ricevuto come int per mantenere compatibilità con
+    // enum non scoped ed evitare dipendenze dal nome concreto del tipo enum.
+    //
+    // ========================================================================
+
+    static IOType mapChannelType(
+        int channelType)
+    {
+        switch (channelType)
+        {
+            case GenericPrgDevice::DI:
+            {
+                return
+                    IOType::DIGITAL_INPUT;
+            }
+
+            case GenericPrgDevice::DO:
+            {
+                return
+                    IOType::DIGITAL_OUTPUT;
+            }
+
+            case GenericPrgDevice::AI:
+            {
+                return
+                    IOType::ANALOG_INPUT;
+            }
+
+            case GenericPrgDevice::AO:
+            {
+                return
+                    IOType::ANALOG_OUTPUT;
+            }
+
+            default:
+            {
+                return
+                    IOType::UNKNOWN;
+            }
+        }
+    }
+
+    
 
     // ========================================================================
-    // DEVICES
+    // INSPECT DEVICES
     // ========================================================================
     //
-    // ATTENZIONE:
+    // Associa ciascuna area al relativo device e determina il tipo fisico
+    // utilizzando il profilo registrato in DeviceProfiles.
     //
-    // Non inseriamo DEVICE_AREA nelle relations.
+    // La correlazione è posizionale:
     //
-    // L'associazione area -> device è già contenuta in Entity.
+    //     device.areas[]
+    //
+    // viene associato alla sequenza ottenuta espandendo:
+    //
+    //     profile[].items
+    //
+    // Esempio:
+    //
+    //     MA01_AXCX4020:
+    //
+    //         DI items=4
+    //         DO items=2
+    //
+    //     device.areas:
+    //
+    //         15, 16, 17, 18, 19, 20
+    //
+    // Risultato:
+    //
+    //         15 -> DIGITAL_INPUT
+    //         16 -> DIGITAL_INPUT
+    //         17 -> DIGITAL_INPUT
+    //         18 -> DIGITAL_INPUT
+    //         19 -> DIGITAL_OUTPUT
+    //         20 -> DIGITAL_OUTPUT
+    //
+    // startingAddr e ItemsPerCall riguardano il protocollo Modbus e non
+    // modificano la corrispondenza posizionale con device.areas[].
+    //
+    // Non vengono utilizzati:
+    //
+    //     - label delle aree
+    //     - prefissi testuali DI: / DO:
+    //     - numeri area cablati
+    //     - nomi specifici dei device
     //
     // ========================================================================
 
     void inspectDevices(
-        const DomoManagerConfig::Devices& cfg)
+        const DomoManagerConfig::Devices& cfg,
+        const DeviceProfiles& deviceProfiles)
     {
         for (size_t deviceIndex = 0;
-             deviceIndex < cfg.list.size();
-             deviceIndex++)
+            deviceIndex < cfg.list.size();
+            ++deviceIndex)
         {
-            const auto& device =
+            const DomoManagerConfig::Devices::Device& device =
                 cfg.list[deviceIndex];
 
 
-            for (int area :
-                 device.areas)
+            // ================================================================
+            // PROFILE LOOKUP
+            // ================================================================
+
+            const std::vector<DeviceProfiles::Channel>* profile =
+                deviceProfiles.get(
+                    device.profile.c_str()
+                );
+
+
+            // ================================================================
+            // PROFILE NOT FOUND
+            // ================================================================
+
+            if (!profile)
             {
-                Entity& entity =
-                    ensureEntity(area);
+                LOG_EF(
+                    "DomoIntrospection",
+                    "Profilo non trovato: "
+                    "device='%s' profile='%s'",
+                    device.name.c_str(),
+                    device.profile.c_str()
+                );
 
+                /*
+                * Le aree vengono comunque associate al device,
+                * mantenendo IOType::UNKNOWN.
+                */
 
-                if (!entity.device)
+                for (size_t areaIndex = 0;
+                    areaIndex < device.areas.size();
+                    ++areaIndex)
                 {
-                    entity.device =
-                        &device;
+                    const int area =
+                        device.areas[areaIndex];
 
-                    entity.deviceIndex =
-                        static_cast<int>(
-                            deviceIndex
+                    if (area < 0)
+                        continue;
+
+
+                    Entity& entity =
+                        ensureEntity(
+                            area
                         );
+
+
+                    if (!entity.device)
+                    {
+                        entity.device =
+                            &device;
+
+                        entity.deviceIndex =
+                            static_cast<int>(
+                                deviceIndex
+                            );
+
+                        entity.deviceAreaIndex =
+                            static_cast<int>(
+                                areaIndex
+                            );
+                    }
+
+
+                    if (entity.ioType ==
+                        IOType::UNKNOWN)
+                    {
+                        entity.ioType =
+                            IOType::UNKNOWN;
+                    }
                 }
+
+                continue;
+            }
+
+
+            // ================================================================
+            // EXPANDED AREA INDEX
+            // ================================================================
+            //
+            // Posizione corrente dentro device.areas[].
+            //
+            // ================================================================
+
+            size_t deviceAreaIndex =
+                0;
+
+
+            // ================================================================
+            // PROFILE CHANNELS
+            // ================================================================
+
+            for (size_t channelIndex = 0;
+                channelIndex < profile->size();
+                ++channelIndex)
+            {
+                const DeviceProfiles::Channel& channel =
+                    (*profile)[channelIndex];
+
+
+                // ------------------------------------------------------------
+                // PHYSICAL TYPE
+                // ------------------------------------------------------------
+
+                const IOType channelIOType =
+                    mapChannelType(
+                        static_cast<int>(
+                            channel.type
+                        )
+                    );
+
+
+                // ------------------------------------------------------------
+                // CHANNEL ITEM COUNT
+                // ------------------------------------------------------------
+
+                if (channel.items <= 0)
+                {
+                    LOG_WF(
+                        "DomoIntrospection",
+                        "Canale profilo senza elementi: "
+                        "device='%s' profile='%s' "
+                        "channel=%u items=%d",
+                        device.name.c_str(),
+                        device.profile.c_str(),
+                        static_cast<unsigned>(
+                            channelIndex
+                        ),
+                        channel.items
+                    );
+
+                    continue;
+                }
+
+
+                const size_t channelItems =
+                    static_cast<size_t>(
+                        channel.items
+                    );
+
+
+                // ------------------------------------------------------------
+                // EXPAND CHANNEL ITEMS
+                // ------------------------------------------------------------
+
+                for (size_t itemIndex = 0;
+                    itemIndex < channelItems;
+                    ++itemIndex)
+                {
+                    // --------------------------------------------------------
+                    // DEVICE AREAS EXHAUSTED
+                    // --------------------------------------------------------
+
+                    if (deviceAreaIndex >=
+                        device.areas.size())
+                    {
+                        LOG_WF(
+                            "DomoIntrospection",
+                            "Profilo con più elementi delle aree: "
+                            "device='%s' profile='%s' "
+                            "channel=%u item=%u "
+                            "expandedIndex=%u areas=%u",
+                            device.name.c_str(),
+                            device.profile.c_str(),
+                            static_cast<unsigned>(
+                                channelIndex
+                            ),
+                            static_cast<unsigned>(
+                                itemIndex
+                            ),
+                            static_cast<unsigned>(
+                                deviceAreaIndex
+                            ),
+                            static_cast<unsigned>(
+                                device.areas.size()
+                            )
+                        );
+
+                        break;
+                    }
+
+
+                    // --------------------------------------------------------
+                    // AREA
+                    // --------------------------------------------------------
+
+                    const int area =
+                        device.areas[
+                            deviceAreaIndex
+                        ];
+
+
+                    if (area >= 0)
+                    {
+                        Entity& entity =
+                            ensureEntity(
+                                area
+                            );
+
+
+                        // ====================================================
+                        // DEVICE ASSOCIATION
+                        // ====================================================
+
+                        if (!entity.device)
+                        {
+                            entity.device =
+                                &device;
+
+                            entity.deviceIndex =
+                                static_cast<int>(
+                                    deviceIndex
+                                );
+
+                            entity.deviceAreaIndex =
+                                static_cast<int>(
+                                    deviceAreaIndex
+                                );
+                        }
+                        else if (entity.device !=
+                                &device)
+                        {
+                            LOG_WF(
+                                "DomoIntrospection",
+                                "Area associata a più device: "
+                                "area=%d current='%s' new='%s'",
+                                area,
+                                entity.device->name.c_str(),
+                                device.name.c_str()
+                            );
+                        }
+
+
+                        // ====================================================
+                        // PHYSICAL I/O TYPE
+                        // ====================================================
+
+                        if (entity.ioType ==
+                            IOType::UNKNOWN)
+                        {
+                            entity.ioType =
+                                channelIOType;
+                        }
+                        else if (entity.ioType !=
+                                channelIOType)
+                        {
+                            LOG_WF(
+                                "DomoIntrospection",
+                                "Conflitto IOType: "
+                                "area=%d device='%s' "
+                                "profile='%s' "
+                                "existing=%u new=%u",
+                                area,
+                                device.name.c_str(),
+                                device.profile.c_str(),
+                                static_cast<unsigned>(
+                                    entity.ioType
+                                ),
+                                static_cast<unsigned>(
+                                    channelIOType
+                                )
+                            );
+                        }
+                    }
+
+
+                    ++deviceAreaIndex;
+                }
+
+
+                /*
+                * Tutte le aree del device sono state associate.
+                */
+
+                if (deviceAreaIndex >=
+                    device.areas.size())
+                {
+                    break;
+                }
+            }
+
+
+            // ================================================================
+            // AREAS NOT COVERED BY PROFILE
+            // ================================================================
+            //
+            // Il device contiene più aree rispetto alla somma di profile.items.
+            //
+            // Le aree residue vengono associate al device, ma mantengono
+            // IOType::UNKNOWN.
+            //
+            // ================================================================
+
+            while (deviceAreaIndex <
+                device.areas.size())
+            {
+                const int area =
+                    device.areas[
+                        deviceAreaIndex
+                    ];
+
+
+                if (area >= 0)
+                {
+                    Entity& entity =
+                        ensureEntity(
+                            area
+                        );
+
+
+                    if (!entity.device)
+                    {
+                        entity.device =
+                            &device;
+
+                        entity.deviceIndex =
+                            static_cast<int>(
+                                deviceIndex
+                            );
+
+                        entity.deviceAreaIndex =
+                            static_cast<int>(
+                                deviceAreaIndex
+                            );
+                    }
+
+
+                    if (entity.ioType ==
+                        IOType::UNKNOWN)
+                    {
+                        entity.ioType =
+                            IOType::UNKNOWN;
+                    }
+
+
+                    LOG_WF(
+                        "DomoIntrospection",
+                        "Area senza elemento nel profilo: "
+                        "area=%d device='%s' "
+                        "profile='%s' areaIndex=%u",
+                        area,
+                        device.name.c_str(),
+                        device.profile.c_str(),
+                        static_cast<unsigned>(
+                            deviceAreaIndex
+                        )
+                    );
+                }
+
+
+                ++deviceAreaIndex;
             }
         }
     }
+
+    
 
 
     // ========================================================================
@@ -1586,12 +2381,24 @@ private:
         // DYNAMIC
         // --------------------------------------------------------
         //
-        // DynamicAutomation contiene void* userCtx.
+        // Le DynamicAutomation espongono una vista strutturale
+        // delle aree utilizzate:
         //
-        // Non è sicuro fare RTTI/cast qui senza introdurre
-        // una API esplicita nell'AutomationEngine.
+        //   - inputAreas
+        //   - outputAreas
         //
-        // Per ora la indicizziamo solamente.
+        // Questa vista non contiene configurazioni duplicate,
+        // accessi al Buffer o identificativi cablati.
+        //
+        // L'introspection utilizza i metadati per costruire:
+        //
+        //   - AUTOMATION_INPUT
+        //   - AUTOMATION_OUTPUT
+        //   - isTechnicalState
+        //
+        // Una stessa area presente sia negli input sia negli output
+        // della medesima DynamicAutomation viene considerata uno
+        // stato tecnico interno.
         //
         // --------------------------------------------------------
 
@@ -1605,22 +2412,167 @@ private:
             if (!dynamic)
                 continue;
 
+
+            // ====================================================
+            // AUTOMATION DESCRIPTOR
+            // ====================================================
+
             Automation info;
 
             info.type =
                 AutomationType::RULE;
 
             info.name =
-                nullptr;
+                dynamic->name;
+
+            info.inputCount =
+                dynamic->inputAreaCount;
+
+            info.outputCount =
+                dynamic->outputAreaCount;
 
             info.valid =
                 dynamic->callback ||
                 dynamic->callbackCtx;
 
+
+            // ====================================================
+            // INPUT AREAS
+            // ====================================================
+
+            for (uint8_t inputIndex = 0;
+                inputIndex < dynamic->inputAreaCount;
+                inputIndex++)
+            {
+                const int area =
+                    dynamic->inputAreas[inputIndex];
+
+                if (area < 0)
+                    continue;
+
+                Entity& entity =
+                    ensureEntity(area);
+
+                entity.isAutomationInput = true;
+
+
+                // ------------------------------------------------
+                // TECHNICAL STATE
+                // ------------------------------------------------
+                //
+                // Una stessa area utilizzata dalla medesima
+                // DynamicAutomation sia come input sia come output
+                // rappresenta uno stato tecnico interno.
+                //
+                // ------------------------------------------------
+
+                if (dynamic->hasOutputArea(area))
+                {
+                    entity.isTechnicalState = true;
+                }
+
+
+                // ------------------------------------------------
+                // INPUT RELATION
+                // ------------------------------------------------
+
+                Relation relation;
+
+                relation.type =
+                    RelationType::AUTOMATION_INPUT;
+
+                relation.sourceArea =
+                    area;
+
+                relation.targetArea =
+                    area;
+
+                relation.name =
+                    dynamic->name
+                        ? dynamic->name
+                        : "dynamic";
+
+                relation.index =
+                    static_cast<int>(
+                        inputIndex
+                    );
+
+                _relations.push_back(
+                    relation
+                );
+            }
+
+
+            // ====================================================
+            // OUTPUT AREAS
+            // ====================================================
+
+            for (uint8_t outputIndex = 0;
+                outputIndex < dynamic->outputAreaCount;
+                outputIndex++)
+            {
+                const int area =
+                    dynamic->outputAreas[outputIndex];
+
+                if (area < 0)
+                    continue;
+
+                Entity& entity =
+                    ensureEntity(area);
+
+                entity.isAutomationOutput = true;
+
+
+                // ------------------------------------------------
+                // TECHNICAL STATE
+                // ------------------------------------------------
+
+                if (dynamic->hasInputArea(area))
+                {
+                    entity.isTechnicalState = true;
+                }
+
+
+                // ------------------------------------------------
+                // OUTPUT RELATION
+                // ------------------------------------------------
+
+                Relation relation;
+
+                relation.type =
+                    RelationType::AUTOMATION_OUTPUT;
+
+                relation.sourceArea =
+                    area;
+
+                relation.targetArea =
+                    area;
+
+                relation.name =
+                    dynamic->name
+                        ? dynamic->name
+                        : "dynamic";
+
+                relation.index =
+                    static_cast<int>(
+                        outputIndex
+                    );
+
+                _relations.push_back(
+                    relation
+                );
+            }
+
+
+            // ====================================================
+            // REGISTER AUTOMATION
+            // ====================================================
+
             _automations.push_back(
                 info
             );
         }
+
     }
 
     void inspectAutomation(
@@ -2252,111 +3204,442 @@ private:
         }
     }
 
+    void inspectSolar(
+        const FrontendConfig::Solar& solar)
+    {
+        if (!solar.enabled)
+            return;
+
+        auto registerArea =
+            [&](int area)
+            {
+                if (area < 0)
+                    return;
+
+                Entity& entity =
+                    ensureEntity(area);
+
+                entity.origin =
+                    EntityOrigin::SOLAR;
+
+                entity.fromSolar =
+                    true;
+
+                entity.readable =
+                    true;
+            };
+
+        registerArea(
+            solar.areas.pvVoltage);
+
+        registerArea(
+            solar.areas.pvCurrent);
+
+        registerArea(
+            solar.areas.pvPower);
+
+        registerArea(
+            solar.areas.batteryVoltage);
+
+        registerArea(
+            solar.areas.batterySoc);
+
+        registerArea(
+            solar.areas.gridVoltage);
+
+        registerArea(
+            solar.areas.gridPower);
+
+        registerArea(
+            solar.areas.outputPower);
+
+        registerArea(
+            solar.areas.loadPercent);
+    }
+
+    void inspectRuntimeStore()
+    {
+        if (!_ctx.runtimeStore)
+            return;
+
+        _ctx.runtimeStore->forEach(
+            [&](DMRuntimeStore::Handle handle,
+                const DMRuntimeStore::Entry& entry)
+            {
+                if (!entry.used ||
+                    !entry.publish ||
+                    !entry.id)
+                {
+                    return;
+                }
+
+                Entity entity;
+
+                entity.area =
+                    -1;
+
+                entity.origin =
+                    EntityOrigin::RUNTIME;
+
+                entity.ioType =
+                    IOType::VIRTUAL;
+
+                entity.runtimeHandle =
+                    handle;
+
+                entity.runtimeEntry =
+                    &entry;
+
+                entity.readable =
+                    entry.readable();
+
+                entity.writable =
+                    entry.writable();
+
+                entity.implementationOnly =
+                    false;
+
+                entity.unit =
+                    entry.unit;
+
+                entity.deviceClass =
+                    entry.deviceClass;
+
+                entity.stateClass =
+                    entry.stateClass;
+
+                switch (entry.type)
+                {
+                    case DMRuntimeStore::Type::BOOL:
+                    {
+                        entity.kind =
+                            entry.writable()
+                                ? EntityKind::SWITCH
+                                : EntityKind::BINARY_SENSOR;
+
+                        break;
+                    }
+
+                    case DMRuntimeStore::Type::INT32:
+                    case DMRuntimeStore::Type::FLOAT:
+                    {
+                        entity.kind =
+                            entry.writable()
+                                ? EntityKind::NUMBER
+                                : EntityKind::SENSOR;
+
+                        entity.number.enabled =
+                            entry.writable();
+
+                        entity.number.minimumValue =
+                            entry.minimum;
+
+                        entity.number.maximumValue =
+                            entry.maximum;
+
+                        entity.number.stepValue =
+                            entry.step;
+
+                        entity.number.displayDecimals =
+                            entry.decimals;
+
+                        break;
+                    }
+
+                    case DMRuntimeStore::Type::STRING32:
+                    case DMRuntimeStore::Type::STRING64:
+                    case DMRuntimeStore::Type::JSON128:
+                    case DMRuntimeStore::Type::JSON256:
+                    {
+                        entity.kind =
+                            EntityKind::TEXT;
+
+                        break;
+                    }
+
+                    default:
+                    {
+                        entity.kind =
+                            EntityKind::UNKNOWN;
+
+                        break;
+                    }
+                }
+
+                _entities.push_back(
+                    entity
+                );
+
+                LOG_IF(
+                    "INTROSPECTION",
+                    "Runtime entity: handle=%u id=%s type=%s kind=%s",
+                    static_cast<unsigned>(
+                        handle
+                    ),
+                    entry.id,
+                    DMRuntimeStore::typeToString(
+                        entry.type
+                    ),
+                    entityKindToString(
+                        entity.kind
+                    )
+                );
+            }
+        );
+    }
+
+
+    void inspectAverages(
+        const FrontendConfig::Averages& averages)
+    {
+        if (!averages.enabled)
+            return;
+
+        if (!averages.gruppi ||
+            averages.gruppiCount == 0)
+        {
+            return;
+        }
+
+        for (size_t i = 0;
+            i < averages.gruppiCount;
+            ++i)
+        {
+            const auto& group =
+                averages.gruppi[i];
+
+            if (group.areaOut < 0)
+                continue;
+
+            Entity& entity =
+                ensureEntity(
+                    group.areaOut
+                );
+
+            entity.origin =
+                EntityOrigin::AVERAGE;
+
+            entity.fromAverage =
+                true;
+
+            entity.ioType =
+                IOType::VIRTUAL;
+
+            entity.readable =
+                true;
+
+            entity.writable =
+                false;
+
+            /*
+            * AverageCalculator memorizza nel Buffer:
+            *
+            *     valoreBuffer = valoreReale * outScale
+            *
+            * La pubblicazione deve quindi applicare:
+            *
+            *     valoreReale = valoreBuffer / outScale
+            */
+            entity.scale =
+                group.outScale > 0.0f
+                    ? 1.0f / group.outScale
+                    : 1.0f;
+
+            LOG_IF(
+                "INTROSPECTION",
+                "Average entity: area=%d name=%s "
+                "outScale=%.3f entityScale=%.3f",
+                group.areaOut,
+                group.nome
+                    ? group.nome
+                    : "?",
+                static_cast<double>(
+                    group.outScale
+                ),
+                static_cast<double>(
+                    entity.scale
+                )
+            );
+        }
+    }
+
+    void inspectHVAC(
+        const FrontendConfig::HVAC& hvac)
+    {
+        if (!hvac.enabled)
+            return;
+
+        if (!hvac.zones)
+            return;
+
+        for (size_t i = 0;
+            i < hvac.zoneCount;
+            ++i)
+        {
+            const auto& zone =
+                hvac.zones[i];
+
+            Entity entity;
+
+            entity.area =
+                -1000 - static_cast<int>(i);
+
+            entity.kind =
+                EntityKind::CLIMATE;
+
+            entity.origin =
+                EntityOrigin::HVAC;
+
+            entity.fromHVAC =
+                true;
+
+            entity.ioType =
+                IOType::VIRTUAL;
+
+            entity.readable =
+                true;
+
+            entity.writable =
+                true;
+
+            entity.climate.temperatureArea =
+                zone.temperatureArea;
+
+            entity.climate.humidityArea =
+                zone.humidityArea;
+
+            entity.climate.setpointArea =
+                zone.setpointArea;
+
+            entity.climate.fanCoilId =
+                zone.fanCoilId;
+
+            _entities.push_back(
+                entity
+            );
+        }
+    }
 
     // ========================================================================
     // WEB API
     // ========================================================================
 
     void inspectWebAPI(
-        const FrontendConfig::webApiDeviceMessaging& webApi)
+        const FrontendConfig::
+            webApiDeviceMessaging& webApi)
     {
-        if (!webApi.groups)
-            return;
+        // ========================================================
+        // CLIENT / POLLING
+        // ========================================================
 
-
-        if (!_ctx.aeeRegistry)
-            return;
-
-
-        for (size_t groupIndex = 0;
-             groupIndex < webApi.groupCount;
-             groupIndex++)
+        if (webApi.client.enabled)
         {
-            const auto& group =
-                webApi.groups[groupIndex];
+            LOG_IF(
+                "INTROSPECTION",
+                "WebAPI client: timeout=%lu devices=%u",
+                static_cast<unsigned long>(
+                    webApi.client.timeoutMs
+                ),
+                static_cast<unsigned>(
+                    webApi.client.deviceCount
+                )
+            );
 
-
-            if (!group.profiles)
-                continue;
-
-
-            for (size_t profileIndex = 0;
-                 profileIndex < group.profileCount;
-                 profileIndex++)
+            if (
+                !webApi.client.devices ||
+                webApi.client.deviceCount == 0
+            )
             {
-                const DeviceMessageProfile& profile =
-                    group.profiles[profileIndex];
-
-
-                for (size_t mapIndex = 0;
-                     mapIndex < profile.regMapCount;
-                     mapIndex++)
+                LOG_WF(
+                    "INTROSPECTION",
+                    "WebAPI client enabled without devices"
+                );
+            }
+            else
+            {
+                for (
+                    size_t deviceIndex = 0;
+                    deviceIndex <
+                        webApi.client.deviceCount;
+                    ++deviceIndex
+                )
                 {
-                    const auto& map =
-                        profile.regMap[mapIndex];
+                    const WebApiDevice& device =
+                        webApi.client.devices[
+                            deviceIndex
+                        ];
 
-
-                    AEEVariableBase* aee =
-                        _ctx.aeeRegistry->find(
-                            String(map.regKey)
-                        );
-
-
-                    if (!aee)
-                        continue;
-
-
-                    const int area =
-                        resolveAEEArea(
-                            aee->def
-                        );
-
-
-                    if (area < 0)
-                        continue;
-
-
-                    Entity& entity =
-                        ensureEntity(area);
-
-
-                    entity.hasWebAPI =
-                        true;
-
-
-                    entity.origin =
-                        EntityOrigin::EXTERNAL_SOURCE;
-
-
-                    Relation relation;
-
-                    relation.type =
-                        RelationType::WEBAPI_AEE;
-
-                    relation.sourceArea =
-                        area;
-
-                    relation.targetArea =
-                        area;
-
-                    relation.name =
-                        profile.name;
-
-                    relation.aee =
-                        aee;
-
-                    relation.webApiProfile =
-                        &profile;
-
-                    relation.webApiMap =
-                        &map;
-
-
-                    _relations.push_back(
-                        relation
+                    LOG_IF(
+                        "INTROSPECTION",
+                        "WebAPI client[%u]: "
+                        "name=%s profile=%s host=%s port=%u "
+                        "interval=%lu poll=%s enabled=%u",
+                        static_cast<unsigned>(
+                            deviceIndex
+                        ),
+                        device.name
+                            ? device.name
+                            : "",
+                        (
+                            device.profile &&
+                            device.profile->name
+                        )
+                            ? device.profile->name
+                            : "",
+                        device.host
+                            ? device.host
+                            : "",
+                        static_cast<unsigned>(
+                            device.port
+                        ),
+                        static_cast<unsigned long>(
+                            device.intervalMs
+                        ),
+                        device.pollMessageKey
+                            ? device.pollMessageKey
+                            : "",
+                        device.enabled
+                            ? 1U
+                            : 0U
                     );
                 }
             }
+        }
+
+        // ========================================================
+        // SERVER
+        //
+        // Gli endpoint non appartengono più alla configurazione.
+        // Vengono costruiti internamente dal WebAPIEngine.
+        // ========================================================
+
+        if (webApi.server.enabled)
+        {
+            LOG_IF(
+                "INTROSPECTION",
+                "WebAPI server: port=%u timeout=%lu",
+                static_cast<unsigned>(
+                    webApi.server.port
+                ),
+                static_cast<unsigned long>(
+                    webApi.server.timeoutMs
+                )
+            );
+        }
+
+        // ========================================================
+        // COMPLETELY DISABLED
+        // ========================================================
+
+        if (
+            !webApi.client.enabled &&
+            !webApi.server.enabled
+        )
+        {
+            LOG_IF(
+                "INTROSPECTION",
+                "WebAPI client and server disabled"
+            );
         }
     }
 
@@ -2364,21 +3647,119 @@ private:
     // ========================================================================
     // FINALIZE
     // ========================================================================
+    //
+    // Completa la costruzione del modello strutturale.
+    //
+    // Responsabilità:
+    //
+    //   1. Nasconde le entity prive di AreaConfig.
+    //   2. Individua gli stati tecnici delle automazioni.
+    //   3. Non assegna EntityKind.
+    //   4. Non interpreta label.
+    //   5. Non contiene ID area, buffer o configurazioni cablate.
+    //
+    // La classificazione semantica definitiva viene eseguita
+    // successivamente da DomoSemanticResolver.
+    //
+    // ========================================================================
 
     void finalize()
     {
         for (auto& entity :
-             _entities)
+            _entities)
         {
+            // ============================================================
+            // ENTITY PRIVA DI CONFIGURAZIONE AREA
+            // ============================================================
             //
-            // L'area è comparsa solo perché usata
-            // come target/relazione ma non ha una
-            // descrizione AreaConfig.
+            // L'entity può essere stata creata indirettamente perché
+            // referenziata da:
             //
+            //   - device
+            //   - route
+            //   - toggle
+            //   - split
+            //   - automation
+            //   - AEE
+            //   - MQTT
+            //   - WebAPI
+            //
+            // Se non esiste una AreaConfig associata, l'entity non possiede
+            // una descrizione pubblica esplicita e viene considerata un
+            // dettaglio implementativo.
+            //
+            // Questa regola non modifica:
+            //
+            //   - kind
+            //   - readable
+            //   - writable
+            //   - origin
+            //
+            // ============================================================
+
             if (!entity.areaCfg)
             {
-                entity.implementationOnly =
-                    true;
+                switch (entity.origin)
+                {
+                    case EntityOrigin::HVAC:
+                    case EntityOrigin::AVERAGE:
+                    case EntityOrigin::RUNTIME:
+                        break;
+
+                    default:
+                        entity.implementationOnly = true;
+                        break;
+                }
+            }
+
+
+
+            // ============================================================
+            // STATO TECNICO DI AUTOMAZIONE
+            // ============================================================
+            //
+            // Un'entity utilizzata contemporaneamente come ingresso e
+            // uscita del grafo delle automazioni rappresenta uno stato
+            // tecnico condiviso.
+            //
+            // Esempio:
+            //
+            //   automation input:
+            //       area X
+            //
+            //   automation output:
+            //       area X
+            //
+            // In questo caso area X è presumibilmente utilizzata come:
+            //
+            //   - bitmask interna
+            //   - stato aggregato
+            //   - memoria della regola
+            //   - stato intermedio
+            //
+            // La rilevazione deriva solamente dalle relazioni presenti nel
+            // grafo. Non vengono controllati:
+            //
+            //   - numeri area
+            //   - nomi area
+            //   - label
+            //   - oggetti Buffer
+            //   - costanti AREA_*
+            //
+            // La classificazione definitiva viene lasciata al
+            // DomoSemanticResolver, che trasformerà isTechnicalState in:
+            //
+            //   kind               = STATUS
+            //   readable           = true
+            //   writable           = false
+            //   implementationOnly = true
+            //
+            // ============================================================
+
+            if (entity.isAutomationInput &&
+                entity.isAutomationOutput)
+            {
+                entity.isTechnicalState = true;
             }
         }
     }
@@ -2561,43 +3942,55 @@ private:
     void reportEntities() const
     {
         Serial.println();
+
         Serial.println(
             "----- AREAS -----"
         );
 
-
         for (const auto& entity :
-             _entities)
+            _entities)
         {
-            //
-            // Se vuoi ancora meno rumore:
-            //
-            // le aree completamente interne possono
-            // essere omesse dal report.
-            //
-            if (entity.implementationOnly)
-                continue;
+            /*
+            * Le entity completamente interne normalmente vengono omesse.
+            *
+            * Tuttavia uno stato tecnico viene mostrato per consentire
+            * la verifica della classificazione strutturale.
+            */
 
+            if (entity.implementationOnly &&
+                !entity.isTechnicalState)
+            {
+                continue;
+            }
 
             String line;
 
-            line.reserve(180);
-
+            line.reserve(240);
 
             line += "AREA ";
             line += String(entity.area);
 
 
+            // ------------------------------------------------------------
+            // NOME
+            // ------------------------------------------------------------
+
             const char* name =
-                getAreaName(entity.area);
+                getAreaName(
+                    entity.area
+                );
 
-
-            if (name && name[0] != '\0')
+            if (name &&
+                name[0] != '\0')
             {
                 line += " | ";
                 line += name;
             }
 
+
+            // ------------------------------------------------------------
+            // DEVICE
+            // ------------------------------------------------------------
 
             if (entity.device)
             {
@@ -2606,81 +3999,175 @@ private:
             }
 
 
-            if (entity.kind !=
-                EntityKind::UNKNOWN)
-            {
-                line += " | KIND=";
+            // ------------------------------------------------------------
+            // SEMANTICA
+            // ------------------------------------------------------------
 
-                line +=
-                    entityKindToString(
-                        entity.kind
-                    );
+            line += " | KIND=";
+
+            line +=
+                entityKindToString(
+                    entity.kind
+                );
+
+
+            // ------------------------------------------------------------
+            // ACCESSO
+            // ------------------------------------------------------------
+
+            if (entity.readable)
+            {
+                line += " | READABLE";
+            }
+
+            if (entity.writable)
+            {
+                line += " | WRITABLE";
             }
 
 
-            if (entity.writable)
-                line += " | WRITABLE";
+            // ------------------------------------------------------------
+            // VISIBILITÀ
+            // ------------------------------------------------------------
 
+            if (entity.implementationOnly)
+            {
+                line += " | HIDDEN";
+            }
+
+
+            // ------------------------------------------------------------
+            // RUOLO STRUTTURALE
+            // ------------------------------------------------------------
+
+            if (entity.isTechnicalState)
+            {
+                line += " | TECHNICAL_STATE";
+            }
+
+
+            // ------------------------------------------------------------
+            // ROUTE
+            // ------------------------------------------------------------
 
             if (entity.isRouteTrigger)
-                line += " | ROUTE";
-
-
-            if (entity.isToggleSource)
-                line += " | TOGGLE";
-
-
-            if (entity.isSplitMain)
-                line += " | SPLIT";
-
+            {
+                line += " | ROUTE_SOURCE";
+            }
 
             if (entity.isRouteTarget)
+            {
                 line += " | ROUTE_TARGET";
+            }
 
+
+            // ------------------------------------------------------------
+            // TOGGLE
+            // ------------------------------------------------------------
+
+            if (entity.isToggleSource)
+            {
+                line += " | TOGGLE_SOURCE";
+            }
 
             if (entity.isToggleTarget)
+            {
                 line += " | TOGGLE_TARGET";
+            }
 
+
+            // ------------------------------------------------------------
+            // SPLIT
+            // ------------------------------------------------------------
+
+            if (entity.isSplitMain)
+            {
+                line += " | SPLIT_SOURCE";
+            }
 
             if (entity.isSplitTarget)
+            {
                 line += " | SPLIT_TARGET";
+            }
 
+
+            // ------------------------------------------------------------
+            // DERIVED
+            // ------------------------------------------------------------
+
+            if (entity.isDerivedOutput)
+            {
+                line += " | DERIVED_OUTPUT";
+            }
+
+
+            // ------------------------------------------------------------
+            // AUTOMATION
+            // ------------------------------------------------------------
 
             if (entity.isAutomationInput)
+            {
                 line += " | AUTO_IN";
-
+            }
 
             if (entity.isAutomationOutput)
+            {
                 line += " | AUTO_OUT";
+            }
 
+
+            // ------------------------------------------------------------
+            // INTEGRAZIONI
+            // ------------------------------------------------------------
 
             if (entity.hasAEE)
+            {
                 line += " | AEE";
-
+            }
 
             if (entity.hasMQTT)
+            {
                 line += " | MQTT";
-
+            }
 
             if (entity.hasWebAPI)
+            {
                 line += " | WEBAPI";
+            }
 
+
+            // ------------------------------------------------------------
+            // SORGENTI SPECIALISTICHE
+            // ------------------------------------------------------------
 
             if (entity.fromSecurity)
+            {
                 line += " | SECURITY";
-
+            }
 
             if (entity.fromHVAC)
+            {
                 line += " | HVAC";
-
+            }
 
             if (entity.fromAverage)
+            {
                 line += " | AVERAGE";
-
+            }
 
             if (entity.fromPower)
+            {
                 line += " | POWER";
+            }
 
+            if (entity.fromSolar)
+            {
+                line += " | SOLAR";
+            }
+
+            // ------------------------------------------------------------
+            // METADATI SEMANTICI
+            // ------------------------------------------------------------
 
             if (entity.unit &&
                 entity.unit[0] != '\0')
@@ -2689,12 +4176,18 @@ private:
                 line += entity.unit;
             }
 
-
             if (entity.deviceClass &&
                 entity.deviceClass[0] != '\0')
             {
                 line += " | CLASS=";
                 line += entity.deviceClass;
+            }
+
+            if (entity.stateClass &&
+                entity.stateClass[0] != '\0')
+            {
+                line += " | STATE=";
+                line += entity.stateClass;
             }
 
 
@@ -2813,15 +4306,24 @@ private:
 
                 case RelationType::WEBAPI_AEE:
 
-                    if (relation.webApiMap)
+                    if (relation.webApiDevice)
                     {
-                        line += " | IN=";
-                        line +=
-                            relation.webApiMap->inKey;
+                        line += " | DEVICE=";
 
-                        line += " -> ";
                         line +=
-                            relation.webApiMap->regKey;
+                            relation.webApiDevice->name
+                                ? relation.webApiDevice->name
+                                : "";
+                    }
+
+                    if (relation.webApiProfile)
+                    {
+                        line += " | PROFILE=";
+
+                        line +=
+                            relation.webApiProfile->name
+                                ? relation.webApiProfile->name
+                                : "";
                     }
 
                     break;
@@ -3062,6 +4564,9 @@ private:
 
             case EntityKind::NUMBER:
                 return "NUMBER";
+
+            case EntityKind::TEXT:
+                return "TEXT";
 
             case EntityKind::STATUS:
                 return "STATUS";

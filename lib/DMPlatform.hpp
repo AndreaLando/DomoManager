@@ -24,10 +24,14 @@
 
     #elif defined(ARDUINO_ARCH_ESP32)
 
-        #define DM_BOARD DM_BOARD_ESP32_S3_POE_ETH_8DI_8RO
+        #define DM_BOARD DM_BOARD_ESP32_S3_POE_ETH_8DI_8RO  //Oppure DM_BOARD_ESP32_S3_ETH se si usa la scheda Waveshare semplice
 
     #endif
 
+#endif
+
+#ifndef DM_BOARD
+    #error "DM_BOARD not defined"
 #endif
 
 
@@ -37,6 +41,8 @@
 
 #include <Arduino.h>
 #include <time.h>
+#include <stdarg.h>
+#include <stdio.h>
 
 #if defined(ARDUINO_ARCH_MBED)
 
@@ -60,6 +66,74 @@
 
 namespace DMPlatform
 {
+
+    // ============================================================================
+    // PORTABLE SERIAL PRINTF
+    //
+    // Serial.printf() è disponibile su ESP32, ma non su tutte le architetture
+    // Arduino. In particolare, arduino::UART del core mbed Opta espone print()
+    // e println(), ma non printf().
+    //
+    // La funzione formatta il testo in un buffer locale e lo invia tramite
+    // Serial.print(), disponibile sia su ESP32 sia su Opta.
+    // ============================================================================
+
+    static inline void SerialPrintf(
+        const char* format,
+        ...)
+    {
+        if (
+            !format ||
+            format[0] == '\0'
+        )
+        {
+            return;
+        }
+
+        /*
+        * Buffer sufficiente per le righe diagnostiche correnti.
+        *
+        * Se in futuro vengono aggiunti log più lunghi, aumentare
+        * questa dimensione oppure usare direttamente Logger::logf().
+        */
+        char buffer[384];
+
+        va_list arguments;
+
+        va_start(
+            arguments,
+            format
+        );
+
+        const int result =
+            vsnprintf(
+                buffer,
+                sizeof(buffer),
+                format,
+                arguments
+            );
+
+        va_end(
+            arguments
+        );
+
+        if (result <= 0)
+        {
+            return;
+        }
+
+        /*
+        * vsnprintf() garantisce il terminatore quando la dimensione
+        * del buffer è maggiore di zero.
+        *
+        * Se il testo supera il buffer viene stampata la parte
+        * disponibile, senza uscire dai limiti.
+        */
+        Serial.print(
+            buffer
+        );
+    }
+
     // ========================================================================
     // COMMON
     // ========================================================================

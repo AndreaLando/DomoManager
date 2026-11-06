@@ -27,6 +27,7 @@
 #include "DMLogger.hpp"
 #include "DMOptaRTC.hpp"
 
+
 class TimeManager {
 public:
     TimeManager()
@@ -374,54 +375,78 @@ public:
     }
 };
 
-// ============================================================
-// PERFORMANCE PROFILER
-// ============================================================
 
-struct StageTiming
-{
-    uint32_t sum = 0;
-    uint16_t max = 0;
-    uint16_t min = UINT16_MAX;
-    uint16_t cycles = 0;
+/* ============================================================================
+   PERFORMANCE PROFILER
+   ============================================================================
 
-    inline void add(uint16_t ms)
-    {
-        sum += ms;
+   Scopo
+   ---------------------------------------------------------------------------
+   Il PerformanceProfiler è uno strumento diagnostico leggero utilizzato per
+   misurare i tempi di esecuzione delle diverse fasi operative del sistema.
 
-        if (ms > max)
-            max = ms;
+   È stato progettato per l'analisi delle prestazioni runtime su piattaforme
+   embedded (Opta / ESP32 / STM32) con impatto minimo sul ciclo principale.
 
-        if (ms < min)
-            min = ms;
+   Funzionalità
+   ---------------------------------------------------------------------------
+   • Misurazione di singole sezioni di codice (Stage)
+   • Profilazione indipendente per IP, device o contesto logico
+   • Calcolo automatico di:
+       - Min
+       - Max
+       - Average
+       - Somma totale
+       - Numero cicli
 
-        if (cycles < UINT16_MAX)
-            cycles++;
-    }
+   • Abilitazione/disabilitazione runtime
+   • Report diagnostico aggregato
+   • Overhead estremamente ridotto
 
-    inline void reset()
-    {
-        sum = 0;
-        max = 0;
-        min = UINT16_MAX;
-        cycles = 0;
-    }
+   Modello operativo
+   ---------------------------------------------------------------------------
+   Ogni area da monitorare viene registrata come Stage.
 
-    inline uint16_t avg() const
-    {
-        return cycles ? sum / cycles : 0;
-    }
+   Esempio:
 
-    inline uint16_t getMin() const
-    {
-        return cycles ? min : 0;
-    }
-};
+       StageId sLoop    = profiler.addStage("LOOP");
+       StageId sRefresh = profiler.addStage("REFRESH");
+       StageId sParser  = profiler.addStage("PARSER");
 
+   Misura:
 
-// ============================================================
-// PROFILER
-// ============================================================
+       profiler.begin(sLoop, 0, millis());
+
+       ...
+       codice da misurare
+       ...
+
+       profiler.end(sLoop, 0, millis());
+
+   Il parametro IP può rappresentare:
+
+       • indirizzo Modbus/IP
+       • device index
+       • protocol index
+       • qualsiasi contesto logico scelto dal chiamante
+
+   Casi d'uso tipici
+   ---------------------------------------------------------------------------
+   • Analisi performance Modbus
+   • Analisi driver TCP/UDP
+   • SolarEngine profiling
+   • MQTT profiling
+   • Automation Engine profiling
+   • Ricerca colli di bottiglia nel ciclo activityLoop
+   • Analisi watchdog overload
+
+   Obiettivo
+   ---------------------------------------------------------------------------
+   Consentire l'identificazione rapida dei componenti che aumentano il tempo
+   medio di esecuzione del sistema senza introdurre overhead significativo
+   durante il funzionamento normale.
+
+   ============================================================================ */
 
 class PerformanceProfiler
 {
@@ -430,6 +455,46 @@ public:
     using StageId = uint8_t;
 
 private:
+
+    struct StageTiming
+    {
+        uint32_t sum = 0;
+        uint16_t max = 0;
+        uint16_t min = UINT16_MAX;
+        uint16_t cycles = 0;
+
+        inline void add(uint16_t ms)
+        {
+            sum += ms;
+
+            if (ms > max)
+                max = ms;
+
+            if (ms < min)
+                min = ms;
+
+            if (cycles < UINT16_MAX)
+                cycles++;
+        }
+
+        inline void reset()
+        {
+            sum = 0;
+            max = 0;
+            min = UINT16_MAX;
+            cycles = 0;
+        }
+
+        inline uint16_t avg() const
+        {
+            return cycles ? sum / cycles : 0;
+        }
+
+        inline uint16_t getMin() const
+        {
+            return cycles ? min : 0;
+        }
+    };
 
     struct Stage
     {
@@ -846,15 +911,47 @@ public:
     // ============================================================
 
     uint8_t add(
+        const char* label,
+        int protocolId = -1)
+    {
+        return add(
+            nullptr,
+            label,
+            protocolId
+        );
+    }
+
+    uint8_t add(
         Callback callback,
         const char* label,
         int protocolId = -1)
     {
-        if (!callback)
-            return INVALID_CONSUMER_ID;
-
         if (nextConsumerId == INVALID_CONSUMER_ID)
+        {
+            LOG_EF(
+                "EventManager",
+                "Unable to register '%s': "
+                "consumer table full",
+                label ? label : "NULL"
+            );
+
             return INVALID_CONSUMER_ID;
+        }
+
+        /*
+        * Callback nulla consentita.
+        *
+        * Alcune registrazioni rappresentano
+        * esclusivamente una source eventi.
+        */
+        if (!callback)
+        {
+            LOG_WF(
+                "EventManager",
+                "Registering source '%s' without callback",
+                label ? label : "NULL"
+            );
+        }
 
         const uint8_t id =
             nextConsumerId++;
@@ -865,6 +962,15 @@ public:
             label,
             protocolId
         });
+
+        LOG_IF(
+            "EventManager",
+            "Registered '%s': id=%u protocol=%d callback=%u",
+            label ? label : "NULL",
+            static_cast<unsigned>(id),
+            protocolId,
+            callback ? 1U : 0U
+        );
 
         return id;
     }
@@ -923,6 +1029,17 @@ public:
         long value,
         uint8_t source)
     {
+        if (source == INVALID_CONSUMER_ID)
+        {
+            LOG_EF(
+                "EventManager",
+                "Push rejected: invalid source=%u area=%d value=%ld",
+                source,
+                area,
+                value
+            );
+        }
+
         Event event;
 
         event.area = area;

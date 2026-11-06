@@ -21,6 +21,7 @@
 
 
 #include "DMRuntime.hpp"
+#include "DMRuntimeStore.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -367,6 +368,137 @@ public:
 };
 
 class DomoManager {
+public:
+    // ========================================================================
+    // RUNTIME STATE
+    //
+    // Contenitore centrale dello stato runtime di DomoManager.
+    //
+    // Contiene:
+    //
+    //   Buffer
+    //      Database numerico realtime basato su area.
+    //
+    //   RuntimeStore
+    //      Database simbolico basato su Handle.
+    //
+    // NOTE:
+    //
+    //   - Buffer e RuntimeStore sono indipendenti.
+    //   - Buffer continua ad essere utilizzato dal core realtime:
+    //       Modbus
+    //       Route
+    //       Toggle
+    //       Split
+    //       Automation
+    //
+    //   - RuntimeStore è destinato a:
+    //       MQTT
+    //       Home Assistant Text
+    //       Fanvil
+    //       Reolink
+    //       Telegram
+    //       Web API
+    //       DomoManager Online
+    //
+    // ATTENZIONE:
+    //
+    //   DMRuntime conserva una reference a state.buffer.
+    //
+    //   Per questo motivo RuntimeState:
+    //
+    //       - NON è copiabile
+    //       - NON è movibile
+    //
+    //   In questo modo nessuno può accidentalmente eseguire:
+    //
+    //       state = RuntimeState(...);
+    //
+    //   invalidando la logica runtime.
+    //
+    // ========================================================================
+
+    struct RuntimeState
+    {
+        // --------------------------------------------------------------------
+        // DATABASES
+        // --------------------------------------------------------------------
+
+        Buffer buffer;
+        DMRuntimeStore runtime;
+
+        // --------------------------------------------------------------------
+        // CONSTRUCTOR
+        // --------------------------------------------------------------------
+
+        explicit RuntimeState(
+            size_t bufferSize = 1)
+            : buffer(bufferSize)
+            , runtime()
+        {
+        }
+
+        // --------------------------------------------------------------------
+        // COPY DISABLED
+        // --------------------------------------------------------------------
+
+        RuntimeState(
+            const RuntimeState&) = delete;
+
+        RuntimeState& operator=(
+            const RuntimeState&) = delete;
+
+        // --------------------------------------------------------------------
+        // MOVE DISABLED
+        // --------------------------------------------------------------------
+
+        RuntimeState(
+            RuntimeState&&) = delete;
+
+        RuntimeState& operator=(
+            RuntimeState&&) = delete;
+
+        // --------------------------------------------------------------------
+        // VALIDATION
+        //
+        // Verifica integrità RuntimeStore.
+        //
+        // Non esegue controlli sul Buffer.
+        // --------------------------------------------------------------------
+
+        bool validate() const
+        {
+            return
+                runtime.validateIntegrity(false)
+                    ==
+                DMRuntimeStore::IntegrityResult::OK;
+        }
+
+        // --------------------------------------------------------------------
+        // RESET RUNTIME DATABASE
+        //
+        // Mantiene invariato il Buffer.
+        // --------------------------------------------------------------------
+
+        void clearRuntime()
+        {
+            runtime.clear();
+        }
+
+        // --------------------------------------------------------------------
+        // RESET COMPLETE STATE
+        //
+        // Al momento resetta solamente RuntimeStore.
+        //
+        // Buffer viene preservato intenzionalmente.
+        // --------------------------------------------------------------------
+
+        void clear()
+        {
+            runtime.clear();
+        }
+    };
+
 private:
     TimeManager timeManager;
     DeviceManager deviceManager;
@@ -380,7 +512,9 @@ private:
     DomoManagerConfig config;
     OwnerManager owner;
     IpManager ipManager;
-    Buffer buffer;
+
+    RuntimeState state;
+
     LedController m_leds;
     DeviceProfiles profiles;
     DMRuntime runtime;
@@ -389,7 +523,7 @@ private:
         DefineBufferElement(deviceManager.AREA_SYSTEM_ERRORS, 0, false, "Devices in error");
         DefineBufferElement(deviceManager.AREA_SYSTEM_RUNNING_T, 0, false, "Current cycle");
 
-        const auto multipleInit = buffer.getInitializedMultipleTimes();
+        const auto multipleInit = state.buffer.getInitializedMultipleTimes();
         for (int area : multipleInit)
             LOG_EF("DomoManager", "ERRORE: Area initialized more times: %d", area);
 
@@ -412,9 +546,9 @@ private:
             mappedAreas.insert(out.area);
 
         std::vector<int> virtualAreas;
-        for (int area = 0; area < buffer.size(); ++area) {
+        for (int area = 0; area < state.buffer.size(); ++area) {
             if (!mappedAreas.count(area)) {
-                buffer.SetVirtual(area, true);
+                state.buffer.SetVirtual(area, true);
                 virtualAreas.push_back(area);
             }
         }
@@ -428,53 +562,140 @@ private:
         }
     }
 
-    void mapDevices(const DomoManagerConfig::Devices& cfg)
+    void mapDevices(
+        const DomoManagerConfig::Devices& cfg)
     {
         // ---------------------------------------------------------
-        // Prima aggiungiamo TUTTI i device.
+        // PREALLOCATE DEVICE STORAGE
         // ---------------------------------------------------------
-        for (const auto& d : cfg.list)
+        //
+        // Prevents vector reallocations while runtime devices are
+        // being created. Error callbacks are installed only after
+        // all devices have been added.
+        //
+        // ---------------------------------------------------------
+
+        auto& devices =
+            deviceManager.getDevices();
+
+        devices.reserve(
+            devices.size() +
+            cfg.list.size()
+        );
+
+
+        // ---------------------------------------------------------
+        // BUILD RUNTIME DEVICES
+        // ---------------------------------------------------------
+
+        for (const auto& deviceConfig :
+            cfg.list)
         {
-            auto* profile = profiles.get(d.profile.c_str());
+            const auto* profile =
+                profiles.get(
+                    deviceConfig.profile.c_str()
+                );
+
 
             if (!profile)
             {
                 LOG_EF(
                     "DomoManager",
-                    "Profilo non trovato: %s",
-                    d.profile.c_str());
+                    "Device profile not found"
+                    " | Name=%s"
+                    " | Profile=%s",
+                    deviceConfig.name.c_str(),
+                    deviceConfig.profile.c_str()
+                );
 
                 continue;
             }
 
+
             deviceManager.addDeviceManual(
-                d.name.c_str(),
-                d.address,
-                d.slot,
+                deviceConfig.name.c_str(),
+                deviceConfig.address,
+                deviceConfig.slot,
                 *profile,
-                d.areas,
-                d.retry,
-                d.priority);
+                deviceConfig.areas,
+                deviceConfig.retry,
+                deviceConfig.priority,
+                deviceConfig.suggestedArea,
+                deviceConfig.installPlace
+            );
+
+
+            LOG_DF(
+                "DomoManager",
+                "Device mapped"
+                " | Name=%s"
+                " | SuggestedArea=%s"
+                " | InstallPlace=%s"
+                " | IP=%u.%u.%u.%u"
+                " | Address=%u",
+                deviceConfig.name.c_str(),
+                deviceConfig.suggestedArea
+                    ? deviceConfig.suggestedArea
+                    : "Not set",
+                deviceConfig.installPlace
+                    ? deviceConfig.installPlace
+                    : "Not set",
+                static_cast<unsigned>(
+                    deviceConfig.address[0]
+                ),
+                static_cast<unsigned>(
+                    deviceConfig.address[1]
+                ),
+                static_cast<unsigned>(
+                    deviceConfig.address[2]
+                ),
+                static_cast<unsigned>(
+                    deviceConfig.address[3]
+                ),
+                static_cast<unsigned>(
+                    deviceConfig.slot
+                )
+            );
         }
 
-        // ---------------------------------------------------------
-        // Solo ora installiamo i callback.
-        //
-        // In questo modo il vector dei device ha già terminato
-        // le eventuali riallocazioni dovute agli addDeviceManual().
-        // ---------------------------------------------------------
-        for (auto& dev : deviceManager.getDevices())
-        {
-            dev.GetError().SetStateChangedCallback(
-                [this, &dev]()
-                {
-                    OnDeviceErrorStateChanged(&dev);
 
-                    // PATCH:
-                    // Propaga immediatamente il cambio di stato
-                    // alla mappa gestita da DMRuntime.
-                    runtime.onDeviceErrorChanged(dev);
-                });
+        // ---------------------------------------------------------
+        // INSTALL ERROR CALLBACKS
+        // ---------------------------------------------------------
+        //
+        // The callbacks are installed after all insertions, so the
+        // stored device addresses are no longer invalidated by
+        // vector reallocations.
+        //
+        // Do not capture the range-for reference variable by
+        // reference. Capture the final device pointer by value.
+        //
+        // ---------------------------------------------------------
+
+        for (auto& device :
+            deviceManager.getDevices())
+        {
+            GenericPrgDevice* const devicePtr =
+                &device;
+
+
+            device.GetError().SetStateChangedCallback(
+                [this, devicePtr]()
+                {
+                    if (!devicePtr)
+                        return;
+
+
+                    OnDeviceErrorStateChanged(
+                        devicePtr
+                    );
+
+
+                    runtime.onDeviceErrorChanged(
+                        *devicePtr
+                    );
+                }
+            );
         }
     }
 
@@ -504,11 +725,11 @@ public:
           config(),
           owner(),
           ipManager(),
-          buffer(1),
+          state(1),
           m_leds(ledPins, false),
           profiles(),
           runtime(*this, timeManager, deviceManager, net, networkProtocolId,
-                  ipManager, buffer, m_leds, profiles, config) {
+                  ipManager, state.buffer, m_leds, profiles, config) {
         instance = this;
     }
 
@@ -542,7 +763,7 @@ public:
         }
 
         mapDevices(config.devices);
-        buffer = Buffer(DomoConfigValidator::getRequiredAreas(config));
+        state.buffer = Buffer(DomoConfigValidator::getRequiredAreas(config));
 
         if (!DomoConfigValidator::validateStatic(config, *this)) {
             LOG_EF("DomoManager", "AVVIO BLOCCATO (validazione statica)");
@@ -600,7 +821,86 @@ public:
     DiagnosticWatchAreas& getWatchDiag() { return runtime.getWatchDiag(); }
     AutomationEngine& getAutomation() { return runtime.getAutomation(); }
     AsyncScheduler& getScheduler() { return runtime.getScheduler(); }
-    Buffer& getBuffer() { return buffer; }
+    
+    // ========================================================================
+    // STATE ACCESS
+    //
+    // Espone lo stato globale di DomoManager.
+    //
+    // Contiene:
+    //   - Buffer numerico realtime
+    //   - RuntimeStore simbolico
+    //
+    // Nota:
+    // Utilizzare getBuffer() e getRuntimeStore() quando serve accedere
+    // solamente ad uno dei due database.
+    // ========================================================================
+
+    RuntimeState& getState()
+    {
+        return state;
+    }
+
+    const RuntimeState& getState() const
+    {
+        return state;
+    }
+
+    // ========================================================================
+    // BUFFER ACCESS
+    //
+    // Database realtime numerico.
+    //
+    // Utilizzato da:
+    //
+    //   - Modbus
+    //   - Route
+    //   - Toggle
+    //   - Split
+    //   - Automation
+    //   - AverageCalculator
+    //
+    // Accesso O(1).
+    // ========================================================================
+
+    Buffer& getBuffer()
+    {
+        return state.buffer;
+    }
+
+    const Buffer& getBuffer() const
+    {
+        return state.buffer;
+    }
+
+    // ========================================================================
+    // RUNTIME STORE ACCESS
+    //
+    // Database runtime simbolico.
+    //
+    // Utilizzato da:
+    //
+    //   - MQTT STRING/JSON
+    //   - Home Assistant TEXT
+    //   - Reolink
+    //   - Fanvil
+    //   - Telegram
+    //   - Web API
+    //   - DomoManager Online
+    //
+    // Accesso O(1) tramite Handle.
+    // ========================================================================
+
+    DMRuntimeStore& getRuntimeStore()
+    {
+        return state.runtime;
+    }
+
+    const DMRuntimeStore& getRuntimeStore() const
+    {
+        return state.runtime;
+    }
+
     AverageCalculator& getAverages() { return runtime.getAverages(); }
     TimeManager& getTimeManager() { return timeManager; }
     DeviceProfiles& getProfiles() { return profiles; }
@@ -618,7 +918,7 @@ public:
     bool getPowerOnCycleCompleted() const { return runtime.getPowerOnCycleCompleted(); }
 
     void DefineBufferElement(int area, int areaToWrite, bool reverse, const char* name) {
-        buffer.SetElement(area, areaToWrite, reverse, name);
+        state.buffer.SetElement(area, areaToWrite, reverse, name);
     }
 
     OwnerManager& getOwner() { return owner; }

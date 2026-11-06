@@ -545,7 +545,11 @@ public:
             ReportIneffectiveRules(manager);
 
         if (cfg.reportDeviceErrors)
-            ReportDeviceErrors(manager);
+        {
+            DeviceManager::Diagnostic::ReportErrors(
+                manager.devices()
+            );
+        }
 
         if (cfg.reportWatchdogs)
             ReportWatchdogs(manager);
@@ -606,107 +610,6 @@ void Diagnostic::ReportMissingBufferDefinitions(DomoManager& dm)
             }
         }
     }
-}
-
-void Diagnostic::ReportDeviceErrors(DomoManager& dm)
-{
-    auto& devs = dm.devices().getDevices();
-
-    Serial.println("\n===== DEVICE ERROR REPORT =====");
-
-    unsigned long errorMask  = 0;
-    unsigned long parkedMask = 0;
-
-    int index = 0;
-    int totalErrors = 0;
-    int totalParked = 0;
-    int totalOk = 0;
-
-    for (auto& dev : devs) {
-
-        auto& err = dev.GetError();
-        auto ip   = dev.GetIp();
-
-        // ============================================================
-        // 1) DEVICE PARKED
-        // ============================================================
-        if (err.IsVisibleParked()) {
-            bitSet(parkedMask, index);
-            totalParked++;
-
-            Serial.print("Device ");
-            Serial.print(index);
-            Serial.print(" → PARKED | ");
-            Serial.print(dev.GetName());
-            Serial.print(" | IP=");
-            Serial.print(ip[0]); Serial.print(".");
-            Serial.print(ip[1]); Serial.print(".");
-            Serial.print(ip[2]); Serial.print(".");
-            Serial.print(ip[3]);
-            Serial.print(" | Addr=");
-            Serial.println(dev.GetDeviceAddress());
-
-            index++;
-            continue;
-        }
-
-        // ============================================================
-        // 2) DEVICE IN ERRORE
-        // ============================================================
-        if (err.IsVisibleError()) {
-            bitSet(errorMask, index);
-            totalErrors++;
-
-            Serial.print("Device ");
-            Serial.print(index);
-            Serial.print(" → ERROR | ");
-            Serial.print(dev.GetName());
-            Serial.print(" | IP=");
-            Serial.print(ip[0]); Serial.print(".");
-            Serial.print(ip[1]); Serial.print(".");
-            Serial.print(ip[2]); Serial.print(".");
-            Serial.print(ip[3]);
-            Serial.print(" | Addr=");
-            Serial.println(dev.GetDeviceAddress());
-
-            index++;
-            continue;
-        }
-
-        // ============================================================
-        // 3) DEVICE OK
-        // ============================================================
-        totalOk++;
-        index++;
-    }
-
-    // ============================================================
-    // RIEPILOGO
-    // ============================================================
-    Serial.println("\n===== SUMMARY =====");
-
-    Serial.print("Total devices: ");
-    Serial.println(devs.size());
-
-    Serial.print("OK: ");
-    Serial.println(totalOk);
-
-    Serial.print("Errors: ");
-    Serial.println(totalErrors);
-
-    Serial.print("Parked: ");
-    Serial.println(totalParked);
-
-    Serial.print("Error bitmask = 0x");
-    Serial.println(errorMask, HEX);
-
-    Serial.print("Parked bitmask = 0x");
-    Serial.println(parkedMask, HEX);
-
-    if (totalErrors == 0 && totalParked == 0)
-        Serial.println("Nessun device in errore o parked.");
-
-    Serial.println("===== END DEVICE ERROR REPORT =====\n");
 }
 
 

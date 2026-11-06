@@ -294,88 +294,311 @@ private:
     // ============================================================
     // 4. REGOLE DINAMICHE
     // ============================================================
+    //
+    // Costruisce le DynamicAutomation e registra contestualmente
+    // una vista strutturale delle aree utilizzate.
+    //
+    // I metadati vengono ricavati esclusivamente da RuleCfg:
+    //
+    //   - trend.area
+    //   - threshold.area
+    //   - bitmask.area
+    //   - multi.conditions[].area
+    //   - composite.inputs[].area
+    //   - composite.output.area
+    //
+    // Non vengono cablati:
+    //
+    //   - identificativi AREA_*
+    //   - numeri area specifici
+    //   - riferimenti al Buffer
+    //
+    // ============================================================
 
     void buildDynamicRules(
         AutomationEngine& engine,
         const AutomationConfig& cfg)
     {
-        for (const auto& r : cfg.rules)
+        for (const auto& r :
+            cfg.rules)
         {
+            AutomationEngine::DynamicAutomation* dynamic =
+                nullptr;
+
+
+            // ========================================================
+            // TREND
+            // ========================================================
+
             if (r.type == "trend")
             {
-                auto* rule = new TrendRule(r);
+                auto* rule =
+                    new TrendRule(r);
+
+                const uint8_t previousCount =
+                    engine.getDynamicCount();
 
                 engine.addDynamicAutomation(
                     r.intervalMs,
                     TrendRule::callback,
                     rule
                 );
+
+                if (engine.getDynamicCount() >
+                    previousCount)
+                {
+                    dynamic =
+                        engine.getDynamicPtr(
+                            engine.getDynamicCount() - 1
+                        );
+                }
+
+                if (dynamic)
+                {
+                    dynamic->addInputArea(
+                        r.trend.area
+                    );
+                }
             }
+
+
+            // ========================================================
+            // THRESHOLD
+            // ========================================================
 
             else if (r.type == "threshold")
             {
-                auto* rule = new ThresholdRule(r);
+                auto* rule =
+                    new ThresholdRule(r);
+
+                const uint8_t previousCount =
+                    engine.getDynamicCount();
 
                 engine.addDynamicAutomation(
                     r.intervalMs,
                     ThresholdRule::callback,
                     rule
                 );
+
+                if (engine.getDynamicCount() >
+                    previousCount)
+                {
+                    dynamic =
+                        engine.getDynamicPtr(
+                            engine.getDynamicCount() - 1
+                        );
+                }
+
+                if (dynamic)
+                {
+                    dynamic->addInputArea(
+                        r.threshold.area
+                    );
+                }
             }
+
+
+            // ========================================================
+            // BITMASK
+            // ========================================================
 
             else if (r.type == "bitmask")
             {
-                auto* rule = new BitmaskRule(r);
+                auto* rule =
+                    new BitmaskRule(r);
+
+                const uint8_t previousCount =
+                    engine.getDynamicCount();
 
                 engine.addDynamicAutomation(
                     r.intervalMs,
                     BitmaskRule::callback,
                     rule
                 );
+
+                if (engine.getDynamicCount() >
+                    previousCount)
+                {
+                    dynamic =
+                        engine.getDynamicPtr(
+                            engine.getDynamicCount() - 1
+                        );
+                }
+
+                if (dynamic)
+                {
+                    dynamic->addInputArea(
+                        r.bitmask.area
+                    );
+                }
             }
+
+
+            // ========================================================
+            // MULTI
+            // ========================================================
 
             else if (r.type == "multi")
             {
-                auto* rule = new MultiRule(r);
+                auto* rule =
+                    new MultiRule(r);
+
+                const uint8_t previousCount =
+                    engine.getDynamicCount();
 
                 engine.addDynamicAutomation(
                     r.intervalMs,
                     MultiRule::callback,
                     rule
                 );
+
+                if (engine.getDynamicCount() >
+                    previousCount)
+                {
+                    dynamic =
+                        engine.getDynamicPtr(
+                            engine.getDynamicCount() - 1
+                        );
+                }
+
+                if (dynamic)
+                {
+                    for (const auto& condition :
+                        r.multi.conditions)
+                    {
+                        dynamic->addInputArea(
+                            condition.area
+                        );
+                    }
+                }
             }
+
+
+            // ========================================================
+            // TIME
+            // ========================================================
+            //
+            // Una regola time non legge aree dal Buffer.
+            // Non vengono quindi registrate aree di input.
+            //
+            // ========================================================
 
             else if (r.type == "time")
             {
-                auto* rule = new TimeRule(r);
+                auto* rule =
+                    new TimeRule(r);
+
+                const uint8_t previousCount =
+                    engine.getDynamicCount();
 
                 engine.addDynamicAutomation(
                     60000,
                     TimeRule::callback,
                     rule
                 );
+
+                if (engine.getDynamicCount() >
+                    previousCount)
+                {
+                    dynamic =
+                        engine.getDynamicPtr(
+                            engine.getDynamicCount() - 1
+                        );
+                }
             }
+
+
+            // ========================================================
+            // SEQUENCE RULE
+            // ========================================================
+            //
+            // L'attuale RuleCfg non espone direttamente gli step della
+            // SequenceRule. Non vengono registrate aree finché la struttura
+            // non fornisce una vista esplicita degli output.
+            //
+            // ========================================================
 
             else if (r.type == "sequence")
             {
-                auto* rule = new SequenceRule(r);
+                auto* rule =
+                    new SequenceRule(r);
+
+                const uint8_t previousCount =
+                    engine.getDynamicCount();
 
                 engine.addDynamicAutomation(
                     r.intervalMs,
                     SequenceRule::callback,
                     rule
                 );
+
+                if (engine.getDynamicCount() >
+                    previousCount)
+                {
+                    dynamic =
+                        engine.getDynamicPtr(
+                            engine.getDynamicCount() - 1
+                        );
+                }
             }
+
+
+            // ========================================================
+            // COMPOSITE
+            // ========================================================
+            //
+            // Tutti gli input vengono registrati come inputAreas.
+            //
+            // L'output della composite viene registrato come outputArea.
+            //
+            // Se una stessa area compare tra input e output:
+            //
+            //   dynamic->isTechnicalStateArea(area) == true
+            //
+            // Esempio strutturale:
+            //
+            //   input bitmask  -> area X
+            //   output bitmask -> area X
+            //
+            // ========================================================
 
             else if (r.type == "composite")
             {
-                auto* rule = new CompositeRule(r);
+                auto* rule =
+                    new CompositeRule(r);
+
+                const uint8_t previousCount =
+                    engine.getDynamicCount();
 
                 engine.addDynamicAutomation(
                     r.intervalMs,
                     CompositeRule::callback,
                     rule
                 );
+
+                if (engine.getDynamicCount() >
+                    previousCount)
+                {
+                    dynamic =
+                        engine.getDynamicPtr(
+                            engine.getDynamicCount() - 1
+                        );
+                }
+
+                if (dynamic)
+                {
+                    for (const auto& input :
+                        r.composite.inputs)
+                    {
+                        dynamic->addInputArea(
+                            input.area
+                        );
+                    }
+
+                    dynamic->addOutputArea(
+                        r.composite.output.area
+                    );
+                }
 
                 LOG_DF(
                     "AutomationBuilder",
@@ -385,12 +608,61 @@ private:
                 );
             }
 
+
+            // ========================================================
+            // TIPO NON SUPPORTATO
+            // ========================================================
+
+            else
+            {
+                LOG_WF(
+                    "AutomationBuilder",
+                    "Regola '%s' ignorata: type=%s non supportato",
+                    r.name.c_str(),
+                    r.type.c_str()
+                );
+
+                continue;
+            }
+
+
+            // ========================================================
+            // NOME DIAGNOSTICO
+            // ========================================================
+            //
+            // ATTENZIONE:
+            // setName() conserva il puntatore restituito da c_str().
+            // È valido solamente se AutomationConfig resta in vita quanto
+            // AutomationEngine.
+            //
+            // Se questa garanzia non esiste, non chiamare setName() oppure
+            // modifica DynamicAutomation affinché memorizzi una String.
+            //
+            // ========================================================
+
+            if (dynamic)
+            {
+                dynamic->setName(
+                    r.name.c_str()
+                );
+            }
+
+
+            // ========================================================
+            // REPORT REGISTRAZIONE
+            // ========================================================
+
             LOG_DF(
                 "AutomationBuilder",
-                "AGGIUNTA Regola '%s' type=%s inputs=%d",
+                "AGGIUNTA Regola '%s' type=%s inputAreas=%d outputAreas=%d",
                 r.name.c_str(),
                 r.type.c_str(),
-                r.composite.inputs.size()
+                dynamic
+                    ? dynamic->inputAreaCount
+                    : 0,
+                dynamic
+                    ? dynamic->outputAreaCount
+                    : 0
             );
         }
     }

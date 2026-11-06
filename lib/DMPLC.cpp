@@ -31,47 +31,84 @@ void GenericPrgDeviceManager::BuildPriorityCache(std::vector<GenericPrgDevice>& 
     //DebugPriorityCache(devices);
 }
 
-void GenericPrgDeviceManager::DebugPriorityCache(std::vector<GenericPrgDevice>& devices)
+void GenericPrgDeviceManager::DebugPriorityCache(
+    std::vector<GenericPrgDevice>& devices)
 {
-    LOG_IF(__FUNCTION__, "=== Priority Cache Debug ===");
+    LOG_IF(
+        __FUNCTION__,
+        "===== PRIORITY CACHE DEBUG ====="
+    );
 
-    for (auto& entry : _cachePriorityIndex) {
-        uint64_t key = entry.first;
-        auto& indices = entry.second;
+    for (const auto& entry : _cachePriorityIndex)
+    {
+        const uint64_t key = entry.first;
+        const auto& indices = entry.second;
 
-        uint32_t ipRaw = (uint32_t)(key >> 8);
-        uint8_t prio   = (uint8_t)(key & 0xFF);
+        const uint32_t ipRaw =
+            static_cast<uint32_t>(key >> 8);
 
-        DMIPAddress ip(
+        const uint8_t priority =
+            static_cast<uint8_t>(key & 0xFF);
+
+        const DMIPAddress ip(
             (ipRaw >> 24) & 0xFF,
             (ipRaw >> 16) & 0xFF,
-            (ipRaw >> 8)  & 0xFF,
+            (ipRaw >> 8) & 0xFF,
             ipRaw & 0xFF
         );
 
-        LOG_IF(__FUNCTION__,
-               "Key=%llu IP=%d.%d.%d.%d Priority=%d",
-               (unsigned long long)key,
-               ip[0], ip[1], ip[2], ip[3],
-               prio);
+        LOG_IF(
+            __FUNCTION__,
+            "Key=%llu | IP=%u.%u.%u.%u | Priority=%u | Devices=%u",
+            static_cast<unsigned long long>(key),
+            static_cast<unsigned>(ip[0]),
+            static_cast<unsigned>(ip[1]),
+            static_cast<unsigned>(ip[2]),
+            static_cast<unsigned>(ip[3]),
+            static_cast<unsigned>(priority),
+            static_cast<unsigned>(indices.size())
+        );
 
-        String idxList;
-        for (int idx : indices) idxList += String(idx) + " ";
-        LOG_IF(__FUNCTION__, "  Indici: %s", idxList.c_str());
+        for (const int index : indices)
+        {
+            if (index < 0 ||
+                index >= static_cast<int>(devices.size()))
+            {
+                LOG_WF(
+                    __FUNCTION__,
+                    "Indice device non valido: %d",
+                    index
+                );
 
-        for (int idx : indices) {
-            auto& dev = devices[idx];
-            LOG_IF(__FUNCTION__,
-                   "    -> Device[%d] IP=%d.%d.%d.%d Priority=%d",
-                   idx,
-                   dev.GetIp()[0], dev.GetIp()[1], dev.GetIp()[2], dev.GetIp()[3],
-                   (uint8_t)dev.GetPriority());
+                continue;
+            }
+
+            const GenericPrgDevice& device =
+                devices[static_cast<size_t>(index)];
+
+            LOG_IF(
+                __FUNCTION__,
+                "Device[%d] | %s | Zona=%s | Installazione=%s | "
+                "IP=%u.%u.%u.%u | Addr=%u | Priority=%u",
+                index,
+                device.GetName(),
+                device.GetZone(),
+                device.GetInstallationLocation(),
+                static_cast<unsigned>(device.GetIp()[0]),
+                static_cast<unsigned>(device.GetIp()[1]),
+                static_cast<unsigned>(device.GetIp()[2]),
+                static_cast<unsigned>(device.GetIp()[3]),
+                static_cast<unsigned>(device.GetDeviceAddress()),
+                static_cast<unsigned>(device.GetPriority())
+            );
         }
     }
 
-    LOG_IF(__FUNCTION__, "=== Fine Debug ===");
+    LOG_IF(
+        __FUNCTION__,
+        "===== END PRIORITY CACHE DEBUG ====="
+    );
 }
-
 
 const std::vector<int>& GenericPrgDeviceManager::GetDevicesByPriority(
     Priority priority,
@@ -111,49 +148,149 @@ const std::vector<int>& GenericPrgDeviceManager::GetDevicesByPriority(
 
 
 ////////////////////////////////////////////////////////// GenericDevice
-GenericPrgDevice::GenericPrgDevice(const char* name, DMIPAddress ip, unsigned int deviceAddress, std::vector<GenericPrgDeviceChannel> channels, std::vector<int> ioAreas, short ErrorCnt, Priority priority): Error(ErrorCnt, 30000)
-{ 
- this->_channels=channels;
- 
-  this->_ioAreas=ioAreas;
-
-  this->_deviceAddress=deviceAddress;
-  this->_name=name;
-  
-  this->_ip=ip;
-  this->_priority=priority;
-  this->bank=0; // nel caso di calls ripetute
+GenericPrgDevice::GenericPrgDevice(
+    const char* name,
+    DMIPAddress ip,
+    unsigned int deviceAddress,
+    std::vector<GenericPrgDeviceChannel> channels,
+    std::vector<int> ioAreas,
+    short errorCount,
+    Priority priority,
+    const char* zone,
+    const char* installationLocation)
+    : _ioAreas(
+          std::move(
+              ioAreas
+          )
+      ),
+      _priority(
+          priority
+      ),
+      _name(
+          name
+      ),
+      _zone(
+          zone
+      ),
+      _installationLocation(
+          installationLocation
+      ),
+      _deviceAddress(
+          deviceAddress
+      ),
+      _ip(
+          ip
+      ),
+      _channels(
+          std::move(
+              channels
+          )
+      ),
+      Error(
+          errorCount,
+          30000
+      ),
+      bank(
+          0
+      )
+{
 }
 
-int GenericPrgDevice::GetArea(int channel, int address) { 
-  if (this->_ioAreas.empty()) { 
-      LOG_EF(__FUNCTION__, "EMPTY IO AREA: ch=%d addr=%d", channel, address);
-      return -1;
-  }
+int GenericPrgDevice::GetArea(
+    int channel,
+    int address)
+{
+    if (_ioAreas.empty())
+    {
+        LOG_EF(
+            __FUNCTION__,
+            "EMPTY IO AREA: ch=%d addr=%d",
+            channel,
+            address
+        );
 
-  /*Questo presume che tutti i channel abbiano lo stesso numero di items.
-
-  Ma i profili non sono tutti così.
-
-  Per esempio:
-
-  CWT_SLTH_6W_S_C
-  channel 0 → 2 items
-  channel 1 → 1 item*/
-
-    //int size = this->_channels[0].items * channel;
-    //int index = size + address;
-    int index = address;
-
-    for (int i = 0; i < channel; ++i)
-        index += _channels[i].items;
-
-    if (index < 0 || index >= this->_ioAreas.size()) {
-        LOG_EF(__FUNCTION__, ">>> ERRORE: index fuori range! <<<");
-        return 0;
+        return -1;
     }
 
-    return this->_ioAreas[index];
+
+    if (channel < 0 ||
+        channel >=
+            static_cast<int>(
+                _channels.size()
+            ))
+    {
+        LOG_EF(
+            __FUNCTION__,
+            "Canale fuori range: "
+            "device=%s channel=%d channels=%u",
+            GetName(),
+            channel,
+            static_cast<unsigned>(
+                _channels.size()
+            )
+        );
+
+        return -1;
+    }
+
+
+    if (address < 0 ||
+        address >=
+            _channels[channel].items)
+    {
+        LOG_EF(
+            __FUNCTION__,
+            "Address fuori range: "
+            "device=%s channel=%d "
+            "address=%d items=%d",
+            GetName(),
+            channel,
+            address,
+            _channels[channel].items
+        );
+
+        return -1;
+    }
+
+
+    int index =
+        address;
+
+
+    for (int currentChannel = 0;
+         currentChannel < channel;
+         ++currentChannel)
+    {
+        index +=
+            _channels[currentChannel].items;
+    }
+
+
+    if (index < 0 ||
+        index >=
+            static_cast<int>(
+                _ioAreas.size()
+            ))
+    {
+        LOG_EF(
+            __FUNCTION__,
+            "Indice area fuori range: "
+            "device=%s channel=%d "
+            "address=%d index=%d size=%u",
+            GetName(),
+            channel,
+            address,
+            index,
+            static_cast<unsigned>(
+                _ioAreas.size()
+            )
+        );
+
+        return -1;
+    }
+
+
+    return _ioAreas[index];
 }
 
 const GenericPrgDevice::GenericPrgDeviceChannel& GenericPrgDevice::GetChannelInfo(int channel) const
@@ -173,14 +310,14 @@ const GenericPrgDevice::GenericPrgDeviceChannel& GenericPrgDevice::GetChannelInf
 }
 
 
-size_t GenericPrgDevice::GetChannelsSize()
-{ 
-  return this->_channels.size();
+size_t GenericPrgDevice::GetChannelsSize() const
+{
+    return _channels.size();
 }
 
-Priority GenericPrgDevice::GetPriority()
-{ 
-  return this->_priority;
+Priority GenericPrgDevice::GetPriority() const
+{
+    return _priority;
 }
 
 const DMIPAddress& GenericPrgDevice::GetIp() const
@@ -188,14 +325,43 @@ const DMIPAddress& GenericPrgDevice::GetIp() const
     return _ip;
 }
 
-unsigned int GenericPrgDevice::GetDeviceAddress()
-{ 
-  return this->_deviceAddress;
+unsigned int GenericPrgDevice::GetDeviceAddress() const
+{
+    return _deviceAddress;
 }
 
-const char* GenericPrgDevice::GetName()
-{ 
-  return this->_name;
+const char* GenericPrgDevice::GetName() const
+{
+    if (!_name ||
+        _name[0] == '\0')
+    {
+        return "NO name Device";
+    }
+
+    return _name;
+}
+
+const char* GenericPrgDevice::GetZone() const
+{
+    if (!_zone ||
+        _zone[0] == '\0')
+    {
+        return "Not set";
+    }
+
+    return _zone;
+}
+
+const char*
+GenericPrgDevice::GetInstallationLocation() const
+{
+    if (!_installationLocation ||
+        _installationLocation[0] == '\0')
+    {
+        return "Not set";
+    }
+
+    return _installationLocation;
 }
 
 bool GenericPrgDeviceManager::HasDevicesByPriority(
@@ -211,165 +377,340 @@ bool GenericPrgDeviceManager::HasDevicesByPriority(
         && !it->second.empty();
 }
 
-bool GenericPrgDevice::FindChannelByArea(int area, int &channel, int &item) {
-    for (int ch = 0; ch < GetChannelsSize(); ch++) {
-      auto items=GetChannelInfo(ch).items;
-        for (int j = 0; j < items; j++) {
-            if (GetArea(ch, j) == area) {
-                channel = ch;
-                item = j;
-                return true;
+bool GenericPrgDevice::FindChannelByArea(
+    int area,
+    int& channel,
+    int& item)
+{
+    const int channelCount =
+        static_cast<int>(
+            GetChannelsSize()
+        );
+
+
+    for (int channelIndex = 0;
+         channelIndex < channelCount;
+         ++channelIndex)
+    {
+        const GenericPrgDeviceChannel& channelInfo =
+            GetChannelInfo(
+                channelIndex
+            );
+
+
+        for (int itemIndex = 0;
+             itemIndex < channelInfo.items;
+             ++itemIndex)
+        {
+            if (GetArea(
+                    channelIndex,
+                    itemIndex) != area)
+            {
+                continue;
             }
+
+
+            channel =
+                channelIndex;
+
+            item =
+                itemIndex;
+
+
+            return true;
         }
     }
+
+
     return false;
 }
 
-// I/O Dependent
-GenericPrgDevice::structRead GenericPrgDevice::Read(DMPlatform::Modbus::TCPClient &cli,
-                                                    int channel,
-                                                    uint16_t* outBuffer,
-                                                    unsigned long now) {
-    structRead retVal;
-    retVal.ok = false;
-    retVal.itemsPerCall=this->_channels[channel].ItemsPerCall;
+GenericPrgDevice::structRead GenericPrgDevice::Read(
+    DMPlatform::Modbus::TCPClient& cli,
+    int channel,
+    uint16_t* outBuffer,
+    unsigned long now)
+{
+    structRead result{};
+    result.ok = false;
 
-    if (channel >= this->_channels.size()) {
-        LOG_EF(__FUNCTION__, "READ ERROR size<channel name=%s IP=%d.%d.%d.%d Addr=%d Size=%d Channel=%d", this->_name, this->_ip[0], this->_ip[1], this->_ip[2], this->_ip[3], this->GetDeviceAddress(), this->_channels.size(), channel);
+    if (!outBuffer)
+    {
+        LOG_EF(__FUNCTION__,
+            "outBuffer NULL | Device=%s | Zona=%s | Installazione=%s",
+            GetName(),
+            GetZone(),
+            GetInstallationLocation());
 
-        this->Error.Loop(true, now);
-        return retVal;
+        Error.Loop(true, now);
+        return result;
     }
 
-    //Gestione back di lettura
-    int startingAddr = this->_channels[channel].startingAddr;
+    if (channel < 0 ||
+        channel >= static_cast<int>(_channels.size()))
+    {
+        LOG_EF(__FUNCTION__,
+            "Canale fuori range | Device=%s | Zona=%s | Installazione=%s "
+            "| IP=%u.%u.%u.%u | Addr=%u | Channel=%d | Channels=%u",
+            GetName(),
+            GetZone(),
+            GetInstallationLocation(),
+            static_cast<unsigned>(_ip[0]),
+            static_cast<unsigned>(_ip[1]),
+            static_cast<unsigned>(_ip[2]),
+            static_cast<unsigned>(_ip[3]),
+            static_cast<unsigned>(_deviceAddress),
+            channel,
+            static_cast<unsigned>(_channels.size()));
 
-    // Calcolo numero di bank validi
-    int bankCount = (this->_channels[channel].items + this->MAX_CALLS - 1) / this->MAX_CALLS;
+        Error.Loop(true, now);
+        return result;
+    }
 
-    // Normalizza il bank (evita overflow e start fuori range)
-    this->bank = this->bank % bankCount;
+    const GenericPrgDeviceChannel& channelInfo =
+        _channels[channel];
 
-    // Calcola jump in base al bank
-    int jump = this->bank * this->MAX_CALLS;
+    result.itemsPerCall =
+        channelInfo.ItemsPerCall;
 
-    // Imposta startIndex e indirizzo reale
-    retVal.startIndex = jump;
-    startingAddr = this->_channels[channel].startingAddr + jump;
+    if (channelInfo.items <= 0 ||
+        channelInfo.ItemsPerCall <= 0)
+    {
+        LOG_EF(__FUNCTION__,
+            "Configurazione canale non valida | Device=%s "
+            "| Channel=%d | Items=%d | ItemsPerCall=%d",
+            GetName(),
+            channel,
+            channelInfo.items,
+            channelInfo.ItemsPerCall);
 
-    // Calcola quanti registri leggere in questo bank
-    int remaining = this->_channels[channel].items - jump;
-    retVal.items = (remaining < this->MAX_CALLS) ? remaining : this->MAX_CALLS;
+        Error.Loop(true, now);
+        return result;
+    }
 
-    // Avanza il bank per la prossima chiamata
-    this->bank++;
+    const int bankCount =
+        (channelInfo.items + MAX_CALLS - 1) /
+        MAX_CALLS;
 
-    int tmpRead = 0;
-    switch (this->_channels[channel].hwType)
+    bank %= bankCount;
+
+    const int jump =
+        bank * MAX_CALLS;
+
+    int startingAddr =
+        channelInfo.startingAddr + jump;
+
+    const int remaining =
+        channelInfo.items - jump;
+
+    result.startIndex =
+        jump;
+
+    result.items =
+        remaining < MAX_CALLS
+            ? remaining
+            : MAX_CALLS;
+
+    ++bank;
+
+    int requestedItems =
+        result.items;
+
+    int readCount =
+        0;
+
+    switch (channelInfo.hwType)
     {
         case Hold:
-          if (!this->Error.IsInError()) {
-            LOG_DF("READ HOLD", "Device %s addr=%d channel=%d bank=%d",
-              this->_name,
-              this->_deviceAddress,
-              channel,
-              this->bank);
+        {
+            if (Error.IsInError())
+            {
+                Error.Loop(true, now);
+                return result;
+            }
 
-            int toRead = retVal.items * this->_channels[channel].ItemsPerCall;
-        
-            tmpRead = cli.requestFrom(this->_deviceAddress,
-                                          HOLDING_REGISTERS,
-                                          startingAddr,
-                                          toRead);
-            
-            if (tmpRead > 0) {
-                for (int i = 0; i < tmpRead; i++) {
-                    long v = cli.read();
-                    if (v < 0) {
-                        retVal.ok = false;
-                        this->Error.Loop(true, now);
-                        return retVal;
-                    }
-                    outBuffer[i] = (uint16_t)v;
+            requestedItems *=
+                channelInfo.ItemsPerCall;
+
+            readCount = cli.requestFrom(
+                _deviceAddress,
+                HOLDING_REGISTERS,
+                startingAddr,
+                requestedItems
+            );
+
+            if (readCount <= 0)
+            {
+                LOG_DF(__FUNCTION__,
+                    "READ HOLD fallita | Device=%s | Zona=%s "
+                    "| Installazione=%s | Errore=%s",
+                    GetName(),
+                    GetZone(),
+                    GetInstallationLocation(),
+                    cli.lastError());
+
+                Error.Loop(true, now);
+                return result;
+            }
+
+            for (int i = 0; i < readCount; ++i)
+            {
+                const long value =
+                    cli.read();
+
+                if (value < 0)
+                {
+                    LOG_DF(__FUNCTION__,
+                        "READ HOLD valore non valido | Device=%s | Index=%d",
+                        GetName(),
+                        i);
+
+                    Error.Loop(true, now);
+                    return result;
                 }
 
-                this->Error.Loop(false, now);
-                retVal.ok = true;
-            } 
-            else  {
-              LOG_DF(__FUNCTION__, "ERROR (Hold): %s", cli.lastError());
-
-              this->Error.Loop(true, now);
-              retVal.ok = false;
+                outBuffer[i] =
+                    static_cast<uint16_t>(value);
             }
-          } 
-          else {
-              this->Error.Loop(true, now);
-              retVal.ok = false;
-          }
 
-          break;
+            Error.Loop(false, now);
+            result.ok = true;
+            break;
+        }
 
         case Input:
-            if (!this->Error.IsInError()) {
-              LOG_DF("READ INPUT", "Device %s addr=%d channel=%d bank=%d",
-                this->_name,
-                this->_deviceAddress,
-                channel,
-                this->bank);
+        {
+            if (Error.IsInError())
+            {
+                Error.Loop(true, now);
+                return result;
+            }
 
-              tmpRead = cli.requestFrom(this->_deviceAddress,
-                                        INPUT_REGISTERS,
-                                        startingAddr,
-                                        retVal.items * this->_channels[channel].ItemsPerCall);
-              
-              if (tmpRead != 0) {
-                  for (int i = 0; i < tmpRead; i++)
-                      outBuffer[i] = cli.read();
+            requestedItems *=
+                channelInfo.ItemsPerCall;
 
-                  this->Error.Loop(false, now);
-                  retVal.ok = true;
-              } else if(!this->Error.Loop(true, now)) {
-                
-                LOG_DF(__FUNCTION__, "ERROR (Input): name=%s IP=%d.%d.%d.%d Addr=%d", this->_name, this->_ip[0], this->_ip[1], this->_ip[2], this->_ip[3], this->_deviceAddress);
-                LOG_DF(__FUNCTION__, "ERROR (Input): %s", cli.lastError());
-              }
-            } else this->Error.Loop(true, now);
+            readCount = cli.requestFrom(
+                _deviceAddress,
+                INPUT_REGISTERS,
+                startingAddr,
+                requestedItems
+            );
+
+            if (readCount <= 0)
+            {
+                if (!Error.Loop(true, now))
+                {
+                    LOG_DF(__FUNCTION__,
+                        "READ INPUT fallita | Device=%s | Zona=%s "
+                        "| Installazione=%s | IP=%u.%u.%u.%u "
+                        "| Addr=%u | Errore=%s",
+                        GetName(),
+                        GetZone(),
+                        GetInstallationLocation(),
+                        static_cast<unsigned>(_ip[0]),
+                        static_cast<unsigned>(_ip[1]),
+                        static_cast<unsigned>(_ip[2]),
+                        static_cast<unsigned>(_ip[3]),
+                        static_cast<unsigned>(_deviceAddress),
+                        cli.lastError());
+                }
+
+                return result;
+            }
+
+            for (int i = 0; i < readCount; ++i)
+            {
+                const long value =
+                    cli.read();
+
+                if (value < 0)
+                {
+                    Error.Loop(true, now);
+                    return result;
+                }
+
+                outBuffer[i] =
+                    static_cast<uint16_t>(value);
+            }
+
+            Error.Loop(false, now);
+            result.ok = true;
             break;
+        }
 
         case Discrete:
-            if (!this->Error.IsInError()) {
-              LOG_DF("READ DISCRETE", "Device %s addr=%d channel=%d bank=%d",
-                this->_name,
-                this->_deviceAddress,
-                channel,
-                this->bank);
+        {
+            if (Error.IsInError())
+            {
+                Error.Loop(true, now);
+                return result;
+            }
 
-                tmpRead = cli.requestFrom(this->_deviceAddress,
-                                         DISCRETE_INPUTS,
-                                         startingAddr,
-                                         retVal.items);
-              
-                if (tmpRead != 0) {
-                    for (int i = 0; i < tmpRead; i++)
-                        outBuffer[i] = cli.read();
+            readCount = cli.requestFrom(
+                _deviceAddress,
+                DISCRETE_INPUTS,
+                startingAddr,
+                requestedItems
+            );
 
-                    this->Error.Loop(false, now);
-                    retVal.ok = true;
-                } else if(!this->Error.Loop(true, now)) {
-                  LOG_DF(__FUNCTION__, "ERROR (Discrete): name=%s IP=%d.%d.%d.%d Addr=%d", this->_name, this->_ip[0], this->_ip[1], this->_ip[2], this->_ip[3], this->_deviceAddress);
-                  LOG_DF(__FUNCTION__, "ERROR (Discrete): %s", cli.lastError());
+            if (readCount <= 0)
+            {
+                if (!Error.Loop(true, now))
+                {
+                    LOG_DF(__FUNCTION__,
+                        "READ DISCRETE fallita | Device=%s | Zona=%s "
+                        "| Installazione=%s | IP=%u.%u.%u.%u "
+                        "| Addr=%u | Errore=%s",
+                        GetName(),
+                        GetZone(),
+                        GetInstallationLocation(),
+                        static_cast<unsigned>(_ip[0]),
+                        static_cast<unsigned>(_ip[1]),
+                        static_cast<unsigned>(_ip[2]),
+                        static_cast<unsigned>(_ip[3]),
+                        static_cast<unsigned>(_deviceAddress),
+                        cli.lastError());
                 }
-            } else this->Error.Loop(true, now);
+
+                return result;
+            }
+
+            for (int i = 0; i < readCount; ++i)
+            {
+                const long value =
+                    cli.read();
+
+                if (value < 0)
+                {
+                    Error.Loop(true, now);
+                    return result;
+                }
+
+                outBuffer[i] =
+                    static_cast<uint16_t>(value);
+            }
+
+            Error.Loop(false, now);
+            result.ok = true;
             break;
+        }
 
         default:
-            LOG_EF(__FUNCTION__, "ERROR (Unknown read function): %s", this->_name);
-            this->Error.Loop(true, now);
+        {
+            LOG_EF(__FUNCTION__,
+                "Funzione READ sconosciuta | Device=%s "
+                "| Zona=%s | Installazione=%s | HwType=%d",
+                GetName(),
+                GetZone(),
+                GetInstallationLocation(),
+                static_cast<int>(channelInfo.hwType));
+
+            Error.Loop(true, now);
             break;
+        }
     }
 
-    return retVal;
+    return result;
 }
 
 bool GenericPrgDevice::Write(DMPlatform::Modbus::TCPClient &mb, int channel, int address, int value, unsigned long now) {

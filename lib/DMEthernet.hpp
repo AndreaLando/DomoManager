@@ -20,13 +20,14 @@ using DMIPAddress = IPAddress;
     #include <Dns.h>
 
     using DMEthernetClient = EthernetClient;
+    using DMEthernetServer = EthernetServer;
     using DMEthernetUDP    = EthernetUDP;
 
     namespace DMEthernetConfig
     {
         constexpr int CS   = 14;
         constexpr int RST  = 9;
-        constexpr int INT  = 10;   // attualmente non usato
+        constexpr int INT  = 10;
 
         constexpr int MISO = 12;
         constexpr int MOSI = 11;
@@ -42,6 +43,7 @@ using DMIPAddress = IPAddress;
     #include <EthernetUdp.h>
 
     using DMEthernetClient = EthernetClient;
+    using DMEthernetServer = EthernetServer;
     using DMEthernetUDP    = EthernetUDP;
 
 

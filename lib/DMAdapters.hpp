@@ -23,7 +23,6 @@
 
 #include "DMTransport.hpp"
 #include "DMWebAPI.hpp"
-//#include "DMRS485Node.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -68,139 +67,141 @@ protected:
 
 
 // HttpAdapter.h (snippet)
-class HttpAdapter : public TransportBase {
-    SimpleHttpTransport* transport;
+class HttpAdapter : public TransportBase
+{
+private:
+
+    HttpClientTransport* transport;
+
     String pendingResp;
-    DeviceMessageEngine::PlaceholderResolver resolver;
-    ICommandTransport::ResponseCallback cb;
+
+    ResponseCallback cb;
+
     unsigned long startTs = 0;
-    unsigned long timeoutMs = 0;
+
+    unsigned long requestTimeoutMs = 0;
 
 public:
-    HttpAdapter(SimpleHttpTransport* t) : transport(t) {}
 
-    bool begin() override {
-        return transport->begin();
-    }
-
-    bool send(const String& payload) override {
-        transport->startPOST(payload, payload);
-        return true;
-    }
-
-    bool request(const String& payload,
-                 ResponseCallback callback,
-                 unsigned long tmo) override
+    explicit HttpAdapter(
+        HttpClientTransport* t)
+        : transport(t)
     {
+    }
+
+    bool begin() override
+    {
+        return transport
+            ? transport->begin()
+            : false;
+    }
+
+    bool send(
+        const String& payload) override
+    {
+        if (!transport)
+            return false;
+
+        HttpRequest req;
+
+        req.method = "POST";
+        req.url = payload;
+        req.body = payload;
+
+        return transport->request(
+            req,
+            [this](const HttpResponse& resp)
+            {
+                if (resp.success)
+                {
+                    pendingResp = resp.body;
+                }
+            }
+        );
+    }
+
+    bool request(
+        const String& payload,
+        ResponseCallback callback,
+        unsigned long timeoutMs) override
+    {
+        if (!transport)
+            return false;
+
         cb = callback;
-        timeoutMs = tmo;
-        transport->startPOST(payload, payload);
+
+        requestTimeoutMs = timeoutMs;
+
         startTs = millis();
-        return true;
+
+        HttpRequest req;
+
+        req.method = "POST";
+        req.url = payload;
+        req.body = payload;
+        req.timeoutMs = timeoutMs;
+
+        return transport->request(
+            req,
+            [this](const HttpResponse& resp)
+            {
+                if (cb)
+                {
+                    cb(
+                        resp.success
+                            ? resp.body
+                            : String()
+                    );
+                }
+
+                if (resp.success)
+                {
+                    pendingResp = resp.body;
+                }
+
+                startTs = 0;
+            }
+        );
     }
 
 protected:
-    bool rawReceive(String& out) override {
-        if (pendingResp.length() == 0)
+
+    bool rawReceive(
+        String& out) override
+    {
+        if (pendingResp.isEmpty())
             return false;
 
         out = pendingResp;
+
         pendingResp = "";
+
         return true;
     }
 
-    void rawLoop(unsigned long now) override {
-        String out;
-        if (transport->loop(now, out)) {
-            if (cb) cb(out);
-        } else if (startTs && (now - startTs > timeoutMs)) {
-            if (cb) cb(String());
+    void rawLoop(
+        unsigned long now) override
+    {
+        if (!transport)
+            return;
+
+        transport->loop(now);
+
+        if (
+            startTs &&
+            requestTimeoutMs &&
+            (now - startTs > requestTimeoutMs)
+        )
+        {
+            if (cb)
+            {
+                cb(String());
+            }
+
             startTs = 0;
         }
     }
 };
-
-/*
-class RS485NodeAdapter : public TransportBase {
-private:
-    RS485Node node;
-
-    struct Packet {
-        String data;
-    };
-    std::vector<Packet> rxQueue;
-
-    ResponseCallback pendingCb = nullptr;
-    unsigned long timeoutAt = 0;
-
-public:
-    RS485NodeAdapter(bool master=false)
-        : node(master)
-    {
-        node.onPacket([](uint8_t type, uint8_t* payload, uint8_t len){
-            if (instance) instance->onPacketInternal(type, payload, len);
-        });
-    }
-
-    static inline RS485NodeAdapter* instance = nullptr;
-
-    void onPacketInternal(uint8_t type, uint8_t* payload, uint8_t len) {
-        String s;
-        for (int i = 0; i < len; i++)
-            s += (char)payload[i];
-
-        rxQueue.push_back({ s });
-    }
-
-    bool begin() override {
-        instance = this;
-        node.begin(9600);
-        return true;
-    }
-
-    bool send(const String& payload) override {
-        node.sendPacket(
-            0x10,
-            (uint8_t*)payload.c_str(),
-            payload.length(),
-            false
-        );
-        return true;
-    }
-
-    bool request(const String& payload, ResponseCallback cb, unsigned long timeoutMs) override {
-        pendingCb = cb;
-        timeoutAt = millis() + timeoutMs;
-
-        node.sendPacket(
-            0x90,
-            (uint8_t*)payload.c_str(),
-            payload.length(),
-            true
-        );
-        return true;
-    }
-
-protected:
-    bool rawReceive(String& out) override {
-        if (rxQueue.empty())
-            return false;
-
-        out = rxQueue.front().data;
-        rxQueue.erase(rxQueue.begin());
-        return true;
-    }
-
-    void rawLoop(unsigned long now) override {
-        node.poll();
-
-        if (pendingCb && now > timeoutAt) {
-            pendingCb(String());
-            pendingCb = nullptr;
-        }
-    }
-};*/
-
 
 
 #endif

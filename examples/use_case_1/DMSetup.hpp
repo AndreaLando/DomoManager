@@ -1,6 +1,3 @@
-#ifndef DMSetup_HPP
-#define DMSetup_HPP
-
 #pragma once
 
 /* ============================================================================
@@ -28,6 +25,8 @@
 #include "DMWebApiDefs.hpp"
 #include "DMPower.hpp"
 #include "DMFrontendEngines.hpp"
+#include "DMOnline.hpp"
+#include "DMRuntimeStore.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -41,11 +40,13 @@
 DEFINE_AREA(AREA_PMETER_VOLTAGE, 10)
 DEFINE_AREA(AREA_PMETER_CURRENT, 11)
 DEFINE_AREA(AREA_PMETER_POWER, 12)
+DEFINE_AREA(AREA_PMETER_FREQUENCY, 14)
 
-DEFINE_AREA(AREA_CAMERA_WIN1_ALM, 13) /////////// Deve essere variato
-DEFINE_AREA(AREA_CAMERA_WIN2_ALM, 14) /////////// Deve essere variato
-DEFINE_AREA(AREA_CAMERA_WIN3_ALM, 15) /////////// Deve essere variato
-DEFINE_AREA(AREA_CUCINA_SMOKE_ALM, 16) /////////// Deve essere variato
+
+DEFINE_AREA(AREA_CAMERA_WIN1_ALM, 16) 
+DEFINE_AREA(AREA_CAMERA_WIN2_ALM, 18) 
+DEFINE_AREA(AREA_CAMERA_WIN3_ALM, 62) /////////// Deve essere variato
+DEFINE_AREA(AREA_CUCINA_SMOKE_ALM, 63) /////////// Deve essere variato
 
 
 
@@ -64,8 +65,11 @@ DEFINE_AREA(SENSORE_CAMERA_HUM, 118)
 DEFINE_AREA(SENSORE_CAMERA_TEMP, 119)
 DEFINE_AREA(SENSORE_CAMERA_CO, 120)
 
-DEFINE_AREA(SENSORE_CUCINA_CORRENTE, 122)
+DEFINE_AREA(SENSORE_CUCINA_INDUZIONE, 122)
 DEFINE_AREA(AREA_CUCINA_FLOOD_ALM, 125)
+DEFINE_AREA(AREA_CUCINA_LUCE_1, 127)
+DEFINE_AREA(AREA_CUCINA_BLUETOOTH, 128)
+
 
 DEFINE_AREA(AREA_ESTRATTORE_CUCINA, 135)
 DEFINE_AREA(AREA_INGRESSO_EV_OPEN_DI, 147)
@@ -153,6 +157,25 @@ DEFINE_AREA(AREA_MQTT_HANDCONTROL, 265)
 DEFINE_AREA(AREA_MQTT_HANDCONTROL_STATUS, 266)
 DEFINE_AREA(AREA_MQTT_HANDCONTROL_CMD, 267)
 
+// 268 free
+
+DEFINE_AREA(AREA_SETPOINT_TEMP_GIORNO, 269)
+DEFINE_AREA(AREA_SETPOINT_TEMP_NOTTE, 270)
+DEFINE_AREA(AREA_SETPOINT_TEMP_BAGNO, 271)
+
+DEFINE_AREA(AREA_INVERTER_PV_VOLTAGE, 272)
+DEFINE_AREA(AREA_INVERTER_PV_CURRENT, 273)
+DEFINE_AREA(AREA_INVERTER_PV_POWER, 274)
+DEFINE_AREA(AREA_INVERTER_BATTERY_VOLTAGE, 275)
+DEFINE_AREA(AREA_INVERTER_BATTERY_SOC, 276)
+DEFINE_AREA(AREA_INVERTER_TEMP, 277)
+DEFINE_AREA(AREA_INVERTER_STATUS, 278)
+DEFINE_AREA(AREA_INVERTER_FRONTEND_STATUS, 279)
+
+DEFINE_AREA(AREA_POWER_LOAD_SHED_STATUS, 280)   //Bit controllo carichi
+DEFINE_AREA(AREA_REOLINK_INGRESSO_ALARM, 281)   //Bit allarmi telecamera Reolink 
+
+
 // ************ PHISICAL DEVICES *******************************
 IPAddress WaveShareP1_Addr=IPAddress(192, 168, 12, 203);
 IPAddress WaveSharePT_Addr=IPAddress(192, 168, 12, 204);
@@ -161,83 +184,92 @@ IPAddress WaveShareCantina_Addr=IPAddress(192, 168, 12, 205);
 static const DomoManagerConfig::Devices mainDevicesConfig = {
     {
         // --- P1 ---
-        { "Lettore consumi - Quadro P1", WaveShareP1_Addr, 1, "LE_01MQ",
-          { 10, 11, 12, 13, 14 }, 3, Low
+        { "Lettore consumi", WaveShareP1_Addr, 1, "LE_01MQ",
+          { 10, 11, 12, 13, 14 }, 3, Low,
+          "Camera da letto", "Quadro P1"
         },
 
-        { "Scheda 4DI+2DO - Fondo P1", WaveShareP1_Addr, 8, "MA01_AXCX4020",
-          { 15, 16, 17, 18, 19, 20 }, 3, High
+        { "Scheda 4DI+2DO", WaveShareP1_Addr, 8, "MA01_AXCX4020",
+          { 15, AREA_CAMERA_WIN1_ALM, 17, AREA_CAMERA_WIN2_ALM, 19, 20 }, 3, High,
+          "Camera da letto", "Fondo P1"
         },
 
-        { "Scheda 32DI - Parete P1", WaveShareP1_Addr, 4, "N4DIH32",
+        { "Scheda 32DI", WaveShareP1_Addr, 4, "N4DIH32",
           {
               21, 22, AREA_CAMERA_PIR_ALM, AREA_CAMERA_PIR_TAMPER, 25, 26, 27, 28,
               AREA_CAMERA_SMOKE_ALM, 30, 31, 32, 33, 34, 35, 36,
               37, 38, 39, 40, 41, 42, 43, 44,
               45, 46, 47, 48, 49, 50, 51, 52
           },
-          3, High
+          3, High, "Camera da letto", "Parete P1"
         },
 
-        { "Scheda 4DI+4DO - Scala", WaveShareP1_Addr, 2, "MA01_XACX0440",
+        { "Scheda 4DI+4DO", WaveShareP1_Addr, 2, "MA01_XACX0440",
           { AREA_INGRESSO_DOOR_ALM, 54, 55, 56, 57, 58, AREA_PLAFONIERA_EXT, 60 },
-          3, High
+          3, High, "Ingresso", "Scala"
         },
 /*
         { "Scheda 4DI+4DO - Quadro P1", WaveShareP1_Addr, 3, "MA01_XACX0440",
           { 62, 63, 64, 65, 66, 67, 68, 69 }, 3, High
         },*/
 
-        { "Scheda 4DI+4DO - Parete P1", WaveShareP1_Addr, 5, "MA01_XACX0440",
-          { 70, 71, 72, 73, 74, 75, 76, 77 }, 3, Medium
+        { "Scheda 4DI+4DO", WaveShareP1_Addr, 5, "MA01_XACX0440",
+          { 70, 71, 72, 73, 74, 75, 76, 77 }, 3, Medium,
+          "Camera da letto", "Parete P1"
         }, 
 
-        { "Scheda 32DI - Fondo P1", WaveShareP1_Addr, 6, "N4DIH32",
+        { "Scheda 32DI", WaveShareP1_Addr, 6, "N4DIH32",
           {
               78, 79, 80, 81, 82, 83, 84, 85,
               86, 87, 88, 89, 90, 91, 92, 93,
               94, 95, 96, 97, AREA_CUCINA_PIR_ALM, AREA_CUCINA_PIR_TAMPER, AREA_CUCINA_DOOR_ALM, 101, 
               102, 103, 104, 105, 106, 107, 108, 109
           },
-          3, High
+          3, High, "Camera da letto", "Fondo P1"
         },
 
-        { "Scheda 8DO - Fondo P1", WaveShareP1_Addr, 7, "MA01_AXCX0080",
-          { 110, 111, 112, 113, 114, 115, 116, 117 }, 3, Low
+        { "Scheda 8DO", WaveShareP1_Addr, 7, "MA01_AXCX0080",
+          { 110, 111, 112, 113, 114, 115, 116, 117 }, 3, Low,
+          "Camera da letto", "Fondo P1"
         },
 
-        { "Sensore CO/Temp/Hum - P1", WaveShareP1_Addr, 10, "CWT_THCO_2K",
-          { SENSORE_CAMERA_HUM, SENSORE_CAMERA_TEMP, SENSORE_CAMERA_CO }, 3, Low
+        { "Sensore CO/Temp/Hum", WaveShareP1_Addr, 10, "CWT_THCO_2K",
+          { SENSORE_CAMERA_HUM, SENSORE_CAMERA_TEMP, SENSORE_CAMERA_CO }, 3, Low,
+          "Camera da letto", "P1"
         },
 
         // --- PT ---
-        { "Sensore Corrente - Quadro cucina PT", WaveSharePT_Addr, 1, "CTR4A01",
-          { SENSORE_CUCINA_CORRENTE }, 3, Low
+        { "Sensore Corrente", WaveSharePT_Addr, 1, "CTR4A01",
+          { SENSORE_CUCINA_INDUZIONE }, 3, Low,
+          "Cucina",  "Quadro cucina PT"
         },
 
-        { "Scheda 4DI+4DO - Quadro cucina PT", WaveSharePT_Addr, 3, "MA01_XACX0440",
-          { 123, 124, AREA_CUCINA_FLOOD_ALM, 126, 127, 128, 129, 130 }, 3, High
+        { "Scheda 4DI+4DO", WaveSharePT_Addr, 3, "MA01_XACX0440",
+          { 123, 124, AREA_CUCINA_FLOOD_ALM, 126, AREA_CUCINA_LUCE_1, AREA_CUCINA_BLUETOOTH, 129, 130 }, 3, High,
+          "Cucina",  "Quadro cucina PT"
         },
 
-        { "Scheda 4DI+4DO - Parete cucina PT", WaveSharePT_Addr, 4, "MA01_XACX0440",
-          { 131, 132, 133, 134, AREA_ESTRATTORE_CUCINA, 136, 137, 138 }, 3, Low
+        { "Scheda 4DI+4DO", WaveSharePT_Addr, 4, "MA01_XACX0440",
+          { 131, 132, 133, 134, AREA_ESTRATTORE_CUCINA, 136, 137, 138 }, 3, Low,
+          "Cucina",  "Parete cucina PT"
         },
 
-        { "Scheda 4DI+4DO - Corridoio PT", WaveSharePT_Addr, 5, "MA01_XACX0440",
-          { 139, 140, 141, 142, 143, 144, 145, 146 }, 3, Low
+        { "Scheda 4DI+4DO", WaveSharePT_Addr, 5, "MA01_XACX0440",
+          { 139, 140, 141, 142, 143, 144, 145, 146 }, 3, Low,
+          "Ingresso", "Corridoio PT"
         },
 
-        { "Scheda 4AI+4DO - Corridoio PT", WaveSharePT_Addr, 6, "MA01_XACX0440",
+        { "Scheda 4AI+4DO", WaveSharePT_Addr, 6, "MA01_XACX0440",
           {
               AREA_INGRESSO_EV_OPEN_DI, 148, 149, 150,
               RELAY_LED_BAGNO,
               AREA_INGRESSO_EV_CLOSE, AREA_INGRESSO_EV_OPEN,
               AREA_ESTRATTORE_BAGNO
           },
-          3, Low
+          3, Low, "Ingresso", "Corridoio PT"
         },
 
-        { "Scheda 32DI - Corridoio PT", WaveSharePT_Addr, 7, "N4DIH32",
+        { "Scheda 32DI", WaveSharePT_Addr, 7, "N4DIH32",
           {
               AREA_BAGNO_PIR_ALM, AREA_BAGNO_PIR_TAMPER,
               AREA_INGRESSO_PIR_ALM, AREA_INGRESSO_PIR_TAMPER,
@@ -247,19 +279,22 @@ static const DomoManagerConfig::Devices mainDevicesConfig = {
               171, 172, 173, 174, 175, 176, 177, 178, 179, 180,
               181, 182, 183, 184, 185, 186
           },
-          3, High
+          3, High, "Ingresso", "Corridoio PT"
         }, 
 
-        { "Sensore Light/Temp/Hum - cucina PT", WaveSharePT_Addr, 10, "CWT_THCO_2K",
-          { SENSORE_CUCINA_HUM, SENSORE_CUCINA_TEMP, SENSORE_CUCINA_LUX }, 3, Low
+        { "Sensore Light/Temp/Hum", WaveSharePT_Addr, 10, "CWT_THCO_2K",
+          { SENSORE_CUCINA_HUM, SENSORE_CUCINA_TEMP, SENSORE_CUCINA_LUX }, 3, Low,
+          "Cucina", ""
         },
 
-        { "Gestore LED - Bagno", WaveSharePT_Addr, 8, "RESI_LED",
-          { 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202 }, 3, Low
+        { "Gestore LED", WaveSharePT_Addr, 8, "RESI_LED",
+          { 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202 }, 3, Low,
+          "Bagno", ""
         },
 
-        { "Sensore Light/Temp/Hum - Bagno", WaveSharePT_Addr, 11, "CWT_SLTH_6W_S_C",
-          { SENSORE_BAGNO_HUM, SENSORE_BAGNO_TEMP, SENSORE_BAGNO_LUX }, 3, Low
+        { "Sensore Light/Temp/Hum", WaveSharePT_Addr, 11, "CWT_SLTH_6W_S_C",
+          { SENSORE_BAGNO_HUM, SENSORE_BAGNO_TEMP, SENSORE_BAGNO_LUX }, 3, Low,
+          "Bagno", ""
         } 
     }
 };
@@ -295,13 +330,13 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     { AREA_PMETER_POWER,   0, "Lettura consumo W.", {false}, {600,800} },
 
     { 13, 0, "Lettura consumo 4", {false}, {-1,-1} },
-    { 14, 0, "Lettura frequenza Hz.", {false}, {10,20} },
+    { AREA_PMETER_FREQUENCY, 0, "Lettura frequenza Hz.", {false}, {10,20} },
 
     // **** 4 DI EbYTE ID=8 
     { 15, 0, "", {false}, {-1,-1} },
-    { 16, 0, "Vasistas dx. chiuso", {false}, {-1,-1} },
+    { AREA_CAMERA_WIN1_ALM, 0, "Vasistas dx. chiuso", {true}, {-1,-1} },
     { 17, 0, "", {false}, {-1,-1} },
-    { 18, 0, "Vasistas sx. chiuso", {false}, {-1,-1} },
+    { AREA_CAMERA_WIN2_ALM, 0, "Vasistas sx. chiuso", {true}, {-1,-1} },
 
     // 2 DO EbYTE ID=8
     { 19, 0, "Luce letto 1", {false}, {-1,-1} },
@@ -323,11 +358,11 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     // Pulsanti scala
     { 54, 57, "Pulsante scala 3", {false}, {-1,-1} },   // forwardArea = 57
     { 55, 0,  "Pulsante scala 1", {false}, {-1,-1} },   // -------A
-    { 56, AREA_PLAFONIERA_EXT, "Pulsante scala 2 (Luce PT)", {false}, {-1,-1} }, // forwardArea = 59
+    { 56, 0, "Pulsante scala 2 (Luce PT)", {false}, {-1,-1} }, // forwardArea = 59
 
     // 4 DO EbYTE
-    { 57, 0, "Luce scale P1", {false}, {-1,-1} },
-    { 58, 0, "Luce scale PT", {false}, {-1,-1} },
+    { 57, 0, "Luce scale", {false}, {-1,-1} },
+    { 58, 0, "Luce ingresso", {false}, {-1,-1} },
     { AREA_PLAFONIERA_EXT, 0, "Luce Ext.", {false}, {-1,-1} },
     { 60, 0, "", {false}, {-1,-1} },
     // ============================================================
@@ -356,9 +391,9 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     { 73, 0, "", {false}, {-1,-1} },
 
     // 4 DO EbYTE ID=5
-    { 74, 0, "DO: Led binario", {false}, {-1,-1} },
-    { 75, 0, "DO: Led trave 2", {false}, {-1,-1} },
-    { 76, 0, "DO: Led trave 1", {false}, {-1,-1} },
+    { 74, 0, "Led binario", {false}, {-1,-1} },
+    { 75, 0, "Led trave 2", {false}, {-1,-1} },
+    { 76, 0, "Led trave 1", {false}, {-1,-1} },
     { 77, 0, "", {false}, {-1,-1} },
     // ============================================================
     // ===================   PULSANTI LETTO / VASISTAS   ==========
@@ -390,9 +425,6 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     { AREA_CUCINA_PIR_ALM,    0, "PIR Cucina Allarme, NEGATO", {true}, {-1,-1} },
     { AREA_CUCINA_PIR_TAMPER, 0, "Tamper PIR Cucina, NEGATO",  {true}, {-1,-1} },
     { AREA_CUCINA_DOOR_ALM,   0, "Sensore porta ingresso Cucina, NEGATO", {true}, {-1,-1} },
-
-    { 101, 0, "", {false}, {-1,-1} },
-
     { 106, 0, "Pulsante cucina fondo 1", {false}, {-1,-1} },
     { 107, 0, "Pulsante cucina fondo 2", {false}, {-1,-1} },
     { 109, 0, "Pulsante cucina fondo 3", {false}, {-1,-1} },
@@ -417,18 +449,18 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     // =======================   CUCINA PT   =======================
     // ============================================================
 
-    { SENSORE_CUCINA_CORRENTE, 0, "Sensore corrente Induzione", {false}, {-1,-1} },
+    { SENSORE_CUCINA_INDUZIONE, 0, "Sensore corrente Induzione", {false}, {-1,-1} },
 
     // **** 4 DI EbYTE
-    { 123, 127, "Pulsante Cucina 1", {false}, {-1,-1} },   // forwardArea = 127
+    { 123, AREA_CUCINA_LUCE_1, "Pulsante Cucina 1", {false}, {-1,-1} },   // forwardArea = 127
     { 124, 129, "Pulsante Cucina 2", {false}, {-1,-1} },   // forwardArea = 129
 
     { AREA_CUCINA_FLOOD_ALM, 0, "Allagamento Cucina", {false}, {-1,-1} },
     { 126, 0, "", {false}, {-1,-1} },
 
     // **** 4 DO EbYTE
-    { 127, 0, "Luce cucina 1", {false}, {-1,-1} },
-    { 128, 0, "Bluetooth",     {false}, {-1,-1} },
+    { AREA_CUCINA_LUCE_1, 0, "Luce cucina 1", {false}, {-1,-1} },
+    { AREA_CUCINA_BLUETOOTH, 0, "On/off Bluetooth cucina",     {false}, {-1,-1} },
     { 129, 0, "Luce cucina 2", {false}, {-1,-1} },
     { 130, 0, "", {false}, {-1,-1} },
 
@@ -439,10 +471,10 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     { 134, 0, "", {false}, {-1,-1} },
 
     // **** 4 DO EbYTE ID=4
-    { AREA_ESTRATTORE_CUCINA, 0, "DO: Estrattore", {false}, {-1,-1} },
-    { 136, 0, "DO: Valvola calorifero bagno ON",  {false}, {-1,-1} },
-    { 137, 0, "DO: Valvola calorifero bagno OFF", {false}, {-1,-1} },
-    { 138, 0, "DO: Led Fondo", {false}, {-1,-1} },
+    { AREA_ESTRATTORE_CUCINA, 0, "Estrattore", {false}, {-1,-1} },
+    { 136, 0, "Valvola calorifero bagno ON",  {false}, {-1,-1} },
+    { 137, 0, "Valvola calorifero bagno OFF", {false}, {-1,-1} },
+    { 138, 0, "Led Fondo", {false}, {-1,-1} },
 
     // **** 4 AI EbYTE ID=5 Corridoio PT
     { 139, 0, "Pressione rete H2O", {false}, {-1,-1} },
@@ -451,7 +483,7 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     { 142, 0, "", {false}, {-1,-1} },
 
     // **** 4 DO
-    { 143, 0, "Luci??", {false}, {-1,-1} },
+    { 143, 0, "Luci parete scale cantina", {false}, {-1,-1} },
     { 144, 0, "", {false}, {-1,-1} },
     { 145, 0, "", {false}, {-1,-1} },
     { 146, 0, "", {false}, {-1,-1} },
@@ -479,11 +511,11 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
 
     { 166, 0, "Pulsante bagno", {false}, {-1,-1} },
 
-    { AREA_BAGNO_FLOOD_ALM, 0, "DI: Sensore allagamento bagno", {false}, {-1,-1} },
+    { AREA_BAGNO_FLOOD_ALM, 0, "Sensore allagamento bagno", {false}, {-1,-1} },
 
-    { BAGNO_IN_P1, 0, "DI: Int. Luce bagno",     {false}, {-1,-1} },
-    { BAGNO_IN_P2, 0, "DI: Int. Luce corridoio", {false}, {-1,-1} },
-    { BAGNO_IN_P3, 0, "Int. Luce ingresso",      {false}, {-1,-1} },
+    { BAGNO_IN_P1, 0, "Int. Luce bagno",     {false}, {-1,-1} },
+    { BAGNO_IN_P2, 0, "Int. Luce scale", {false}, {-1,-1} },
+    { BAGNO_IN_P3, 58, "Int. Luce ingresso",      {false}, {-1,-1} },
 
     // Sensori Cucina
     { SENSORE_CUCINA_HUM,  0, "Umidita",     {false}, {-1,-1} },
@@ -495,19 +527,44 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     { BAGNO_OUT_LED01W, 0, "Bagno LED W",    {false}, {-1,-1} },
     { BAGNO_OUT_LED01G, 0, "Bagno LED G",    {false}, {-1,-1} },
     { BAGNO_OUT_LED01R, 0, "Bagno LED R",    {false}, {-1,-1} },
-    { BAGNO_OUT_LED02,  0, "Bagno LED MAIN", {false}, {-1,-1} },
+    { BAGNO_OUT_LED02,  0, "Bagno LED Specchio", {false}, {-1,-1} },
 
     // Sensori bagno ID=11
     { SENSORE_BAGNO_LUX, 0, "Lux",         {false}, {-1,-1} },
     { SENSORE_BAGNO_TEMP,0, "Temperatura", {false}, {-1,-1} },
     { SENSORE_BAGNO_HUM, 0, "Umidita",     {false}, {-1,-1} },
+
     // ============================================================
     // ======================   AREE VIRTUALI   ====================
     // ============================================================
 
-    { AREA_CUCINA_ESTRATTORE_BIT, 0, "", {false}, {-1,-1} },
-    { AREA_BAGNO_ESTRATTORE_BIT,  0, "", {false}, {-1,-1} },
-    { AREA_SECURITY_STATUS,       0, "", {false}, {-1,-1} }
+    { AREA_MEAN_TEMPS, 0, "Media Temperature", {false}, {-1,-1} },
+    { AREA_MEAN_HUMS, 0, "Media Umidita", {false}, {-1,-1} },
+
+    { AREA_CUCINA_ESTRATTORE_BIT, 0, "Estrattore Cucina Stato", {false}, {-1,-1} },
+    { AREA_BAGNO_ESTRATTORE_BIT,  0, "Estrattore Bagno Stato", {false}, {-1,-1} },
+    { AREA_SECURITY_STATUS,       0, "Stato antifurto", {false}, {-1,-1} },
+    { AREA_SECURITY_STATUS2,       0, "Stato antifurto 2", {false}, {-1,-1} },
+
+    { AREA_SETPOINT_TEMP_GIORNO,       0, "Setpoint temperatura zona Giorno", {false}, {-1,-1} },
+    { AREA_SETPOINT_TEMP_NOTTE,       0, "Setpoint temperatura zona Notte", {false}, {-1,-1} },
+    { AREA_SETPOINT_TEMP_BAGNO,       0, "Setpoint temperatura Bagno", {false}, {-1,-1} },
+
+    // ============================================================
+    // INVERTER SOLARE
+    // ============================================================
+
+    { AREA_INVERTER_PV_VOLTAGE,       0, "Tensione fotovoltaico",          {false}, {-1, -1} },
+    { AREA_INVERTER_PV_CURRENT,       0, "Corrente fotovoltaico",          {false}, {-1, -1} },
+    { AREA_INVERTER_PV_POWER,         0, "Potenza fotovoltaico",           {false}, {-1, -1} },
+    { AREA_INVERTER_BATTERY_VOLTAGE,  0, "Tensione batteria inverter",     {false}, {-1, -1} },
+    { AREA_INVERTER_BATTERY_SOC,      0, "Percentuale batteria inverter",  {false}, {-1, -1} },
+    { AREA_INVERTER_TEMP,             0, "Temperatura inverter",           {false}, {-1, -1} },
+    { AREA_INVERTER_STATUS,           0, "Stato inverter",                 {false}, {-1, -1} },
+    { AREA_INVERTER_FRONTEND_STATUS,  0, "Stato comunicazione inverter",   {false}, {-1, -1} },
+    
+    { AREA_POWER_LOAD_SHED_STATUS,     0, "Stato distacco carichi",         {false}, {-1, -1} },
+    { AREA_REOLINK_INGRESSO_ALARM,     0, "Allarme telecamera ingresso",    {false}, {-1, -1} }
 }};
 
 // ************ ROUTES, SPLITS and TOGGLES *******************************
@@ -657,7 +714,7 @@ static const char* AUTOMATION_JSON = R"json(
             {
                 "type": "debounce",
                 "name": "corrente",
-                "area": "SENSORE_CUCINA_CORRENTE",
+                "area": "SENSORE_CUCINA_INDUZIONE",
                 "threshold": 1,
                 "debounceMs": 10000,
                 "tofMinutes": 10
@@ -727,7 +784,7 @@ static const char* AUTOMATION_JSON = R"json(
 DomoManagerConfig makeDomoConfig() {
     DomoManagerConfig cfg;   // usa tutti i default della struct
 
-    cfg.hmi.enabled = true;   // opzionale, è già default
+    cfg.hmi.enabled = false;   // opzionale, è già default
     cfg.hmi.port = 502;        // default
     cfg.hmi.pollingMs = 250;   // default
     cfg.hmi.maxClients = 1;
@@ -758,6 +815,38 @@ static DomoManagerConfig domoConfig = makeDomoConfig();
 // ------------------------------------------------------------
 // CONFIGURAZIONE FRONTEND
 // ------------------------------------------------------------
+namespace RuntimeHandles
+{
+    inline DMRuntimeStore::Handle
+        room1Card =
+            DMRuntimeStore::INVALID_HANDLE;
+}
+
+static bool RegisterRuntimeTags(
+    DomoManager& manager)
+{
+    auto& rs =
+        manager.getRuntimeStore();
+
+    DMRuntimeStore::Metadata m {};
+
+    m.id         = "access.room01.card_code";
+    m.name       = "Room 01 card code";
+    m.access     = DMRuntimeStore::Access::READ_WRITE;
+    m.persistent = true;
+    m.publish    = true;
+    m.sensitive  = false;
+
+    RuntimeHandles::room1Card =
+        rs.defineString32(
+            m,
+            "0085903398"
+        );
+
+    return
+        RuntimeHandles::room1Card !=
+        DMRuntimeStore::INVALID_HANDLE;
+}
 
 
 
@@ -862,13 +951,20 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
           [](int area){ return DomoManager::instance->getBuffer().getValueFast(area) != 0; }) },
       SensorCategory::DOOR, AREA_INGRESSO_DOOR_CMD, AREA_INGRESSO_DOOR_STATUS },
 
+    { "PIR Ingresso", "Ingresso",
+      { SensorChannel(-1, RT_DELAY, SensorChannelType::RT),
+        SensorChannel(-1, INITIAL_DELAY, SensorChannelType::H24) },
+      { WiredSensorsManager::MakeReader(AREA_INGRESSO_PIR_ALM,
+          [](int area){ return DomoManager::instance->getBuffer().getValueFast(area) != 0; }),
+        WiredSensorsManager::MakeReader(AREA_INGRESSO_PIR_TAMPER,
+          [](int area){ return DomoManager::instance->getBuffer().getValueFast(area) != 0; }) },
+      SensorCategory::PIR, AREA_INGRESSO_PIR_CMD, AREA_INGRESSO_PIR_STATUS },
+
     //Sensore virtuale, pulsante di SOS di un telecomando MQTT
     {
     "SOS_Remote",
     nullptr,                 // nessuna zona
-
     { SensorChannel( -1, RT_DELAY, SensorChannelType::H24) },
-
     { WiredSensorsManager::MakeReader(AREA_MQTT_HANDCONTROL,
             [](int area) { return DomoManager::instance->getBuffer().getValueFast(area) ==6; }) },
     SensorCategory::PANIC , AREA_MQTT_HANDCONTROL_CMD, AREA_MQTT_HANDCONTROL_STATUS },
@@ -1022,7 +1118,7 @@ static const FrontendConfig::MQTT::Device
                 "state_l1",
                 FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
                 FrontendConfig::MQTT::Mapping::DataType::BOOL,
-                127,
+                AREA_CUCINA_LUCE_1,
                 1.0f
             },
 
@@ -1030,7 +1126,7 @@ static const FrontendConfig::MQTT::Device
                 "state_l2",
                 FrontendConfig::MQTT::Mapping::Direction::READ_WRITE,
                 FrontendConfig::MQTT::Mapping::DataType::BOOL,
-                301,
+                AREA_CUCINA_BLUETOOTH,
                 1.0f
             },
 
@@ -1298,37 +1394,84 @@ static const FrontendConfig::MQTT::Device
 // CLIENT MQTT
 // ============================================================================
 //
-// Per ora entrambi puntano allo stesso broker.
-// In seguito puoi mettere broker diversi.
+// Client 0:
+//     SMHub / Zigbee2MQTT
 //
-// Client 0 = Home Assistant
-// Client 1 = SMHub / Zigbee2MQTT
+// Client 1:
+//     Home Assistant MQTT Discovery
+//
+// Il client Home Assistant non possiede Device/Mapping statici.
+//
+// Le entity vengono generate automaticamente da:
+//
+//     DomoIntrospection
+//         -> DomoSemanticResolver
+//         -> DMHADiscovery
+//
 // ============================================================================
+
+IPAddress Mosquito_Addr=IPAddress(192, 168, 12, 212); //101
 
 static const FrontendConfig::MQTT::Client MQTT_CLIENTS[] =
 {
+    // ========================================================================
+    // CLIENT 0
+    // SMHUB / ZIGBEE2MQTT
+    // ========================================================================
+
     {
         true,
-        IPAddress(192, 168, 12, 212), //101
+
+        Mosquito_Addr,
+
         1883,
+
         FrontendConfig::MQTT::Client::Backend::ZIGBEE2MQTT,
+
         "SMHub",
+
         "opta_domotica",
+
         MQTT_SMHub_Devices,
+
         sizeof(MQTT_SMHub_Devices) /
-        sizeof(MQTT_SMHub_Devices[0])
-    }/*,
+            sizeof(MQTT_SMHub_Devices[0])
+    },
+
+
+    // ========================================================================
+    // CLIENT 1
+    // HOME ASSISTANT AUTO DISCOVERY
+    // ========================================================================
+    //
+    // Nessuna tabella MQTT_HA_Devices.
+    //
+    // Il client serve esclusivamente per:
+    //
+    //   - pubblicare MQTT Discovery
+    //   - pubblicare gli stati delle entity
+    //   - ricevere i command topic Home Assistant
+    //   - pubblicare availability
+    //
+    // ========================================================================
+
     {
         true,
-        IPAddress(192, 168, 12, 215),
+
+        Mosquito_Addr,
+
         1883,
+
         FrontendConfig::MQTT::Client::Backend::HOME_ASSISTANT,
-        "Home Assistant",
-        "opta_domotica",
-        MQTT_HA_Devices,
-        sizeof(MQTT_HA_Devices) /
-        sizeof(MQTT_HA_Devices[0])
-    }*/
+
+        "DomoManager",  //Il nome che appare come prefisso su tutti gli item
+
+        "domomanager",
+
+        nullptr,
+
+        0
+    }
 };
 
 
@@ -1398,32 +1541,40 @@ static FrontendConfig::Weather WEATHER_PARAMS = {
 // - powerParams contains power management settings and load definitions
 // ======================================================
 static FrontendConfig::Power POWER_PARAMS = {
-    .enabled=false,
+    .enabled=true,
+    .reporting=true,
     .intervalMs=15000,
-    .limitSoft = 3000.0f,
+    .limitSoft = 2800.0f,
     .limitHard = 3500.0f,
 
     .autoTune = true,
     .tuneIntervalMs = 2 * 60 * 1000UL,
 
+    .loadShedStatusArea =
+            AREA_POWER_LOAD_SHED_STATUS,
+
     // Carichi
     .loads = {
-        { "Boiler acqua calda", 1, 1200.0f, 5, 5 },
+        { "Volano termico", 4, 2500.0f, 5, 5 },
+        { "Stufa bagno", 3, 2500.0f, 5, 5 },
+        { "Boiler acqua calda", 2, 1200.0f, 5, 5 },
+        { "Piastra induzione", 1, 2000.0f, 30, 30, 
+        {
+            LoadPowerSensorConfig::MeasureType::AMPERE,
+            {
+                GenericSensor::Config::Type::BUFFER,
+                SENSORE_CUCINA_INDUZIONE
+            },
+
+            0.01f,  // 783 diventa 7,83 A
+            230.0f, // tensione
+            0.95f,  // fattore di potenza
+            0.05f   // ON sopra 0,05 A
+        } },
         { "Forno", 0, 1800.0f, 30, 30 }
     },
 
-    .loadCount = 2,
-
-    // Thermal load
-    .thermal = {
-        "Pompa di Calore",
-        true,
-        20.0f,
-        18.0f,
-        23.0f,
-        60,
-        60
-    }
+    .loadCount = 5,
 };
 
 // ------------------------------------------------------------
@@ -1431,9 +1582,9 @@ static FrontendConfig::Power POWER_PARAMS = {
 // Each zone: name, default setpoint, enabled flag, sensor area
 // ------------------------------------------------------------
 static FrontendConfig::HVAC::Zone HVAC_ZONES[] = {
-    { "Giorno", 22.0, SENSORE_CUCINA_TEMP, 1  },
-    { "Notte", 20.0, SENSORE_CAMERA_TEMP, 1  },
-    { "Bagno", 23.0, SENSORE_BAGNO_TEMP, 1  }
+    { "Giorno", AREA_SETPOINT_TEMP_GIORNO, SENSORE_CUCINA_TEMP, SENSORE_CUCINA_HUM, 1  },
+    { "Notte", AREA_SETPOINT_TEMP_NOTTE, SENSORE_CAMERA_TEMP, SENSORE_CAMERA_HUM, 1  },
+    { "Bagno", AREA_SETPOINT_TEMP_BAGNO, SENSORE_BAGNO_TEMP, SENSORE_BAGNO_HUM, 1  }
 };
 
 // ======================================================
@@ -1618,5 +1769,179 @@ static const AEEVarDef AEE_VARS[] = {
         
 };
 
+// ============================================================================
+// ACCESS READERS
+//
+// Configurazione fisica dei lettori.
+//
+// Le definizioni dei protocolli sono statiche e immutabili.
+// Le istanze FanvilWebAPI e X3WebAPI verranno invece create
+// dal DomoManagerFrontendEngine.
+//
+// validCardCode:
+//   carta valida esclusivamente sul singolo lettore.
+//
+// Il codice comune viene configurato tramite:
+//
+//   AccessControlService::Config::commonCardCode
+// ============================================================================
 
-#endif
+static const AccessReader
+ACCESS_READERS[] =
+{
+    {
+        .name =
+            "FanvilIngresso",
+
+        .def =
+            &FanvilWebAPI::ReaderDefinition(),
+
+        /*
+        * Per il primo test lascia nullptr.
+        * Successivamente potrai configurare il MAC.
+        */
+        .readerAddress =
+            nullptr,
+
+        /*
+         * Codice fisso.
+         */
+        .readCardCode =
+            []() -> String
+            {
+                return
+                    "2953393440";
+            },
+
+        .enabled =
+            true,
+
+        .doorIndex =
+            1,
+
+        .area = AREA_CUCINA_LUCE_1,
+
+        .authorizedMessageKey = "RELAY_OPEN"
+    },
+
+    {
+        .name =
+            "X3Ingresso",
+
+        .def =
+            &AxessTMCWebAPI::ReaderDefinition(),
+        
+        .readerAddress = "00:04:24:D2:CA:13:BF:AA",
+
+        .readCardCode =
+            []() -> String
+            {
+                if (!DomoManager::instance)
+                    return "";
+
+                return String(
+                    DomoManager::instance
+                        ->getRuntimeStore()
+                        .getString(
+                            RuntimeHandles::room1Card,
+                            ""
+                        )
+                );
+            },
+
+        .enabled =
+            true,
+
+        .doorIndex =
+            1,
+
+        .area = AREA_CUCINA_LUCE_1,
+        .authorizedMessageKey = nullptr
+    }
+};
+
+
+// ============================================================================
+// POLLING DEVICES
+//
+// Utilizzati solamente quando:
+//
+//   c.webApi.client.enabled == true
+//
+// Il polling HTTP resta indipendente dal controllo accessi.
+//
+// I profili sono statici e immutabili, quindi possono essere
+// referenziati da questo array globale.
+// ============================================================================
+
+static const WebApiDevice
+WEB_API_DEVICES[] =
+{
+    {
+        "FanvilIngresso",
+        &FanvilWebAPI::Profile(),
+        "192.168.12.216",
+        80,
+
+       /*
+         * Intervallo zero:
+         * nessuna richiesta automatica.
+         */
+        0,
+
+        /*
+         * Nessun messaggio di polling.
+         */
+        nullptr,
+
+        true,
+
+        /*
+        * HTTP credentials.
+        */
+        {
+            "admin",
+            "admin"
+        }
+    },
+
+    // ========================================================================
+    // DOMOMANAGER ONLINE
+    //
+    // intervalMs = 0:
+    //   nessun polling automatico.
+    //
+    // pollMessageKey = nullptr:
+    //   le richieste vengono avviate esplicitamente dal gestore
+    //   della configurazione.
+    // ========================================================================
+    {
+        "DomoManagerOnline",
+        &DomoManagerOnlineClient::Profile(),
+        "config.domo-manager.it",
+        80,
+        0,
+        nullptr,
+        true
+    },
+
+    {
+        "ReolinkIngresso",
+        &ReolinkWebAPI::Profile(),
+        "192.168.12.215",
+        8080,
+        /*
+        * Interrogazione AI ogni secondo.
+        */
+        1000UL,
+
+        ReolinkWebAPI::
+            MESSAGE_AI_STATE,
+        true,
+        {
+            "admin",
+            "admin123"
+        }
+    }
+};
+
