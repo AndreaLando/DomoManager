@@ -1,771 +1,670 @@
-# ============================================================
-# DOMOMANAGER – FILOSOFIA DEL PROGETTO
-# ============================================================
+# DomoManager - Filosofia del progetto
 
 ## 1. Perché nasce DomoManager
 
 DomoManager nasce da un'idea semplice ma radicale:
 
-> **la domotica non deve essere un insieme di dispositivi che "parlano", ma un sistema coerente che "pensa".**
+> **La domotica non deve essere un insieme di dispositivi che parlano, ma un sistema coerente che pensa.**
 
 Per anni il settore della home automation ha prodotto soluzioni frammentate:
 
-- dispositivi con applicazioni proprietarie
-- protocolli incompatibili
-- logiche duplicate tra cloud, gateway e firmware
-- dipendenza da servizi esterni
-- sistemi che degradano o perdono funzionalità senza Internet
-- automazioni difficili da comprendere
-- comportamenti non deterministici
-- diagnostica insufficiente
-- stato del sistema distribuito in più componenti
+- dispositivi legati ad applicazioni proprietarie;
+- protocolli incompatibili;
+- logiche duplicate tra cloud, gateway e firmware;
+- dipendenza da servizi esterni;
+- perdita o degradazione delle funzioni in assenza di Internet;
+- automazioni difficili da comprendere;
+- comportamenti non deterministici;
+- diagnostica insufficiente;
+- stato distribuito tra componenti non coordinati.
 
-DomoManager nasce come risposta a questa frammentazione.
+DomoManager nasce come risposta a questa frammentazione. Non vuole essere soltanto un hub, un gateway, un bridge, un firmware o un supervisore.
 
-Non vuole essere semplicemente un:
-
-- hub
-- gateway
-- bridge
-- firmware
-- supervisore
-
-DomoManager è concepito come un **sistema operativo per la casa**:
-
-un ambiente runtime che governa, coordina, sincronizza e interpreta l'intero ecosistema domestico come un sistema unico.
+DomoManager è concepito come un **sistema operativo per la casa**: un ambiente runtime che governa, coordina, sincronizza e interpreta l'intero ecosistema domestico come un sistema unitario.
 
 L'obiettivo è costruire un sistema:
 
-- deterministico
-- affidabile
-- comprensibile
-- estendibile
-- sicuro
-- diagnosticabile
-- local-first
-- indipendente dal cloud
-- consapevole delle risorse hardware
+- deterministico;
+- affidabile;
+- comprensibile;
+- estendibile;
+- sicuro;
+- diagnosticabile;
+- local-first;
+- indipendente dal cloud per le funzioni essenziali;
+- consapevole dei limiti e dei costi delle risorse hardware.
 
-Un sistema che non si limita a "fare domotica", ma **governa la casa**.
+Un sistema che non si limita a fare domotica, ma **governa la casa**.
 
----
+## 2. Principi di progettazione
 
-# 2. La filosofia del design
+La progettazione di DomoManager segue principi architetturali espliciti. Non sono semplici linee guida stilistiche, ma criteri con cui valutare ogni decisione tecnica e ogni nuova funzionalità.
 
-La progettazione di DomoManager segue alcuni principi fondamentali.
+### 2.1 Determinismo prima di tutto
 
-Non sono semplicemente linee guida software.
+Ogni scelta parte da un principio:
 
-Sono i criteri attraverso i quali vengono valutate le decisioni architetturali.
+> **Il sistema deve comportarsi in modo prevedibile.**
 
----
+Il comportamento non deve dipendere in modo incontrollato da:
 
-## 2.1 Determinismo prima di tutto
-
-Ogni scelta architetturale parte da un principio:
-
-> **il sistema deve comportarsi in modo prevedibile.**
-
-Il comportamento del sistema non dovrebbe dipendere in modo incontrollato da:
-
-- carico momentaneo
-- ordine casuale delle operazioni
-- rete
-- latenza
-- servizi esterni
-- allocazioni dinamiche ricorrenti
-- callback non controllate
-- timeout imprevedibili
+- carico momentaneo;
+- ordine casuale delle operazioni;
+- condizioni transitorie della rete;
+- latenze non delimitate;
+- servizi esterni;
+- allocazioni dinamiche ricorrenti;
+- callback non governate;
+- timeout imprevedibili.
 
 Per questo DomoManager privilegia:
 
-- cicli di esecuzione espliciti
-- scheduling controllato
-- intervalli definiti
-- stati espliciti
-- timeout deterministici
-- retry controllati
-- gestione strutturata degli errori
-- lifecycle chiari
-- riduzione delle allocazioni dinamiche ricorrenti
+- cicli di esecuzione espliciti;
+- scheduling controllato;
+- intervalli definiti;
+- stati osservabili;
+- timeout deterministici;
+- retry controllati;
+- gestione strutturata degli errori;
+- lifecycle chiari;
+- riduzione delle allocazioni dinamiche nel runtime ordinario.
 
-Il determinismo non significa che il sistema debba essere statico.
+Il determinismo non implica rigidità. Un sistema può essere dinamico e, allo stesso tempo, mantenere un comportamento comprensibile, tracciabile e controllabile.
 
-Significa che anche quando il sistema è dinamico, il suo comportamento deve rimanere **comprensibile e controllabile**.
+> **La complessità può essere dinamica. Il comportamento non deve essere imprevedibile.**
 
-> **La complessità può essere dinamica.  
-> Il comportamento non deve essere imprevedibile.**
+### 2.2 Responsabilità esplicite
 
----
+Ogni componente deve possedere una responsabilità chiara e un perimetro riconoscibile. L'inizializzazione, la gestione dello stato, l'accesso all'hardware e la pubblicazione degli eventi devono avere un owner definito.
 
-# 3. Il Buffer come verità del sistema
+Una responsabilità non dovrebbe essere duplicata in più livelli, perché la duplicazione rende incerti:
+
+- l'ordine di esecuzione;
+- gli effetti collaterali;
+- il punto corretto di modifica;
+- il comportamento in caso di errore;
+- la diagnostica.
+
+### 2.3 Esplicitazione e tracciabilità, zero magia
+
+DomoManager evita deliberatamente comportamenti impliciti o difficili da ricostruire.
+
+Non dovrebbero esistere operazioni che:
+
+- si attivano senza una causa riconoscibile;
+- modificano lo stato senza lasciare una traccia;
+- dipendono da condizioni nascoste;
+- richiedono conoscenze non documentate del programmatore.
+
+Ogni comportamento significativo deve essere:
+
+- dichiarato;
+- visibile;
+- prevedibile;
+- tracciabile;
+- diagnosticabile.
+
+Le domande fondamentali sono:
+
+- **Perché è successo?**
+- **Perché non è successo?**
+
+Il sistema deve permettere di ricostruire entrambe le risposte attraverso stato, eventi, log e diagnostica.
+
+## 3. Il modello di stato
+
+### 3.1 Il Buffer come fonte autorevole dello stato condiviso
 
 In DomoManager esiste un concetto fondamentale:
 
-> **il Buffer è la verità.**
+> **Il Buffer è la fonte autorevole dello stato applicativo condiviso.**
 
-Lo stato del sistema non deve essere distribuito arbitrariamente tra moduli diversi.
-
-Sensori, attuatori, automazioni, HVAC, sicurezza, Power, Weather, MQTT e WebAPI devono poter operare su una rappresentazione coerente dello stato.
-
-Il modello fondamentale è:
+Lo stato che deve essere condiviso tra sensori, attuatori, automazioni, HVAC, sicurezza, Power, Weather, MQTT e Web API non deve essere distribuito arbitrariamente tra moduli indipendenti.
 
 ```text
-                 MONDO FISICO
-                      │
-                      ▼
-                   BACKEND
-                      │
-                      ▼
-              ┌───────────────┐
-              │     BUFFER    │
-              │  SYSTEM STATE │
-              └───────┬───────┘
-                      │
-          ┌───────────┼───────────┐
-          ▼           ▼           ▼
-       TASKS      AUTOMATION   FRONTEND
-          │           │           │
-          └───────────┼───────────┘
-                      ▼
-               COMMUNICATION
+MONDO FISICO
+     |
+     v
+  BACKEND
+     |
+     v
++------------------+
+|      BUFFER      |
+| SHARED APP STATE |
++--------+---------+
+         |
+   +-----+-----+
+   |     |     |
+   v     v     v
+ TASKS  LOGIC  FRONTEND
+   |     |     |
+   +-----+-----+
+         |
+         v
+  COMMUNICATION
 ```
 
 Il Buffer fornisce:
 
-- aree tipizzate
-- stato centralizzato
-- timestamp
-- change tracking
-- virtual areas
-- reverse
-- split
-- toggle
-- accesso rapido
-- diagnostica
+- aree numeriche;
+- stato centralizzato;
+- timestamp;
+- change tracking;
+- aree virtuali;
+- reverse;
+- split;
+- toggle;
+- accesso rapido;
+- diagnostica.
 
-Questo permette di evitare, dove possibile:
+Questo permette di ridurre:
 
-- stati duplicati
-- copie non sincronizzate
-- variabili fantasma
-- dipendenze nascoste
-- sincronizzazioni manuali tra moduli
+- stati applicativi duplicati;
+- copie non sincronizzate;
+- variabili fantasma;
+- dipendenze nascoste;
+- sincronizzazioni manuali tra moduli.
 
-Il Buffer non è quindi una semplice struttura dati.
+Il Buffer non è una semplice struttura dati. È il **linguaggio comune dello stato numerico condiviso**.
 
-È il **linguaggio comune dell'intero sistema**.
+### 3.2 Stato condiviso e stato tecnico interno
 
----
+Non tutto lo stato deve necessariamente risiedere nel Buffer. Gli engine possono mantenere stato tecnico interno quando è parte della loro implementazione, per esempio:
 
-# 4. Una sola lingua per tutti gli Engine
+- timer e debounce;
+- code di richieste;
+- richieste pendenti;
+- cursori di polling;
+- connessioni e retry;
+- snapshot di protocollo;
+- stato delle macchine a stati;
+- cache e contatori diagnostici.
+
+La distinzione è netta:
+
+- **stato applicativo condiviso**: deve essere pubblicato nel modello comune;
+- **stato tecnico interno**: rimane nell'engine che lo possiede, ma deve essere diagnosticabile quando rilevante.
+
+### 3.3 RuntimeStore per lo stato tipizzato non rappresentabile nel Buffer
+
+Il Buffer numerico non è adatto a tutti i valori. Stringhe, JSON, identificativi, codici e variabili tipizzate richiedono un modello complementare.
+
+Il RuntimeStore estende il modello di stato senza sostituire il Buffer:
+
+```text
+BUFFER
+  area numerica -> long
+
+RUNTIME STORE
+  handle -> valore tipizzato
+```
+
+Il principio rimane invariato: ogni dato condiviso deve avere un'origine, un tipo, regole di accesso e un lifecycle espliciti.
+
+## 4. Un linguaggio comune per tutti gli engine
 
 DomoManager è modulare, ma non frammentato.
 
-La filosofia è:
+> **Indipendenti nel funzionamento, coerenti nel linguaggio.**
 
-> **"Indipendenti nel funzionamento, coerenti nel linguaggio."**
+HVAC, Power, Weather, Security, Automation, MQTT, Web API, RS485 e Hot Standby possono avere responsabilità differenti, ma devono integrarsi attraverso modelli comuni.
 
-HVAC, Power, Weather, Security, Automation, MQTT, WebAPI, RS485 e HotStandby possono avere responsabilità completamente differenti.
+Un engine non dovrebbe conoscere:
 
-Ma devono poter condividere lo stesso modello di stato.
+- come un altro engine memorizza internamente i dati;
+- quale driver concreto utilizza un dispositivo;
+- quale protocollo trasporta un valore;
+- dove si trova fisicamente la logica che lo ha prodotto.
 
-Questo riduce drasticamente la complessità delle integrazioni.
+Deve conoscere soltanto il contratto necessario per leggere, pubblicare o trasformare lo stato.
 
-Un Engine non dovrebbe avere bisogno di conoscere:
+## 5. Modularità senza isolamento
 
-- come un altro Engine memorizza internamente i dati
-- quale driver utilizza un dispositivo
-- quale protocollo utilizza un sensore
-- dove si trova fisicamente la logica che ha prodotto un valore
+La modularità non significa creare molti sistemi separati. Significa assegnare a ogni componente una responsabilità precisa.
 
-Deve conoscere ciò che gli serve attraverso l'architettura comune.
+In termini generali:
 
----
+- **Device Manager** gestisce i dispositivi;
+- **Modbus** gestisce la comunicazione industriale;
+- **Buffer** gestisce lo stato numerico condiviso;
+- **RuntimeStore** gestisce lo stato tipizzato complementare;
+- **Automation Engine** interpreta le regole;
+- **HVAC** gestisce la climatizzazione;
+- **Security** gestisce la sicurezza;
+- **Power** gestisce energia e supervisione elettrica;
+- **Weather** gestisce i dati meteorologici;
+- **MQTT** gestisce l'integrazione MQTT;
+- **Web API** gestisce l'integrazione HTTP;
+- **runtime e scheduler** coordinano l'esecuzione;
+- **diagnostica** rende osservabile il sistema.
 
-# 5. Modularità senza isolamento
+La modularità deve ridurre la complessità, non trasferirla da un modulo all'altro.
 
-La modularità non significa creare tanti sistemi separati.
+## 6. Orchestrazione del runtime
 
-Significa assegnare ad ogni componente una responsabilità precisa.
+### 6.1 Il sistema deve sapere quando lavorare
 
-Per esempio:
+Un sistema complesso non può affidarsi a un unico `loop()` in cui ogni componente tenta di eseguire tutto a ogni iterazione.
 
-- Device Manager gestisce i dispositivi
-- Modbus gestisce la comunicazione industriale
-- Buffer gestisce lo stato
-- Automation Engine interpreta le regole
-- HVAC gestisce la climatizzazione
-- Security gestisce la sicurezza
-- Power gestisce l'energia
-- Weather gestisce i dati meteorologici
-- MQTT gestisce l'integrazione MQTT
-- WebAPI gestisce l'interfaccia HTTP
-- Communication Scheduler decide quando eseguire i servizi di comunicazione
-- Task Engine coordina l'esecuzione dei task
+DomoManager utilizza un modello di orchestrazione nel quale task e servizi sono governati, secondo il sottosistema, tramite:
 
-La modularità serve quindi a **ridurre la complessità**, non a spostarla da un modulo all'altro.
+- callback;
+- pesi e rotazione;
+- intervalli;
+- condizioni di abilitazione;
+- stato runtime;
+- prerequisiti di ciclo;
+- disponibilità delle risorse.
 
----
+Il runtime distingue tra:
 
-# 6. Zero magia
+- logica applicativa;
+- scheduling;
+- comunicazione;
+- aggiornamento dello stato;
+- sincronizzazione dei cicli;
+- diagnostica.
 
-DomoManager evita deliberatamente la "magia" software.
+L'orchestrazione non decide soltanto **cosa** eseguire. Decide anche **quando** e **in quali condizioni** è corretto farlo.
 
-Non dovrebbero esistere comportamenti che:
-
-- si attivano senza una causa riconoscibile
-- modificano lo stato senza essere tracciabili
-- dipendono da condizioni nascoste
-- richiedono conoscenze implicite del programmatore
-
-Ogni comportamento significativo deve essere:
-
-- dichiarato
-- visibile
-- prevedibile
-- tracciabile
-- diagnosticabile
-
-La domanda fondamentale è sempre:
-
-> **"Perché è successo?"**
-
-E la risposta deve poter essere ricostruita dal sistema.
-
-Allo stesso modo:
-
-> **"Perché non è successo?"**
-
-deve avere una risposta osservabile attraverso lo stato, gli eventi e la diagnostica.
-
----
-
-# 7. Il Task Engine: il sistema deve sapere quando lavorare
-
-Un sistema complesso non può affidarsi a un unico `loop()` nel quale ogni componente cerca di fare tutto.
-
-DomoManager utilizza un modello di task orchestration.
-
-I task sono definiti attraverso:
-
-- responsabilità
-- callback
-- intervallo
-- stato enabled/disabled
-
-Il runtime può quindi distinguere chiaramente tra:
-
-- logica applicativa
-- scheduling
-- comunicazione
-- sincronizzazione del ciclo
-
-Il Task Engine rappresenta quindi una sorta di **scheduler operativo del sistema**.
-
-Non decide soltanto *cosa* fare.
-
-Decide anche **quando è appropriato farlo**.
-
----
-
-# 8. Non-blocking come principio architetturale
+### 6.2 Non-blocking come principio architetturale
 
 Il principio non-blocking è una conseguenza diretta della filosofia deterministica.
 
-Un servizio secondario non deve poter compromettere l'intero sistema.
+Un servizio secondario non deve compromettere l'intero sistema. In particolare, MQTT, Web API, Bridge, Modbus, HMI e RS485 non devono monopolizzare il runtime per un tempo indefinito.
 
-In particolare:
-
-- MQTT
-- WebAPI
-- Bridge
-- Modbus
-- HMI
-- RS485
-
-non devono poter monopolizzare il runtime per un tempo indefinito.
-
-Per questo la comunicazione viene separata dalla logica applicativa e gestita attraverso un **Communication Scheduler**.
-
-Il modello è:
+La comunicazione viene quindi separata dalla logica applicativa e coordinata attraverso runtime, scheduler e macchine a stati dedicate.
 
 ```text
-             TASK ENGINE
-                  │
-                  ▼
-       COMMUNICATION SCHEDULER
-                  │
-        ┌─────────┼─────────┐
-        ▼         ▼         ▼
-      BRIDGE     MQTT      WebAPI
+APPLICATION RUNTIME
+        |
+        v
+COMMUNICATION COORDINATION
+        |
+  +-----+------+-------+
+  |            |       |
+  v            v       v
+BRIDGE        MQTT   WEB API
 ```
 
-I servizi possono essere eseguiti con:
+I servizi possono utilizzare:
 
-- intervalli configurabili
-- priorità
-- stato enabled
-- callback dedicate
-- esecuzione distribuita nel tempo
+- intervalli configurabili;
+- priorità;
+- pacing;
+- timeout;
+- retry controllati;
+- callback dedicate;
+- esecuzione distribuita nel tempo;
+- arbitraggio delle risorse di rete.
 
-L'obiettivo non è eliminare la comunicazione.
+L'obiettivo non è eliminare la comunicazione, ma impedire che diventi il punto di blocco del sistema.
 
-È impedire che la comunicazione possa diventare il punto di blocco dell'intero sistema.
+> **Nessun servizio secondario deve poter bloccare indefinitamente il ciclo applicativo principale.**
 
-> **Nessun servizio secondario deve poter bloccare il ciclo applicativo principale.**
+## 7. Il tempo come fondamento
 
----
-
-# 9. Il tempo come fondamento
-
-Il tempo non è un semplice valore utilizzato dai programmi.
-
-È una dimensione fondamentale del sistema.
+Il tempo non è un semplice valore usato dai programmi. È una dimensione fondamentale del sistema.
 
 Il TimeManager rappresenta il riferimento temporale comune per:
 
-- automazioni
-- HVAC
-- ACS
-- sicurezza
-- Power
-- scheduler
-- retry
-- timeout
-- eventi
-- diagnostica
+- automazioni;
+- HVAC;
+- ACS;
+- sicurezza;
+- Power;
+- scheduler;
+- retry;
+- timeout;
+- eventi;
+- diagnostica.
 
 Il sistema deve sapere non soltanto:
 
-> **"Qual è lo stato?"**
+- **Qual è lo stato?**
+- **Da quanto tempo è in questo stato?**
+- **Quando è avvenuta la transizione?**
 
-ma anche:
-
-> **"Da quanto tempo?"**
-
-e:
-
-> **"Quando è successo?"**
-
-Per questo timestamp, intervalli, timeout, cooldown e scheduling sono parte integrante del modello architetturale.
+Timestamp, intervalli, timeout, cooldown e scheduling fanno quindi parte del modello architetturale.
 
 > **Il TimeManager è il metronomo del sistema.**
 
----
+## 8. Separazione tra stato, logica e comunicazione
 
-# 10. L'utente come architetto, non come programmatore
+Una conseguenza fondamentale della filosofia DomoManager è la separazione tra stato, logica e comunicazione.
 
-DomoManager è pensato per chi progetta e gestisce impianti.
+```text
+          STATE
+            |
+            v
+   BUFFER / RUNTIME STORE
+            |
+      +-----+-----+
+      |           |
+      v           v
+    LOGIC      AUTOMATION
+      |           |
+      +-----+-----+
+            |
+            v
+      COMMUNICATION
+```
 
-Non deve essere necessario trasformare ogni esigenza funzionale in codice.
+Il sistema deve continuare a ragionare sul proprio stato anche quando una comunicazione esterna è lenta o temporaneamente indisponibile.
+
+Questo impedisce che:
+
+- MQTT diventi la logica del sistema;
+- Home Assistant diventi il sistema;
+- una Web API diventi il sistema;
+- un dispositivo fisico incorpori direttamente tutta la logica applicativa.
+
+La comunicazione è un **livello di integrazione**. Non è il cuore dell'architettura.
+
+## 9. L'utente come architetto, non come programmatore
+
+DomoManager è pensato per chi progetta e gestisce impianti. Non dovrebbe essere necessario trasformare ogni esigenza funzionale in codice imperativo.
 
 Per questo il sistema privilegia:
 
-- automazioni dichiarative
-- scene leggibili
-- condizioni esplicite
-- sequenze strutturate
-- configurazione JSON
-- validazione
-- comportamenti osservabili
+- automazioni dichiarative;
+- scene leggibili;
+- condizioni esplicite;
+- sequenze strutturate;
+- configurazione JSON;
+- validazione;
+- comportamenti osservabili.
 
-L'obiettivo è consentire a un tecnico di descrivere una logica complessa senza dover diventare necessariamente uno sviluppatore.
+L'obiettivo è consentire a un tecnico di descrivere logiche complesse senza dover diventare necessariamente uno sviluppatore.
 
-Il sistema deve essere sufficientemente potente per il programmatore, ma sufficientemente leggibile per il progettista.
+Il sistema deve essere sufficientemente potente per il programmatore e sufficientemente leggibile per il progettista.
 
----
-
-# 11. Robustezza industriale, flessibilità domestica
+## 10. Robustezza industriale, flessibilità domestica
 
 DomoManager prende ispirazione dall'architettura dei sistemi industriali.
 
-Da questo mondo eredita concetti come:
+Da questo mondo eredita:
 
-- watchdog
-- timeout
-- retry
-- fallback
-- gestione degli errori
-- protezioni
-- diagnostica continua
-- stati espliciti
-- HotStandby
-- comportamento deterministico
+- watchdog;
+- timeout;
+- retry;
+- fallback;
+- gestione strutturata degli errori;
+- protezioni;
+- diagnostica continua;
+- stati espliciti;
+- Hot Standby;
+- comportamento deterministico.
 
-Ma li combina con caratteristiche tipiche dei moderni sistemi software:
+Li combina con caratteristiche tipiche dei framework moderni:
 
-- MQTT
-- WebAPI
-- automazioni dinamiche
-- HVAC avanzato
-- integrazione Home Assistant
-- dispositivi wireless quando utili
-- configurazione dichiarativa
+- MQTT;
+- Web API;
+- automazioni dinamiche;
+- HVAC avanzato;
+- integrazione con Home Assistant;
+- dispositivi wireless quando utili;
+- configurazione dichiarativa.
 
-L'obiettivo non è trasformare una casa in una fabbrica.
+L'obiettivo non è trasformare una casa in una fabbrica, ma portare nell'ambiente domestico ciò che l'industria ha imparato sulla continuità operativa.
 
-È portare nella casa ciò che nell'industria è stato imparato sulla **continuità operativa**.
+> **Robusto come un sistema industriale. Flessibile come un framework moderno.**
 
-> **Robusto come un sistema industriale.  
-> Flessibile come un framework moderno.**
-
----
-
-# 12. Embedded-first
+## 11. Embedded-first
 
 DomoManager nasce con una consapevolezza precisa:
 
-> **l'hardware non è infinito.**
+> **L'hardware non è infinito.**
 
 CPU, RAM, memoria, connessioni Ethernet, socket, bus e banda sono risorse reali.
 
-Un'architettura progettata ignorando questi limiti può funzionare in laboratorio e fallire sul campo.
+Un'architettura che ignora questi limiti può funzionare in laboratorio e fallire sul campo. DomoManager considera quindi le risorse hardware parte dell'architettura software.
 
-Per questo DomoManager considera le risorse hardware parte dell'architettura software.
+Questo richiede attenzione a:
 
-Questo implica attenzione a:
+- allocazioni dinamiche;
+- memoria;
+- CPU;
+- numero di connessioni;
+- socket Ethernet;
+- timeout;
+- retry;
+- frequenza dei task;
+- concorrenza;
+- watchdog.
 
-- allocazioni dinamiche
-- memoria
-- CPU
-- numero di connessioni
-- socket Ethernet
-- timeout
-- retry
-- frequenza dei task
-- concorrenza
-- watchdog
+Il sistema deve sapere non soltanto cosa può fare, ma anche **quanto costa farlo**.
 
-Il sistema deve sapere non soltanto cosa può fare.
+## 12. Resource awareness
 
-Deve sapere **quanto costa farlo**.
+La gestione delle risorse non deve essere applicata soltanto dopo un guasto. Deve essere parte della progettazione.
 
----
+I servizi di comunicazione possono competere per risorse limitate. Per questo DomoManager tende a:
 
-# 13. Resource-awareness
+- distribuire le comunicazioni nel tempo;
+- evitare concorrenza inutile;
+- limitare retry incontrollati;
+- controllare i timeout;
+- separare servizi applicativi e comunicativi;
+- monitorare le risorse disponibili;
+- rendere osservabile il comportamento del networking.
 
-La gestione delle risorse non deve essere una soluzione applicata dopo che qualcosa si rompe.
+Questo è particolarmente importante sulle piattaforme embedded con un numero limitato di socket e connessioni contemporanee.
 
-Deve essere parte della progettazione.
+> **Una risorsa che può esaurirsi deve poter essere osservata, prevista e gestita.**
 
-In particolare, i servizi di comunicazione possono competere per risorse limitate.
+## 13. Diagnostica come parte del sistema
 
-Per questo DomoManager tende a:
+In molti sistemi la diagnostica viene aggiunta in seguito. In DomoManager è parte dell'architettura.
 
-- distribuire le comunicazioni nel tempo
-- evitare concorrenza inutile
-- limitare retry incontrollati
-- controllare timeout
-- separare servizi applicativi e comunicativi
-- monitorare le risorse disponibili
-- rendere osservabile il comportamento del networking
+Un sistema affidabile non deve soltanto funzionare. Deve anche spiegare quando e perché qualcosa non funziona.
 
-Questo è particolarmente importante nelle piattaforme embedded con un numero limitato di socket e connessioni contemporanee.
+Devono essere osservabili:
 
-La filosofia è:
+- task e scheduler;
+- comunicazioni;
+- Buffer e RuntimeStore;
+- dispositivi;
+- timeout e retry;
+- errori;
+- watchdog;
+- sicurezza;
+- HVAC;
+- Power;
+- Weather;
+- RTC;
+- risorse di rete.
 
-> **una risorsa che può esaurirsi deve poter essere osservata, prevista e gestita.**
-
----
-
-# 14. Diagnostica come parte del sistema
-
-In molti sistemi la diagnostica viene aggiunta dopo.
-
-In DomoManager la diagnostica è parte dell'architettura.
-
-Un sistema realmente affidabile non deve soltanto funzionare.
-
-Deve anche poter spiegare quando qualcosa non funziona.
-
-Per questo devono essere osservabili:
-
-- task
-- scheduler
-- comunicazioni
-- Buffer
-- dispositivi
-- timeout
-- retry
-- errori
-- watchdog
-- sicurezza
-- HVAC
-- Power
-- Weather
-- RTC
-- risorse di rete
-
-La diagnostica deve permettere di distinguere, ad esempio:
+La diagnostica deve consentire di distinguere categorie diverse di problema:
 
 ```text
 TASK LENTO
-     │
-     ├── CPU
-     └── LOGICA
+  +-- CPU
+  +-- LOGICA
 
 COMUNICAZIONE LENTA
-     │
-     ├── NETWORK
-     ├── TIMEOUT
-     └── RETRY
+  +-- NETWORK
+  +-- TIMEOUT
+  +-- RETRY
 
 RISORSA ESAURITA
-     │
-     ├── SOCKET
-     ├── MEMORY
-     └── CONNECTION
+  +-- SOCKET
+  +-- MEMORY
+  +-- CONNECTION
 
 ERRORE DISPOSITIVO
-     │
-     ├── MODBUS
-     ├── RS485
-     └── DEVICE
+  +-- MODBUS
+  +-- RS485
+  +-- DEVICE
 ```
-
-Il principio è:
 
 > **Un errore non deve essere soltanto rilevato. Deve essere localizzabile.**
 
----
-
-# 15. Local-first, non cloud-first
+## 14. Local-first, non cloud-first
 
 DomoManager nasce per funzionare localmente.
 
 Le funzioni fondamentali della casa non devono dipendere da:
 
-- Internet
-- cloud
-- server esterni
-- account remoti
-- servizi proprietari
+- Internet;
+- cloud;
+- server esterni;
+- account remoti;
+- servizi proprietari.
 
-Il cloud può essere utilizzato quando aggiunge valore.
+Il cloud può essere utilizzato quando aggiunge valore, ma non deve essere necessario per mantenere operativo l'impianto.
 
-Non deve però essere necessario per mantenere operativo l'impianto.
+L'architettura privilegia:
 
-Per questo l'architettura privilegia:
-
-- elaborazione locale
-- Ethernet
-- RS485
-- Modbus
-- protocolli deterministici
-- automazioni locali
-- stato locale
-
-La filosofia è:
+- elaborazione locale;
+- Ethernet;
+- RS485;
+- Modbus;
+- protocolli deterministici;
+- automazioni locali;
+- stato locale.
 
 > **La casa deve continuare a funzionare anche quando Internet non funziona.**
 
----
+## 15. Wired-first, wireless when useful
 
-# 16. Wired-first, wireless when useful
+DomoManager non considera il wireless un nemico. Considera però l'affidabilità dell'infrastruttura una priorità.
 
-DomoManager non considera il wireless un nemico.
+Quando possibile, il sistema privilegia:
 
-Considera però l'affidabilità dell'infrastruttura una priorità.
+- cablaggio;
+- Ethernet;
+- RS485;
+- Modbus RTU;
+- Modbus TCP;
+- I/O locali.
 
-Per questo il sistema privilegia, quando possibile:
+Le tecnologie wireless possono essere utilizzate dove risultano convenienti, ma non devono diventare necessariamente il fondamento delle funzioni critiche.
 
-- cablaggio
-- Ethernet
-- RS485
-- Modbus RTU
-- Modbus TCP
-- I/O locali
+> **Wireless quando è utile. Wired quando è importante.**
 
-Le tecnologie wireless possono essere utilizzate dove sono convenienti.
-
-Non devono però diventare necessariamente il fondamento delle funzioni critiche.
-
-La distinzione è quindi:
-
-> **Wireless quando è utile.  
-> Wired quando è importante.**
-
----
-
-# 17. La separazione tra stato, logica e comunicazione
-
-Una delle conseguenze più importanti della filosofia DomoManager è la separazione tra tre concetti:
-
-```text
-             STATO
-              │
-              ▼
-            BUFFER
-              │
-       ┌──────┴──────┐
-       ▼             ▼
-     LOGICA      AUTOMAZIONI
-       │             │
-       └──────┬──────┘
-              ▼
-        COMMUNICAZIONE
-```
-
-Il sistema deve poter continuare a ragionare sul proprio stato anche quando una comunicazione esterna è lenta o temporaneamente indisponibile.
-
-Questo principio impedisce che:
-
-- MQTT diventi la logica del sistema
-- Home Assistant diventi il sistema
-- WebAPI diventi il sistema
-- il dispositivo fisico diventi direttamente la logica applicativa
-
-La comunicazione è un **livello di integrazione**.
-
-Non è il cuore del sistema.
-
----
-
-# 18. Hot Standby e continuità operativa
+## 16. Hot Standby e continuità operativa
 
 La filosofia industriale porta naturalmente al concetto di ridondanza.
 
-Quando richiesto, DomoManager può utilizzare un'architettura Master/Slave.
-
-Il principio è semplice:
+Quando richiesto, DomoManager può utilizzare un'architettura master/slave:
 
 ```text
-             CLUSTER
-                │
-        ┌───────┴───────┐
-        ▼               ▼
-      MASTER           SLAVE
-        │               │
-     ACTIVE            READY
+        CLUSTER
+           |
+     +-----+-----+
+     |           |
+     v           v
+   MASTER       SLAVE
+   ACTIVE       READY
 ```
 
-Il nodo attivo gestisce il normale funzionamento.
-
-Il nodo secondario rimane pronto a subentrare.
+Il nodo attivo gestisce il normale funzionamento. Il nodo secondario rimane pronto a subentrare.
 
 La continuità operativa può coinvolgere:
 
-- stato
-- processo
-- timestamp
-- ruolo Master/Slave
-- failover
-- comunicazioni
+- stato;
+- dati di processo;
+- timestamp;
+- ruolo master/slave;
+- failover;
+- comunicazioni.
 
-La ridondanza non deve introdurre comportamenti imprevedibili.
+La ridondanza non deve introdurre comportamenti imprevedibili. Deve aumentare la prevedibilità del sistema in presenza di guasti.
 
-Deve invece aumentare la prevedibilità del sistema in presenza di un guasto.
+## 17. La casa come ecosistema
 
----
+DomoManager può essere descritto attraverso due metafore complementari:
 
-# 19. La casa come ecosistema
-
-La filosofia finale di DomoManager può essere descritta attraverso una metafora biologica.
-
-> **La casa non è un insieme di oggetti intelligenti.  
-> È un organismo.  
-> DomoManager è il suo sistema nervoso.**
+- sul piano architetturale è il **sistema operativo della casa**;
+- sul piano funzionale è il suo **sistema nervoso**.
 
 In questo modello:
 
-- i dispositivi sono gli organi
-- il Buffer è il sistema circolatorio
-- il TimeManager è il ritmo
-- il Task Engine è il sistema di coordinamento
-- le automazioni sono il comportamento
-- la comunicazione è il sistema nervoso periferico
-- la diagnostica è il sistema immunitario
-- il watchdog è il riflesso di sicurezza
-- HotStandby rappresenta la ridondanza dell'organismo
+- i dispositivi sono gli organi;
+- Buffer e RuntimeStore rappresentano la circolazione dello stato;
+- il TimeManager scandisce il ritmo;
+- runtime e scheduler coordinano le attività;
+- le automazioni producono il comportamento;
+- la comunicazione costituisce il sistema nervoso periferico;
+- la diagnostica svolge una funzione simile al sistema immunitario;
+- il watchdog rappresenta il riflesso di sicurezza;
+- l'Hot Standby introduce ridondanza operativa.
 
-Ogni componente ha una funzione specifica.
+Ogni componente ha una funzione specifica. Il valore nasce dalla loro **coerenza complessiva**.
 
-Ma il valore nasce dalla loro **coerenza complessiva**.
-
----
-
-# 20. Il principio fondamentale
+## 18. Il principio fondamentale
 
 Tutti i principi precedenti possono essere sintetizzati in una sola idea:
 
-> **DomoManager non deve essere un insieme di funzionalità che convivono.  
-> Deve essere un sistema nel quale ogni funzionalità segue le stesse regole architetturali.**
+> **DomoManager non deve essere un insieme di funzionalità che convivono. Deve essere un sistema nel quale ogni funzionalità segue le stesse regole architetturali.**
 
-Determinismo.
+I criteri fondamentali sono:
 
-Non-blocking.
+- determinismo;
+- non-blocking;
+- stato condiviso coerente;
+- modularità;
+- ownership esplicita;
+- diagnostica;
+- local-first;
+- embedded-first;
+- resource awareness.
 
-Buffer-centric.
+Questi non sono soltanto obiettivi. Sono i criteri con cui deve essere valutata l'evoluzione del progetto.
 
-Modularità.
+## 19. Regole per l'evoluzione futura
 
-Diagnostica.
-
-Local-first.
-
-Embedded-first.
-
-Resource-aware.
-
-Questi non sono semplicemente obiettivi.
-
-Sono i criteri con cui deve essere valutata l'evoluzione del progetto.
-
----
-
-# 21. La regola per il futuro
-
-Ogni nuova funzionalità di DomoManager dovrebbe poter rispondere positivamente a queste domande:
+Ogni nuova funzionalità di DomoManager dovrebbe rispondere positivamente alle domande seguenti.
 
 ### È deterministica?
 
-Il suo comportamento è prevedibile?
+Il comportamento è prevedibile anche in presenza di errori, latenze e carico variabile?
 
 ### È non-blocking?
 
-Può rallentare o bloccare il resto del sistema?
+Può rallentare o bloccare indefinitamente il resto del sistema?
+
+### Ha un owner chiaro?
+
+È evidente quale componente possiede inizializzazione, stato, lifecycle ed effetti collaterali?
 
 ### Usa il modello comune?
 
-Condivide correttamente lo stato attraverso il Buffer?
+Pubblica correttamente lo stato applicativo condiviso attraverso Buffer o RuntimeStore?
+
+### Distingue lo stato applicativo da quello tecnico?
+
+Lo stato interno rimane incapsulato e quello condiviso è esposto in modo coerente?
 
 ### È diagnosticabile?
 
-Possiamo capire cosa sta facendo e perché?
+È possibile capire cosa sta facendo, perché lo sta facendo e perché potrebbe non averlo fatto?
 
 ### È modulare?
 
-Ha una responsabilità chiara?
+Ha una responsabilità precisa e contratti limitati?
 
 ### È resource-aware?
 
-Tiene conto dei limiti dell'hardware?
+Tiene conto dei limiti di CPU, RAM, socket, bus, banda e tempo di ciclo?
 
 ### È local-first?
 
-Può funzionare senza dipendenze cloud non necessarie?
+Può operare senza dipendenze cloud non necessarie?
 
 ### È comprensibile?
 
-Un tecnico può capire cosa sta succedendo?
+Un tecnico può ricostruirne configurazione, stato e comportamento?
 
-Se la risposta è no, la funzionalità non è ancora completamente integrata nella filosofia DomoManager.
+Se la risposta a una di queste domande è negativa, la funzionalità non è ancora completamente integrata nella filosofia DomoManager.
 
----
+## 20. Filosofia in una frase
 
-# 22. Filosofia in una frase
-
-> **DomoManager porta nella casa la disciplina dei sistemi industriali senza rinunciare alla flessibilità del software moderno.**
-
-E lo fa attraverso una regola fondamentale:
-
-> **la complessità deve essere gestita dal sistema, non scaricata sull'utente.**
+> **DomoManager porta nella casa la disciplina dei sistemi industriali senza rinunciare alla flessibilità del software moderno. La complessità deve essere gestita dal sistema, non scaricata sull'utente.**
 
 ---
 
-# ============================================================
-# DOMOMANAGER
-# DETERMINISTIC. NON-BLOCKING. MODULAR. DIAGNOSABLE.
-# EMBEDDED-FIRST. LOCAL-FIRST.
-# ============================================================
+**DOMOMANAGER**  
+**DETERMINISTIC. NON-BLOCKING. MODULAR. DIAGNOSABLE.**  
+**EMBEDDED-FIRST. LOCAL-FIRST.**

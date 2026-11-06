@@ -567,796 +567,448 @@ DomoManager è il sistema nervoso che coordina questi elementi.
 
 # ============================================================
 # 2. PANORAMICA GENERALE DEL SISTEMA
-# ============================================================
 
-
-DomoManager è costruito come un sistema a livelli, nel quale ogni
-componente possiede una responsabilità precisa.
-
-Il modello generale è:
+DomoManager è organizzato in livelli separati, con responsabilità esplicite e flussi osservabili.
 
 ```text
-HARDWARE
-   │
-   ▼
-BACKEND
-   │
-   ▼
-BUFFER
-   │
-   ├───────────────┐
-   ▼               ▼
-TASK ENGINE    AUTOMATION
-   │               │
-   └───────┬───────┘
-           ▼
-        BUFFER
-           │
-           ▼
-COMMUNICATION TASK
-           │
-           ▼
-COMMUNICATION SCHEDULER
-           │
-      ┌────┼────┐
-      ▼    ▼    ▼
-   BRIDGE MQTT WEBAPI
+HARDWARE / RETE
+      |
+      v
+BACKEND / DEVICE MANAGER / MODBUS / LOCAL I/O
+      |
+      v
+BUFFER ENGINE
+Single Source of Truth per le aree
+      |
+      +------------------+-------------------+
+      |                  |                   |
+      v                  v                   v
+APPLICATION ENGINES   AUTOMATION       INTROSPECTION
+Security / HVAC       Scene / Rule     Modello strutturale
+Averages / Power      Sequence         delle entity
+Solar / Weather            |                   |
+      |                    v                   v
+      +-----------------> BUFFER       SEMANTIC RESOLVER
+                                               |
+                                               v
+                                      HOME ASSISTANT MODEL
+                                               |
+                                               v
+COMMUNICATION TASK -> COMMUNICATION SCHEDULER -> MQTT / WEBAPI / BRIDGE
 ```
 
-I principali livelli sono:
+Principi invarianti:
 
+- il Buffer è la fonte unica di verità per le aree;
+- gli engine applicativi non dipendono dai protocolli di comunicazione;
+- l'Introspection non copia la configurazione, ma costruisce viste e correlazioni;
+- il resolver semantico arricchisce le entity senza modificare la configurazione originale;
+- Home Assistant è una proiezione del modello interno;
+- le variabili che non appartengono naturalmente al Buffer sono gestite dal RuntimeStore;
+- comunicazione e applicazione avanzano separatamente e in modo non bloccante.
 
-### 2.1 Hardware
+# 3. ARCHITETTURA TECNICA
 
-- Opta / Arduino
-- sensori
-- attuatori
-- I/O digitali
-- I/O analogici
-- Modbus TCP
-- Modbus RTU
-- RS485
-- Ethernet
-- RTC
+## 3.1 Backend, Device Manager e Buffer
 
+Il Backend acquisisce e attua lo stato tramite Device Manager, profili dispositivo, Modbus TCP/RTU e Local I/O. Gestisce inoltre routing, retry, timeout, cooldown ed errori.
 
-### 2.2 Backend
+Il Buffer Engine conserva lo stato delle aree e rimane il punto di convergenza per Backend, applicazione, automazioni e comunicazioni.
 
-- DomoManager Core
-- Device Manager
-- Modbus Engine
-- Buffer Engine
-- Time Manager
+## 3.2 Application Engines
 
-Il Backend acquisisce e normalizza lo stato del mondo fisico.
+Il Task Engine esegue gli engine applicativi secondo intervalli e responsabilità separate:
 
+- Security;
+- HVAC;
+- Averages;
+- Power;
+- Solar;
+- Weather;
+- altri servizi applicativi registrati.
 
-### 2.3 Buffer
+Gli engine leggono dal Buffer e producono aggiornamenti attraverso gli eventi interni di DomoManager.
 
-Il Buffer rappresenta lo stato centrale del sistema.
+## 3.3 Automation Engine
 
-È:
+L'Automation Engine supporta scene, regole statiche e dinamiche, sequenze, condizioni semplici, trend, debounce, bitmask e condizioni composite.
 
-- tipizzato
-- timestamped
-- monitorabile
-- tracciabile
-- accessibile dai vari Engine
+Le relazioni di automazione vengono esposte all'Introspection come input, output e stati tecnici.
 
-È la:
+## 3.4 DomoIntrospection
 
-**Single Source of Truth.**
+`DomoIntrospection` costruisce il modello strutturale senza duplicare la configurazione.
 
+Indicizza:
 
-### 2.4 Automation
+- aree configurate;
+- associazioni area-dispositivo;
+- tipo fisico DI, DO, AI, AO, virtuale o sconosciuto;
+- Route, Toggle e Split;
+- input e output delle automazioni;
+- binding AEE, MQTT e WebAPI;
+- zone HVAC;
+- gruppi Average;
+- sorgenti Solar;
+- tag RuntimeStore;
+- visibilità e ruolo tecnico delle entity.
 
-L'Automation Engine interpreta lo stato del sistema e applica
-le logiche dichiarative:
+Ogni `Entity` contiene identità, origine, gruppo, tipo fisico, riferimenti alla configurazione originale, semantica, accesso, visibilità, relazioni, provenienza e scala.
 
-- scene
-- rules
-- sequences
-- scheduled rules
-- composite conditions
-- trends
-- debounce
-- dynamic automations
+### EntityOrigin
 
+```text
+AREA
+DERIVED
+SECURITY
+HVAC
+AVERAGE
+SOLAR
+POWER
+AEE
+RUNTIME
+EXTERNAL_SOURCE
+```
 
-### 2.5 Frontend / Application Runtime
+### EntityGroup
 
-Il Task Engine orchestra le attività applicative.
+```text
+ROOT             -> DomoManager
+PHYSICAL_DEVICE  -> dispositivo fisico associato
+SECURITY         -> Sistema antifurto
+SOLAR            -> Inverter solare
+```
 
-Tra queste:
+### implementationOnly
 
-- Security
-- HVAC
-- Averages
-- Power
-- Weather
+Una entity `implementationOnly` rimane nel modello interno ma non viene pubblicata. Rientrano tipicamente target interni Route/Split, stati tecnici e dettagli implementativi.
 
-Ogni task legge lo stato necessario dal Buffer, esegue la propria
-logica e produce eventuali aggiornamenti.
+## 3.5 DomoSemanticResolver
 
+`DomoSemanticResolver` trasforma il modello strutturale in un modello semantico pubblicabile.
 
-### 2.6 Communication Runtime
+Determina:
 
-La comunicazione è gestita separatamente attraverso:
+- `EntityKind`;
+- unità di misura;
+- `deviceClass`;
+- `stateClass`;
+- accesso read/write;
+- visibilità finale.
 
-**Communication Task → Communication Scheduler**
+La risoluzione usa, in ordine, semantica specialistica, struttura fisica e relazioni, dizionario lessicale e fallback `UNKNOWN`.
 
-I servizi principali sono:
+```text
+UNKNOWN
+SENSOR
+BINARY_SENSOR
+SWITCH
+LIGHT
+COVER
+CLIMATE
+BUTTON
+NUMBER
+TEXT
+STATUS
+```
 
-- Bridge
-- MQTT
-- WebAPI
+Il resolver non deve contenere ID `AREA_*` applicativi cablati.
 
-Il Communication Scheduler utilizza scheduling temporizzato
-e round-robin.
+## 3.6 Scaling
 
+`Entity::scale` converte il valore Buffer nel valore pubblicato:
 
-### 2.7 Diagnostica
+```text
+valorePubblicato = valoreBuffer * entity.scale
+```
 
-La diagnostica osserva il sistema nel suo complesso:
+Per i gruppi Average:
 
-- stato
-- performance
-- errori
-- timing
-- risorse
-- comunicazioni
-- watchdog
-- Hot Standby
+```text
+entity.scale = 1 / group.outScale
+```
 
+Lo scaling viene determinato dalla sorgente che produce il valore, non dal nome dell'area.
 
-# ============================================================
-# 3. ARCHITETTURA TECNICA DETTAGLIATA
-# ============================================================
+## 3.7 DMRuntimeStore
 
-
-## 3.1 Buffer Engine
-
-Il Buffer Engine è il centro dello stato applicativo.
-
-Funzioni principali:
-
-- aree tipizzate
-- timestamp
-- change tracking
-- virtual areas
-- reverse
-- split
-- toggle
-- eventi interni
-
-Il Buffer costituisce la lingua comune tra i vari Engine.
-
-
-## 3.2 Device Manager
-
-Il Device Manager gestisce la rappresentazione dei dispositivi.
-
-Responsabilità:
-
-- device profiles
-- mapping area → register
-- priorità
-- error handling
-- cooldown
-- routing
-
-
-## 3.3 Modbus Engine
-
-Il Modbus Engine gestisce la comunicazione con dispositivi
-Modbus in modo deterministico.
-
-Funzioni:
-
-- polling round-robin
-- read
-- write
-- timeout
-- retry
-- cooldown
-- gestione errori
-- gestione del ciclo di connessione
-
-Il principio fondamentale è il non-blocking.
-
-
-## 3.4 Time Manager
-
-Gestisce il riferimento temporale:
-
-- RTC hardware
-- NTP
-- epoch
-- fallback temporale
-- callback periodici
-- sincronizzazione
-
-Il Time Manager fornisce la base temporale a:
-
-- HVAC
-- automazioni
-- Power
-- Security
-- Weather
-- scheduled rules
-
-
-## 3.5 Automation Engine
-
-L'Automation Engine implementa il comportamento dichiarativo.
+`DMRuntimeStore` gestisce variabili che non appartengono necessariamente a un'area Buffer.
 
 Supporta:
 
-- scene
-- rules
-- conditions
-- sequences
-- scheduled rules
-- composite logic
-- trends
-- debounce
-- dynamic automations
-- JSON Builder
+- handle e ID stabili;
+- nome visualizzato;
+- BOOL, INT32, FLOAT, STRING e JSON;
+- READ_ONLY, WRITE_ONLY e READ_WRITE;
+- persistenza e pubblicazione opzionale;
+- metadati semantici;
+- limiti, step e precisione;
+- provenienza della scrittura.
 
-L'Automation Engine legge dal Buffer e scrive nel Buffer.
+Topic Home Assistant:
 
+```text
+<prefix>/runtime/<id>/state
+<prefix>/runtime/<id>/set
+```
 
-## 3.6 Task Engine
+L'identità pubblica è il Runtime ID, non il valore tecnico `area = -1`.
 
-Il Task Engine costituisce il livello centrale di orchestrazione
-dell'applicazione.
+## 3.8 Security
 
-Gestisce:
+Il sottosistema Security comprende:
 
-- registrazione dei task
-- callback
-- intervalli
-- enabled / disabled
-- esecuzione temporizzata
-- ciclo frontend
-- sincronizzazione del ciclo
+```text
+SecurityEngine
+    +-- SecurityOrchestrator
+    +-- WiredSensorsManager
+    +-- SecurityHmiInterface
+    +-- DomoManagerAlarmPanel
+```
 
-I principali task applicativi comprendono:
+Gestisce sensori cablati, canali RT/H24, zone, armamento, eventi pannello, memorie, tacitazione, fault di comunicazione e bitmask di sensore, zona e sistema.
 
-- Security / Sensors
-- HVAC
-- Averages
-- Power
-- Weather
-- Communication
+La sincronizzazione con il Buffer è read/write. Le bitmask devono essere codificate e decodificate da helper interni al sottosistema Security che condividono un'unica sequenza dei segnali. In questo modo l'aggiunta o la modifica di un campo non disallinea lettura e scrittura.
 
+Home Assistant non deve duplicare la mappa dei bit con tabelle parallele.
 
-## 3.7 Communication Scheduler
+```text
+Security state
+      |
+      v
+Security codec/helper read-write
+      |
+      v
+Buffer status/command areas
+      |
+      v
+Introspection / semantic projection
+      |
+      v
+Home Assistant
+```
 
-Il Communication Scheduler è dedicato ai servizi di comunicazione.
+## 3.9 Solar
 
-Gestisce:
+L'integrazione Solar registra nell'Introspection le aree configurate e le marca come origine e gruppo `SOLAR`.
 
-- Bridge
-- MQTT
-- WebAPI
+Le entity possono comprendere tensione, corrente e potenza fotovoltaica, tensione e percentuale batteria, temperatura, stato inverter e stato comunicazione.
 
-Ogni servizio può avere:
+In Home Assistant sono aggregate nel dispositivo logico `Inverter solare`.
 
-- interval
-- priority
-- enabled / disabled
-- callback
+## 3.10 Home Assistant
 
-L'esecuzione avviene secondo un modello:
+L'integrazione è suddivisa in tre responsabilità:
 
-**timed round-robin.**
+```text
+DMHomeAssistant
+    Discovery, topic, payload e Device Registry
 
-Il suo obiettivo è impedire che un singolo servizio di comunicazione
-possa monopolizzare il runtime.
+DMHAOrchestrator
+    Subscription, availability, snapshot, coda stati e comandi inbound
 
+HAMQTTTransport
+    Adattamento verso il client MQTT reale
+```
 
-## 3.8 Frontend Engines
+### Discovery
 
-I motori applicativi comprendono:
+Sono pubblicate solo entity non hidden, semanticamente supportate e abilitate dalla configurazione del dominio.
 
-### HVAC Engine
+### Topic area
 
-- zone
-- setpoint
-- fan coil
-- valvole
-- ACS
-- anti-legionella
-- defrost
-- protezioni
+```text
+<prefix>/area/<area>/state
+<prefix>/area/<area>/set
+```
 
+### Topic RuntimeStore
 
-### Power Engine
+```text
+<prefix>/runtime/<id>/state
+<prefix>/runtime/<id>/set
+```
 
-- carichi
-- priorità
-- limiti
-- forecast solare
-- protezioni
-- auto-tuning
+### Snapshot iniziale
 
+Dopo connessione, subscription, availability e discovery:
 
-### Weather Engine
+1. le entity area leggibili vengono accodate dalla fotografia del Buffer;
+2. le entity Runtime leggibili vengono pubblicate dal RuntimeStore;
+3. gli aggiornamenti successivi vengono pubblicati incrementalmente.
 
-- temperatura
-- pioggia
-- vento
-- luce
-- moving averages
-- eventi
+### Device Registry
 
+Le entity vengono aggregate sotto controller root, dispositivi fisici, Sistema antifurto e Inverter solare. I device secondari possono dichiarare il controller tramite `via_device`.
 
-### Security Engine
+## 3.11 Communication Runtime
 
-- PIR
-- door
-- window
-- smoke
-- flood
-- zone
-- alarm states
-- eventi
-- bitmask
+```text
+COMMUNICATION TASK
+        |
+        v
+COMMUNICATION SCHEDULER
+        +-- MQTT
+        +-- WebAPI
+        +-- Bridge
+```
 
-
-## 3.9 Communication Services
-
-### Bridge
-
-- AEE
-- UDP
-- JSON
-- eventi
-
-### MQTT
-
-- Home Assistant
-- Zigbee2MQTT
-- Shelly
-- eventi
-- stato
-
-### WebAPI
-
-- GET
-- POST
-- parsing
-- buffer mapping
-- request / response
-
-Questi servizi vengono eseguiti dal Communication Scheduler.
-
-
-## 3.10 RS485
-
-RS485 gestisce comunicazioni seriali deterministiche attraverso:
-
-- frame
-- ACK / NACK
-- retry
-- state machine
-- timeout
-- gestione degli errori
-
-Le operazioni devono essere non-blocking.
-
-
-## 3.11 Hot Standby
-
-Gestisce:
-
-- MASTER
-- SLAVE
-- heartbeat
-- failover
-- state replication
-- process synchronization
-- Ethernet lifecycle
-
+Il Communication Scheduler rispetta intervallo, priorità, round-robin temporizzato, budget di rete e socket, retry e recovery controllati.
 
 ## 3.12 Diagnostica
 
-La diagnostica analizza:
+La diagnostica osserva Buffer, device, profili, relazioni Introspection, entity unknown e hidden, gruppi semantici, scaling, automazioni, task, scheduler, comunicazioni, Security, HVAC, Solar, Power, Weather, RuntimeStore, watchdog e Hot Standby.
 
-- Buffer
-- task
-- scheduler
-- comunicazioni
-- dispositivi
-- Modbus
-- RTC
-- Security
-- HVAC
-- Power
-- Hot Standby
-- Ethernet
-- socket
-- watchdog
-- overload
-
-
-# ============================================================
-# 4. DIAGRAMMA ASCII – DIPENDENZE FILE
-# ============================================================
-
+# 4. DIPENDENZE ARCHITETTURALI PRINCIPALI
 
 ```text
-domomanager.ino
-│
-├── DMUsb.hpp
-│
-├── DMFrontend.hpp
-│   │
-│   ├── DMFrontendEngines.hpp
-│   │
-│   ├── DMAutomation.hpp
-│   │
-│   ├── DMBridge.hpp
-│   │
-│   ├── DMPLC.hpp
-│   │
-│   ├── DMEquipment.hpp
-│   │
-│   ├── DMBuffers.hpp
-│   │
-│   ├── DMWeather.hpp
-│   │
-│   ├── DMSetup.hpp
-│   │
-│   ├── DMOptaRTC.hpp
-│   │
-│   ├── DMDiagnostic.hpp
-│   │
-│   ├── DMFncs.hpp
-│   │
-│   └── DMLogger.hpp
-│
-└── DMLogger.hpp
+DomoManager.ino
+|
++-- DMFrontend.hpp
+|   +-- DMFrontendEngines.hpp
+|   |   +-- SecurityEngine
+|   |   +-- HVAC / Averages / Power / Solar / Weather
+|   +-- DMIntrospection.hpp
+|   +-- DMSemanticResolver.hpp
+|   +-- DMRuntimeStore.hpp
+|   +-- DMHomeAssistant.hpp
+|   +-- DMHAOrchestrator.hpp
+|   +-- HAMQTTTransport
+|   +-- DMBridge.hpp
+|   +-- WebAPI
+|
++-- DomoManager Core
+    +-- Device Manager
+    +-- Buffer Engine
+    +-- Modbus Engine
+    +-- Local I/O
+    +-- Automation Engine
+    +-- Task Engine
+    +-- Communication Scheduler
+    +-- Time Manager
+    +-- Diagnostics
 ```
 
-Il diagramma rappresenta le dipendenze architetturali principali.
+Le dipendenze effettive devono essere verificate dagli `#include` del codice sorgente.
 
-Le dipendenze effettive tra file devono essere considerate
-secondo gli `#include` presenti nel codice sorgente.
-
-
-# ============================================================
-# 5. DIAGRAMMA ASCII – ARCHITETTURA A BLOCCHI
-# ============================================================
-
+# 5. FLUSSO DATI COMPLETO
 
 ```text
-                         ┌──────────────────────┐
-                         │       HARDWARE       │
-                         │  Opta / Arduino I/O  │
-                         │  Modbus / RS485      │
-                         │  Ethernet            │
-                         └──────────┬───────────┘
-                                    │
-                                    ▼
-
-┌────────────────────────────────────────────────────────────┐
-│                     DOMOMANAGER CORE                       │
-│                                                            │
-│ Setup / Backend / Validation / Routing / Watchdog          │
-└──────────────────────────┬─────────────────────────────────┘
-                           │
-                           ▼
-
-┌────────────────────────────────────────────────────────────┐
-│                       BUFFER ENGINE                        │
-│                  SINGLE SOURCE OF TRUTH                    │
-└──────────────────────────┬─────────────────────────────────┘
-                           │
-                           ▼
-
-┌────────────────────────────────────────────────────────────┐
-│                      DEVICE MANAGER                        │
-└──────────────────────────┬─────────────────────────────────┘
-                           │
-                           ▼
-
-┌────────────────────────────────────────────────────────────┐
-│                       MODBUS ENGINE                        │
-└──────────────────────────┬─────────────────────────────────┘
-                           │
-                           ▼
-
-┌────────────────────────────────────────────────────────────┐
-│                        TIME MANAGER                        │
-└──────────────────────────┬─────────────────────────────────┘
-                           │
-                           ▼
-
-┌────────────────────────────────────────────────────────────┐
-│                     AUTOMATION ENGINE                      │
-└──────────────────────────┬─────────────────────────────────┘
-                           │
-                           ▼
-
-┌────────────────────────────────────────────────────────────┐
-│                       TASK ENGINE                           │
-│                                                            │
-│  Security / HVAC / Averages / Power / Weather              │
-└──────────────────────────┬─────────────────────────────────┘
-                           │
-                           ▼
-
-                    COMMUNICATION TASK
-                           │
-                           ▼
-
-┌────────────────────────────────────────────────────────────┐
-│                 COMMUNICATION SCHEDULER                    │
-│                                                            │
-│                   TIMED ROUND-ROBIN                        │
-└──────────────────────────┬─────────────────────────────────┘
-                           │
-                ┌──────────┼──────────┐
-                ▼          ▼          ▼
-             BRIDGE       MQTT      WEBAPI
-
-
-                ┌───────────────────────────┐
-                │       DIAGNOSTICS         │
-                │                           │
-                │ Observes the whole       │
-                │ runtime                  │
-                └───────────────────────────┘
-```
-
-
-# ============================================================
-# 6. DIAGRAMMA ASCII – FLUSSO DATI
-# ============================================================
-
-
-```text
-                         MONDO FISICO
-                              │
-                              ▼
-                         DEVICE LAYER
-                              │
-                              ▼
-                    BACKEND / MODBUS / I/O
-                              │
-                              ▼
-                    ╔════════════════════╗
-                    ║       BUFFER       ║
-                    ║ SINGLE SOURCE OF   ║
-                    ║      TRUTH         ║
-                    ╚════════╤═══════════╝
-                             │
-                 ┌───────────┼───────────┐
-                 │           │           │
-                 ▼           ▼           ▼
-               TASKS     AUTOMATION  COMMUNICATION
-                 │           │           │
-                 │           │           ▼
-                 │           │    COMMUNICATION
-                 │           │      SCHEDULER
-                 │           │           │
-                 │           │      ┌────┼────┐
-                 │           │      ▼    ▼    ▼
-                 │           │   BRIDGE MQTT WEBAPI
-                 │           │
-                 └───────────┼───────────┘
-                             │
-                             ▼
-                       BUFFER UPDATE
-                             │
-                             ▼
-                       DEVICE OUTPUT
-                             │
-                             ▼
-                        MONDO FISICO
-```
-
-
-# ============================================================
-# 7. DIAGRAMMA ASCII – CICLO DI ESECUZIONE
-# ============================================================
-
-
-```text
-LOOP()
-  │
-  ▼
-BACKEND CYCLE
-  │
-  ├── Time Manager
-  ├── Device Manager
-  ├── Modbus / I/O
-  └── Buffer Update
-  │
-  ▼
-BACKEND CYCLE COMPLETED
-  │
-  ▼
-FRONTEND / TASK ENGINE
-  │
-  ├── Security
-  ├── HVAC
-  ├── Averages
-  ├── Power
-  └── Weather
-  │
-  ▼
-FRONTEND CYCLE COMPLETED
-  │
-  ├──────────────► AUTOMATION
-  │                     │
-  │                     ▼
-  │                   BUFFER
-  │
-  ▼
-COMMUNICATION TASK
-  │
-  ▼
-COMMUNICATION SCHEDULER
-  │
-  ├── Bridge
-  ├── MQTT
-  └── WebAPI
-  │
-  ▼
-FULL CYCLE
-  │
-  ▼
-NEXT LOOP()
-```
-
-Il ciclo applicativo e il ciclo di comunicazione sono logicamente
-separati.
-
-Il Communication Scheduler non deve poter bloccare il ciclo
-applicativo.
-
-
-# ============================================================
-# 8. MODELLO DI ESECUZIONE
-# ============================================================
-
-
-Il runtime segue quattro concetti fondamentali:
-
-```text
-BACKEND
-   │
-   ▼
+MONDO FISICO
+     |
+     v
+DEVICE / MODBUS / LOCAL I/O
+     |
+     v
 BUFFER
-   │
-   ▼
-APPLICATION
-   │
-   ▼
-COMMUNICATION
+     +-------------------+--------------------+
+     |                   |                    |
+     v                   v                    v
+APPLICATION          AUTOMATION         INTROSPECTION
+     |                   |                    |
+     +---------> BUFFER <-+                    v
+                                          SEMANTICS
+                                              |
+                                              v
+                                      HOME ASSISTANT MODEL
+                                              |
+                                              v
+                                      MQTT COMMUNICATION
 ```
 
-con un ciclo di feedback:
+Per i RuntimeTag:
 
 ```text
-PHYSICAL WORLD
-      │
-      ▼
-    BACKEND
-      │
-      ▼
-    BUFFER
-      │
-      ▼
- APPLICATION
-      │
-      ▼
- AUTOMATION
-      │
-      ▼
-    BUFFER
-      │
-      ▼
-   OUTPUT
-      │
-      ▼
-PHYSICAL WORLD
+DMRuntimeStore -> DomoIntrospection -> DomoSemanticResolver
+               -> DMHomeAssistant -> DMHAOrchestrator
 ```
 
-Le comunicazioni esterne rappresentano una diramazione controllata:
+# 6. CICLO DI ESECUZIONE
 
 ```text
-BUFFER
-   │
-   ▼
-COMMUNICATION TASK
-   │
-   ▼
-COMMUNICATION SCHEDULER
-   │
-   ├── Bridge
-   ├── MQTT
-   └── WebAPI
+LOOP
+ +-- Backend cycle
+ |     +-- Time
+ |     +-- Device Manager
+ |     +-- Modbus / Local I/O
+ |     +-- Buffer update
+ +-- Frontend / Task Engine
+ |     +-- Security / HVAC / Averages / Power / Solar / Weather
+ +-- Automation
+ |     +-- Buffer update
+ +-- Communication Task
+       +-- Communication Scheduler
+             +-- MQTT / WebAPI / Bridge
 ```
 
+Introspection e Semantic Resolver costruiscono il modello. La pubblicazione runtime usa il modello già risolto.
 
-# ============================================================
+# 7. REGOLE DI PROGETTAZIONE
+
+## 7.1 Nessuna duplicazione della configurazione
+
+Introspection conserva riferimenti agli oggetti originali. Le proiezioni esterne non devono introdurre mappe applicative duplicate.
+
+## 7.2 Nessun ID applicativo cablato nel framework
+
+I moduli generici non devono contenere `AREA_*` specifiche dell'installazione.
+
+## 7.3 Read/write simmetrico
+
+Quando uno stato è comandabile, codifica e decodifica devono condividere ordine e semantica.
+
+## 7.4 Buffer-centric
+
+Le aree Buffer rimangono la fonte di verità. RuntimeStore è usato per variabili che non appartengono naturalmente al Buffer.
+
+## 7.5 Non-blocking
+
+Una comunicazione lenta o guasta non deve bloccare Backend, Task Engine, Security o Automation.
+
+## 7.6 Diagnostica esplicita
+
+Unknown, hidden, scaling, origine, gruppo e relazioni devono essere osservabili nei report.
+
+## 7.7 Stabilità degli identificatori
+
+Gli ID Home Assistant e RuntimeStore devono rimanere stabili attraverso riavvii e refactor compatibili.
+
+# 8. STATO DELL'INTEGRAZIONE HOME ASSISTANT
+
+Il modello corrente supporta:
+
+- Discovery MQTT automatica;
+- availability;
+- sensori e attuatori derivati semanticamente;
+- Device Registry per controller, device fisici, Security e Solar;
+- snapshot iniziale;
+- aggiornamenti incrementali;
+- comandi area;
+- tag RuntimeStore read/write;
+- feedback sullo state topic;
+- scaling delle aree Average.
+
+Le bitmask Security restano proprietà del sottosistema Security. La proiezione verso binary sensor o `alarm_control_panel` deve partire dal codec/helper read/write interno alla Security, non da configurazioni parallele nel layer Home Assistant.
+
 # 9. PRINCIPI OPERATIVI
-# ============================================================
 
+- determinismo;
+- non-blocking;
+- Buffer come fonte unica di verità;
+- isolamento dei servizi;
+- consapevolezza delle risorse;
+- osservabilità;
+- funzionamento locale;
+- progettazione embedded-first;
+- configurazione dichiarativa;
+- separazione tra struttura, semantica e protocollo.
 
-### 9.1 Determinismo
-
-Il runtime deve avere tempi e responsabilità prevedibili.
-
-
-### 9.2 Non-blocking
-
-Nessun servizio secondario deve bloccare il ciclo principale.
-
-
-### 9.3 Buffer-centric
-
-Il Buffer è la fonte unica di verità.
-
-
-### 9.4 Service isolation
-
-Un servizio di comunicazione non deve poter monopolizzare
-l'esecuzione.
-
-
-### 9.5 Resource awareness
-
-CPU, memoria, Ethernet, socket e connessioni sono risorse
-finite e devono essere gestite esplicitamente.
-
-
-### 9.6 Observability
-
-Ogni comportamento significativo deve poter essere osservato
-e diagnosticato.
-
-
-### 9.7 Local-first
-
-Le funzioni fondamentali della casa devono continuare a
-funzionare senza cloud.
-
-
-### 9.8 Embedded-first
-
-L'architettura deve rispettare i limiti reali dell'hardware.
-
-
-# ============================================================
 # 10. OBIETTIVO FINALE
-# ============================================================
 
+DomoManager vuole offrire una base domotica affidabile come un PLC, leggibile, estendibile, locale, prevedibile sotto carico e diagnosticabile.
 
-DomoManager nasce per costruire una domotica:
+Home Assistant rappresenta il livello di supervisione e interazione. DomoManager conserva il controllo deterministico dell'impianto, dello stato e delle automazioni.
 
-- affidabile come un PLC
-- pulita come un impianto elettrico
-- leggibile come un manuale tecnico
-- estendibile come un framework moderno
-- prevedibile come un sistema industriale
-- locale come un dispositivo embedded
-- diagnosticabile in ogni sua parte
-
-Non vuole sostituire necessariamente Home Assistant.
-
-Può invece rappresentare un livello più basso e più deterministico
-sul quale costruire integrazioni e interfacce superiori.
-
-L'obiettivo è creare la base di una casa intelligente che continui
-a funzionare anche quando i servizi esterni non funzionano.
-
-
-# ============================================================
 # DOMOMANAGER
+
 # THE OPERATING SYSTEM FOR THE HOME
-# ============================================================
