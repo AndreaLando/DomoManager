@@ -1,711 +1,276 @@
-# ============================================================
-# DOMOMANAGER – CHANGELOG
-# ============================================================
+# Changelog
 
-# Beta – Architecture & Runtime Stabilization
+Questo documento registra le modifiche significative di DomoManager.
 
-Questa release rappresenta un'importante evoluzione della **Beta pubblica di DomoManager**.
+Le voci distinguono tra:
 
-L'obiettivo principale di questa fase non è soltanto aggiungere nuove funzionalità, ma consolidare l'architettura runtime rendendo il sistema:
+- funzionalità introdotte;
+- modifiche architetturali;
+- correzioni;
+- elementi deprecati;
+- limitazioni note;
+- attività pianificate.
 
-- più deterministico
-- più prevedibile
-- più non bloccante
-- più efficiente nell'utilizzo delle risorse
-- più facilmente diagnosticabile
-- più adatto all'esecuzione su hardware embedded con risorse limitate
+> **Il changelog descrive modifiche verificabili del progetto. Filosofia, panoramica e architettura completa restano nei documenti tecnici dedicati.**
 
-Particolare attenzione è stata dedicata alla gestione del ciclo frontend e delle comunicazioni Ethernet, con l'introduzione di una schedulazione separata dei servizi di comunicazione.
+## [Unreleased]
 
----
+### Added
 
-# 1. Novità principali
+#### RuntimeStore e stato tipizzato
 
-## 1.1 Task Engine – nuova architettura di orchestrazione
+- introdotto `DMRuntimeStore` come storage complementare al Buffer numerico;
+- aggiunto accesso O(1) tramite handle;
+- aggiunto supporto per `BOOL`, `INT32`, `FLOAT`, `STRING32`, `STRING64`, `JSON128` e `JSON256`;
+- aggiunti controllo accessi, metadati, revisioni, dirty tracking e memory guard;
+- aggiunto supporto agli ID runtime nei modelli Introspection e Home Assistant.
 
-È stata introdotta una struttura centralizzata per la gestione dei task frontend.
+#### Introspection e modello semantico
 
-Il nuovo modello separa:
+- introdotto `DomoIntrospection` per costruire il modello strutturale senza duplicare la configurazione;
+- aggiunti origin, group, relation, riferimenti alla sorgente e flag `implementationOnly`;
+- introdotto `DomoSemanticResolver` per assegnare kind, unità, device class, state class, accesso e visibilità;
+- aggiunti gruppi logici per controller, device fisici, Security e Solar;
+- aggiunta diagnostica per entity `UNKNOWN`, hidden e implementation-only.
 
-- definizione dei task
-- configurazione
-- scheduling
-- esecuzione
-- rilevamento del completamento del ciclo frontend
+#### Home Assistant (`DMHAOrchestrator`)
 
-### Task standard gestiti
+- aggiunta generazione MQTT Discovery dal modello semantico;
+- aggiunto Device Registry per controller, dispositivi fisici, Security e Solar;
+- aggiunti topic per aree Buffer e variabili RuntimeStore;
+- aggiunti availability, subscription dei comandi, snapshot iniziale e aggiornamenti incrementali;
+- aggiunta coda `PendingState`;
+- aggiunto routing inbound verso Buffer, EventManager o RuntimeStore;
+- aggiunto recovery completo dopo disconnessione.
 
-- Security / Sensors
-- HVAC
-- Averages
-- Communication
+#### Eventi e Physical I/O
 
-Ogni task può essere configurato tramite:
+- introdotto `PhysicalIOManager` per polling, active-level conversion e debounce non bloccante;
+- aggiunte source dedicate per ingressi e consumer delle uscite;
+- aggiunto retry implicito quando la push nella coda eventi non riesce;
+- consolidato l'uso di `EventManager` per separare produzione e consumo degli eventi.
 
-- intervallo di esecuzione
-- stato enabled/disabled
-- callback dedicata
+#### Networking e piattaforme
 
-### Vantaggi
+- aggiunto il backend comune `DMPlatform` per Opta ed ESP32-S3;
+- aggiunti backend condivisi per Ethernet e Modbus;
+- aggiunto supporto W5500 e TCA9554 sulla piattaforma ESP32-S3 prevista;
+- introdotti `DMNetworkManager` e `SocketManager` per arbitraggio, pacing, ownership e lifecycle delle risorse di rete;
+- aggiunto stato tecnico comune dei frontend tramite `FrontendStatus`.
 
-La logica applicativa non dipende più direttamente dal `loop()` principale.
+#### Power, Weather, Solar e Web API
 
-Il frontend può quindi eseguire più servizi con una politica di scheduling uniforme e prevedibile.
+- aggiunto `PowerSupervisor` con validazione, isteresi, allarmi, segnali extra e snapshot;
+- aggiunto engine Weather con medie mobili, giorno/notte, pioggia, raffiche e debounce degli eventi;
+- aggiunto supporto Solar con trasporti UART/TCP, discovery, polling con pacing, CRC e snapshot;
+- aggiunto motore Web API client/server non bloccante con code, correlazione delle risposte, autenticazione e parsing;
+- aggiunti profili applicativi per controllo accessi e dispositivi Web API.
 
----
+### Changed
 
-## 1.2 Communication Scheduler
+#### Modello dello stato
 
-È stato introdotto un **Communication Scheduler dedicato** ai servizi di comunicazione.
+- il Buffer è definito come fonte autorevole dello stato applicativo numerico condiviso;
+- RuntimeStore è definito come fonte autorevole dello stato applicativo tipizzato;
+- lo stato tecnico interno resta sotto l'ownership dei rispettivi engine;
+- route, toggle e split sono attribuiti ai relativi manager logici e non allo storage Buffer.
 
-I servizi vengono trattati come attività indipendenti:
+#### Ciclo di esecuzione
 
-- Bridge
-- MQTT
-- WebAPI
+- documentato `DMRuntime::loop()` come ciclo cooperativo e incrementale;
+- separati polling I/O, avanzamento Modbus, elaborazione limitata degli eventi e task pesati;
+- formalizzati `ipCycleCompleted`, `backendCycleDone` e `backend1StCycleDone`;
+- limitato il lavoro per iterazione per preservare la progressione del runtime;
+- aggiunte misurazione dei callback, media fixed-point e rilevazione degli spike.
 
-Ogni servizio dispone di:
+#### Modbus
 
-- intervallo minimo
-- priorità
-- stato enabled
-- callback di esecuzione
+- aggiunta precedenza controllata per le scritture pendenti;
+- mantenuti `ShouldQuery()`, pacing, cooldown e arbitraggio anche nei cicli di scrittura;
+- aggiornato lo stato del protocollo attraverso `DMNetworkManager`;
+- distinto ciclo avviato da ciclo realmente eseguito.
 
-Il scheduler utilizza un modello **round-robin temporizzato**, evitando che un singolo servizio possa monopolizzare il ciclo frontend.
+#### Security
 
-### Esempio
+- consolidate bitmask di stato, memoria, nuovi eventi e tacitazione;
+- resi simmetrici i percorsi read/write tramite codec e helper condivisi;
+- mantenuta nel dominio Security la definizione canonica dei bit;
+- evitata la duplicazione delle mappe nel frontend Home Assistant.
 
-La comunicazione viene ora organizzata concettualmente come:
+#### MQTT
+
+- introdotto un messaggio inbound normalizzato per mapping numerici, testuali, raw e comandi Home Assistant;
+- aggiunti area, runtime handle, Runtime ID, tipo e origine del messaggio;
+- chiarita la validità temporanea di topic e payload durante la callback sincrona.
+
+#### Documentazione
+
+- rifattorizzati filosofia, panoramica, architettura, dipendenze, diagrammi, flusso dati, ciclo di esecuzione e README;
+- separati grafo fisico, grafo architetturale e dipendenze runtime;
+- normalizzati heading, diagrammi, terminologia e ownership;
+- sostituito il modello del Communication Scheduler universale con i lifecycle effettivi dei protocolli e degli orchestratori.
+
+### Fixed
+
+- corretta la rappresentazione architetturale del Buffer, evitando di attribuirgli tutto lo stato tecnico del sistema;
+- corretta la rappresentazione uniforme del Task Engine, allineandola a task pesati, intervalli, callback e macchine a stati;
+- corretta la rappresentazione delle comunicazioni, che non attraversano un unico scheduler universale;
+- chiarito che un ciclo è completato solo dopo progressione reale;
+- chiarita la necessità di ripristinare subscription, availability, discovery e snapshot dopo una disconnessione;
+- chiarita la distinzione tra comando richiesto e stato realmente confermato;
+- formalizzata l'ownership unica dell'inizializzazione hardware.
+
+### Deprecated
+
+- gestione diretta di comunicazioni complesse nel percorso applicativo quando è disponibile un engine o orchestratore dedicato;
+- mappe Home Assistant parallele per bitmask o semantica già possedute dai domain engine;
+- uso di ID `AREA_*` specifici dell'installazione nei moduli generici;
+- uso di ricerche ripetute per Runtime ID nel percorso ordinario quando è disponibile un handle;
+- assunzione che tutti i servizi di comunicazione condividano lo stesso scheduler timed round-robin.
+
+### Known issues
+
+- l'inizializzazione platform deve rimanere in un solo componente proprietario, evitando chiamate duplicate;
+- i getter Weather devono gestire esplicitamente il periodo precedente al primo campione valido;
+- la configurazione Weather deve utilizzare reader e aree effettivamente dedicate;
+- credenziali, codici e segreti di installazione non devono essere inclusi nella documentazione pubblica o nel repository distribuito;
+- i confronti degli snapshot Solar devono applicare una politica coerente per i valori floating-point;
+- le configurazioni con più servizi Ethernet simultanei richiedono verifica sulla piattaforma target;
+- le API basate su `std::initializer_list` richiedono storage con durata compatibile;
+- le definizioni Web API devono utilizzare valori validi per i rispettivi enum e tipi.
+
+### Planned
+
+- consolidamento dei test Opta ed ESP32-S3;
+- test di carico per configurazioni Ethernet concorrenti;
+- test del recovery MQTT e dello snapshot Home Assistant;
+- test estesi Hot Standby, RS485, Web API e Solar;
+- diagnostica più dettagliata di socket, code, tempi e backlog;
+- verifica automatica delle dipendenze fisiche dagli `#include` reali;
+- hardening della configurazione e gestione sicura dei secret;
+- ulteriore copertura dei test per Buffer, RuntimeStore, EventManager e domain engine.
+
+## [Beta - Architecture and Runtime Stabilization]
+
+Questa fase consolida l'architettura runtime della Beta pubblica, con particolare attenzione a determinismo, non-blocking, diagnostica e uso delle risorse embedded.
+
+### Added
+
+#### Orchestrazione frontend
+
+- introdotta una struttura centralizzata per definizione, configurazione ed esecuzione dei task frontend;
+- aggiunti task per Security/Sensors, HVAC, Averages e comunicazioni;
+- aggiunti intervalli, abilitazione e callback dedicate;
+- aggiunto il rilevamento del completamento del ciclo frontend.
+
+#### Scheduling delle comunicazioni
+
+- introdotto un modello dedicato di scheduling per Bridge, MQTT e Web API nella fase Beta;
+- aggiunti intervallo minimo, priorità, abilitazione e callback;
+- distribuita nel tempo l'esecuzione dei servizi di comunicazione;
+- ridotta la concorrenza temporale sulle risorse Ethernet e socket.
+
+#### Frontend engine
+
+- integrato HVAC nel ciclo frontend;
+- integrato il ciclo Security/Sensors con aggiornamenti solo in presenza di variazioni;
+- integrato il calcolo delle medie nel ciclo frontend;
+- mantenuta la separazione tra task applicativi e servizi di comunicazione.
+
+### Changed
+
+#### Ciclo frontend
+
+- resa più esplicita la sequenza backend, aggiornamento Buffer, task frontend e completamento del ciclo;
+- mantenute le API di completamento e reset del ciclo frontend;
+- separata la politica di esecuzione delle comunicazioni dalla logica applicativa.
+
+#### Servizi di comunicazione
+
+- Bridge, MQTT e Web API sono trattati come servizi indipendenti;
+- le operazioni HTTP mantengono code e correlazione request/response;
+- MQTT rimane un livello di integrazione verso Home Assistant, Zigbee2MQTT e altri ecosistemi;
+- rafforzato il requisito non-blocking per Modbus, MQTT, Web API, Bridge e HMI.
+
+#### Resource management
+
+- resa esplicita la pressione esercitata da HMI, MQTT, Modbus TCP, Bridge e Web API sulle risorse Ethernet;
+- aggiunti obiettivi di controllo per timeout, retry, connessioni e saturazione dei socket;
+- integrata la gestione delle risorse nella diagnostica runtime.
+
+### Performance
+
+- mantenuto lookup O(1) del Buffer;
+- mantenuto change tracking delle aree;
+- mantenute medie mobili O(1) nel dominio Weather;
+- ridotte esecuzioni frontend non necessarie tramite intervalli e abilitazione;
+- distribuite le comunicazioni nel tempo.
+
+### Diagnostics
+
+- aggiunti controlli per task, scheduler, comunicazioni, Buffer, dispositivi, RTC, Security, HVAC, Power, Weather e watchdog;
+- distinta la diagnostica tra task lento, comunicazione lenta, timeout, errore dispositivo e pressione sulle risorse.
+
+### Stability
+
+- ridotte le operazioni potenzialmente bloccanti;
+- subordinati i task dipendenti da dati validi al completamento del power-on cycle;
+- mantenuta la separazione master/slave nel modello Hot Standby;
+- mantenuta la distinzione tra funzioni locali e integrazioni cloud opzionali.
+
+### Limitations
+
+La fase rimane Beta. Le aree dichiarate per ulteriore lavoro comprendono:
+
+- tuning dello scheduling delle comunicazioni;
+- ottimizzazione delle socket Ethernet;
+- diagnostica dettagliata dei tempi;
+- profili Web API;
+- auto-tuning Power;
+- test Hot Standby;
+- test con più servizi Ethernet simultanei;
+- strumenti grafici di configurazione.
+
+### Towards RC1
+
+Gli obiettivi dichiarati verso RC1 comprendono:
+
+- diagnostica dei tempi per task;
+- diagnostica delle risorse Ethernet;
+- monitoraggio socket;
+- gestione dei timeout;
+- editor JSON;
+- ulteriori profili Web API;
+- dashboard diagnostica;
+- miglioramenti Solar e ACS;
+- supporto a ulteriori pompe di calore;
+- test RS485, Hot Standby ed Ethernet sotto carico.
+
+## Convenzioni per le prossime release
+
+Ogni nuova release dovrebbe utilizzare le sezioni pertinenti tra:
 
 ```text
-Frontend Task
-     |
-     v
-Communication Scheduler
-     |
-     +---- Bridge
-     |
-     +---- MQTT
-     |
-     +---- WebAPI
+Added
+Changed
+Fixed
+Deprecated
+Removed
+Security
+Known issues
+Planned
 ```
 
-anziché eseguire tutti i servizi direttamente all'interno dello stesso percorso applicativo.
+Ogni voce dovrebbe:
 
-### Impatto
-
-Questa modifica riduce il rischio che un servizio di comunicazione occupi eccessivamente il runtime disponibile agli altri componenti.
-
-È particolarmente importante su piattaforme embedded con risorse Ethernet/socket limitate.
-
----
-
-## 1.3 Comunicazioni non bloccanti
-
-L'architettura dei servizi di comunicazione è stata ulteriormente orientata verso l'esecuzione **non bloccante**.
-
-L'obiettivo è evitare che:
-
-- Bridge
-- MQTT
-- WebAPI
-- HMI
-- Modbus
-
-possano ostacolarsi reciprocamente durante l'esecuzione del ciclo frontend.
-
-Le comunicazioni vengono quindi distribuite nel tempo dal scheduler invece di essere considerate un'unica attività monolitica.
-
-### Obiettivo architetturale
-
-```text
-Backend
-   |
-   v
-Buffer
-   |
-   v
-Frontend Tasks
-   |
-   +--> HVAC
-   +--> Security
-   +--> Averages
-   |
-   v
-Communication Scheduler
-   |
-   +--> Bridge
-   +--> MQTT
-   +--> WebAPI
-```
-
-Il principio fondamentale rimane:
-
-> Nessun servizio di comunicazione deve poter bloccare il ciclo applicativo principale.
+- descrivere una modifica verificabile;
+- evitare di duplicare il README o la documentazione architetturale;
+- indicare breaking change o migrazioni necessarie;
+- distinguere implementato, corretto, deprecato e pianificato;
+- evitare date o versioni non confermate;
+- mantenere nomi di classi, metodi e file in formato codice.
 
 ---
 
-## 1.4 Gestione delle risorse Ethernet
-
-La nuova architettura tiene conto esplicitamente dei vincoli hardware delle piattaforme embedded.
-
-In particolare, l'utilizzo simultaneo di:
-
-- HMI
-- MQTT
-- Modbus TCP
-- Bridge
-- WebAPI
-
-può comportare una forte pressione sulle risorse socket disponibili.
-
-La schedulazione dei servizi permette di ridurre la concorrenza temporale delle operazioni di rete e di rendere più controllabile l'utilizzo delle connessioni.
-
-### Obiettivo
-
-Evitare scenari nei quali un servizio secondario possa causare:
-
-- timeout HMI
-- perdita di connessioni
-- retry eccessivi
-- saturazione dei socket
-- degrado generale del frontend
-
-La gestione delle risorse di rete diventa quindi parte integrante dell'architettura runtime.
-
----
-
-# 2. Evoluzione del ciclo frontend
-
-## 2.1 Ciclo frontend deterministico
-
-Il ciclo frontend è ora organizzato secondo una sequenza più esplicita:
-
-```text
-Backend Cycle
-      |
-      v
-Buffer Update
-      |
-      v
-Frontend Tasks
-      |
-      v
-Communication Scheduling
-      |
-      v
-Frontend Cycle Complete
-```
-
-Il completamento del ciclo frontend continua a essere esposto attraverso:
-
-- `hasFrontendCycleCompleted()`
-- `resetFrontendCycleFlag()`
-
-Questo consente al runtime superiore di sincronizzare in modo deterministico backend e frontend.
-
----
-
-## 2.2 Separazione tra logica applicativa e comunicazione
-
-La logica applicativa non deve più occuparsi direttamente della politica di scheduling delle comunicazioni.
-
-Ad esempio:
-
-- HVAC gestisce HVAC
-- Security gestisce sicurezza
-- Averages gestisce medie
-- Bridge gestisce bridge
-- MQTT gestisce MQTT
-- WebAPI gestisce WebAPI
-
-La decisione di **quando** eseguire i servizi di comunicazione viene delegata al `CommunicationScheduler`.
-
-Questa separazione rende il codice più modulare e facilita future ottimizzazioni.
-
----
-
-# 3. Evoluzione dei Frontend Engines
-
-## 3.1 HVAC Engine
-
-Il task HVAC è stato integrato nel nuovo sistema di scheduling frontend.
-
-Gestisce:
-
-- temperatura delle zone
-- temperatura interna
-- temperatura esterna
-- stato finestre
-- calendario HVAC
-- gestione delle zone
-- ACS
-- anti-legionella
-- defrost
-- protezioni operative
-
-Le temperature delle zone vengono recuperate direttamente dal Buffer Engine.
-
-Questo mantiene il principio:
-
-```text
-Backend → Buffer → HVAC
-```
-
-evitando dipendenze dirette non necessarie tra il motore HVAC e i driver hardware.
-
----
-
-## 3.2 Security / Sensors Engine
-
-Il task Sensors è stato integrato nel nuovo Task Engine.
-
-Il ciclo:
-
-1. attende il completamento del power-on cycle
-2. esegue il Security Sensor Engine
-3. verifica se lo stato è cambiato
-4. aggiorna lo stato aggregato della sicurezza
-5. genera l'evento interno corrispondente
-
-L'aggiornamento del sistema di sicurezza avviene quindi solo quando necessario.
-
-Questo riduce eventi e scritture ridondanti nel Buffer.
-
----
-
-## 3.3 Averages Engine
-
-Il calcolo delle medie è stato integrato nello scheduler frontend.
-
-Il task:
-
-- legge le misure dal Buffer
-- applica il relativo factor
-- aggiorna i gruppi
-- calcola la media
-- genera l'output configurato
-
-Il calcolo rimane indipendente dal ciclo di comunicazione.
-
----
-
-# 4. Communication Services
-
-## 4.1 Bridge Engine
-
-Il Bridge viene ora eseguito attraverso il Communication Scheduler.
-
-Non viene più considerato una componente privilegiata del ciclo principale.
-
-Configurazione prevista:
-
-- interval
-- priority
-- enabled
-
-Questo consente di limitarne l'impatto sul resto del sistema.
-
----
-
-## 4.2 MQTT Engine
-
-MQTT viene eseguito come servizio schedulato indipendente.
-
-La sua frequenza di esecuzione viene separata dalla frequenza dei task applicativi.
-
-Continua a supportare l'integrazione con ecosistemi quali:
-
-- Home Assistant
-- Zigbee2MQTT
-- Shelly
-
-L'obiettivo è mantenere MQTT come livello di integrazione e non come elemento dominante del runtime.
-
----
-
-## 4.3 WebAPI Engine
-
-Il WebAPI Engine è stato integrato nello stesso modello di scheduling.
-
-Le operazioni HTTP rimangono orientate a un modello non bloccante, con gestione separata rispetto ai task applicativi.
-
-Sono mantenuti:
-
-- GET
-- POST
-- profili messaggi
-- correlazione request/response
-- gestione asincrona del traffico
-
----
-
-# 5. Buffer Engine
-
-Il Buffer Engine rimane il punto centrale dello scambio dati.
-
-Il principio architetturale resta:
-
-```text
-Device
-   ↓
-Backend
-   ↓
-Buffer
-   ↓
-Frontend
-   ↓
-Communication
-```
-
-Il Buffer continua a fornire:
-
-- aree tipizzate
-- timestamp
-- change tracking
-- virtual areas
-- reverse
-- split
-- toggle
-- lookup rapido
-- diagnostica delle aree
-
-La nuova architettura frontend rafforza ulteriormente il ruolo del Buffer come unica fonte di verità del sistema.
-
----
-
-# 6. Backend
-
-Il backend mantiene il modello deterministico introdotto nella Beta.
-
-## Device Manager
-
-Gestione di:
-
-- priorità
-- cooldown
-- retry
-- errori
-- stato dispositivo
-
-## Modbus Engine
-
-Gestione di:
-
-- polling round-robin
-- retry deterministici
-- scritture
-- timeout
-- gestione errori
-
-## Time Manager
-
-Gestione di:
-
-- RTC
-- fallback
-- cron
-- callback periodiche
-
----
-
-# 7. Automation Engine
-
-L'Automation Engine mantiene l'architettura dichiarativa introdotta nella Beta.
-
-Supporta:
-
-- scene
-- regole
-- condizioni multiple
-- sequenze
-- scheduled rules
-- trend
-- debounce
-- composite rules
-- configurazione JSON
-- validazione
-
-La nuova organizzazione del runtime consente alle automazioni di rimanere indipendenti dai dettagli di scheduling della comunicazione.
-
----
-
-# 8. Diagnostica e osservabilità
-
-La diagnostica viene ulteriormente integrata nel modello runtime.
-
-Sono disponibili controlli e informazioni relativi a:
-
-- task
-- scheduler
-- comunicazioni
-- buffer
-- split
-- dispositivi
-- RTC
-- sicurezza
-- HVAC
-- Power
-- Weather
-- watchdog
-- aree monitorate
-
-Particolare importanza viene data alla possibilità di distinguere:
-
-- task applicativo lento
-- comunicazione lenta
-- timeout
-- saturazione delle risorse
-- errore dispositivo
-- problema di scheduling
-
-Questo rende più semplice individuare la causa reale di un degrado del sistema.
-
----
-
-# 9. Robustezza e stabilità
-
-## 9.1 Riduzione dei blocchi
-
-È stata perseguita una riduzione sistematica delle operazioni potenzialmente bloccanti.
-
-In particolare:
-
-- comunicazioni distribuite nel tempo
-- task indipendenti
-- scheduler dedicato
-- riduzione delle operazioni sincrone
-- separazione tra logica applicativa e networking
-
----
-
-## 9.2 Gestione del Power-On Cycle
-
-I task che dipendono da dati validi attendono il completamento del power-on cycle.
-
-Questo evita l'esecuzione prematura di logiche che potrebbero utilizzare dati non ancora inizializzati.
-
-Il comportamento è particolarmente importante per:
-
-- Security
-- Communication
-- logiche dipendenti dal Buffer
-
----
-
-## 9.3 Hot Standby
-
-Il modello Master/Slave rimane integrato nell'architettura.
-
-Il nodo Slave non esegue normalmente le attività di comunicazione previste per il Master.
-
-Quando il nodo diventa Master:
-
-```text
-Slave
-  ↓
-Become Master
-  ↓
-Ethernet enabled
-  ↓
-Communication services active
-```
-
-Quando torna Slave:
-
-```text
-Master
-  ↓
-Become Slave
-  ↓
-Ethernet disabled
-```
-
-Questo mantiene separati i ruoli dei nodi e riduce il rischio di comunicazioni duplicate.
-
----
-
-# 10. Performance
-
-Sono state mantenute e consolidate le ottimizzazioni introdotte nella Beta.
-
-### Buffer
-
-- lookup O(1)
-- change tracking
-- accesso rapido ai valori
-
-### Weather
-
-- medie mobili O(1)
-
-### Frontend
-
-- scheduling per intervallo
-- task indipendenti
-- riduzione delle esecuzioni inutili
-
-### Communication
-
-- round-robin
-- intervalli configurabili
-- priorità
-- esecuzione distribuita
-
-L'obiettivo non è massimizzare il numero di operazioni per secondo, ma ottenere il miglior equilibrio tra:
-
-**reattività + determinismo + consumo delle risorse.**
-
----
-
-# 11. Compatibilità e comportamento
-
-La nuova architettura mantiene la compatibilità concettuale con il modello Beta precedente.
-
-Le principali modifiche sono interne al runtime.
-
-Le applicazioni continuano a utilizzare:
-
-- FrontendConfig
-- TaskEngine
-- Buffer
-- Automation Engine
-- Frontend Engines
-- Communication Engines
-
-ma l'esecuzione interna è ora maggiormente orchestrata.
-
----
-
-# 12. Funzionalità deprecate o rimosse
-
-## 12.1 Comunicazioni direttamente nel ciclo principale
-
-Le comunicazioni non dovrebbero essere più gestite direttamente dal ciclo applicativo quando possono essere inserite nel Communication Scheduler.
-
----
-
-## 12.2 Logica hardcoded
-
-Rimane valido il principio introdotto nella Beta:
-
-- niente automazioni applicative rigide
-- configurazione dichiarativa
-- comportamento controllato dalla configurazione
-
----
-
-## 12.3 Dipendenze cloud obbligatorie
-
-DomoManager rimane:
-
-- local-first
-- autonomo
-- senza cloud obbligatorio
-
-Le integrazioni esterne rimangono opzionali.
-
----
-
-# 13. Limitazioni note
-
-La release rimane una **Beta**.
-
-Sono ancora possibili miglioramenti relativi a:
-
-- tuning delle priorità del Communication Scheduler
-- ottimizzazione dell'utilizzo delle socket Ethernet
-- gestione avanzata della concorrenza tra servizi
-- diagnostica dettagliata dei tempi di esecuzione
-- profili WebAPI
-- auto-tuning Power
-- test estesi HotStandby
-- test su configurazioni con molti servizi Ethernet simultanei
-- strumenti grafici di configurazione
-
-In particolare, le configurazioni che combinano simultaneamente:
-
-- HMI
-- MQTT
-- Modbus TCP
-- Bridge
-- WebAPI
-
-richiedono test specifici in funzione delle risorse disponibili sulla piattaforma hardware.
-
----
-
-# 14. Obiettivi verso RC1
-
-Le principali attività previste per la prossima fase comprendono:
-
-- ulteriore tuning del Communication Scheduler
-- diagnostica dei tempi per task
-- diagnostica delle risorse Ethernet
-- monitoraggio socket
-- miglioramento gestione timeout
-- editor JSON ufficiale
-- ulteriori profili WebAPI
-- dashboard diagnostica
-- miglioramento forecast solare
-- ottimizzazione ACS / anti-legionella
-- supporto a più modelli di pompe di calore
-- test estesi RS485
-- test estesi HotStandby
-- test di carico Ethernet
-
----
-
-# 15. Filosofia architetturale
-
-La direzione di sviluppo di DomoManager rimane basata su alcuni principi fondamentali:
-
-### Determinismo
-
-Il sistema deve comportarsi in modo prevedibile.
-
-### Non-blocking
-
-Nessun servizio secondario deve poter bloccare il sistema principale.
-
-### Buffer-centric
-
-Il Buffer rappresenta la fonte di verità dello stato del sistema.
-
-### Modularità
-
-Ogni Engine deve avere una responsabilità precisa.
-
-### Diagnostica
-
-Un problema deve poter essere osservato, localizzato e spiegato.
-
-### Local-first
-
-Il sistema deve poter funzionare senza dipendere da servizi cloud.
-
-### Embedded-first
-
-L'architettura deve tenere conto dei limiti reali dell'hardware.
-
----
-
-# 16. Contributi
-
-Vuoi contribuire a DomoManager?
-
-Consulta:
-
-- **CONTRIBUTING.md**
-- **CODE_OF_CONDUCT.md**
-- **ROADMAP.md**
-
-I contributi dovrebbero rispettare i principi architetturali del progetto:
-
-> Deterministico. Non bloccante. Diagnostico. Modulare.
-
----
-
-# ============================================================
-# FINE CHANGELOG
-# ============================================================
+**DOMOMANAGER CHANGELOG**  
+**CHANGES. COMPATIBILITY. LIMITATIONS. MIGRATION.**

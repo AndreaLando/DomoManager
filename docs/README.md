@@ -1,1014 +1,709 @@
-# ============================================================
-# VISIONE DEL PROGETTO DOMOMANAGER
-# ============================================================
+# DomoManager
 
+**Deterministic. Non-blocking. Local-first. Embedded-first.**
 
-## 1. Perché creare un nuovo manager domotico?
+DomoManager è un runtime embedded per l'infrastruttura domestica. Coordina dispositivi, stato applicativo, automazioni, sicurezza, climatizzazione, energia e integrazioni esterne mantenendo responsabilità, lifecycle e risorse espliciti.
 
-La domanda è legittima: perché sviluppare un sistema come DomoManager
-quando esistono già piattaforme diffuse come Home Assistant, Hubitat,
-OpenHAB, Shelly Cloud, Tuya, Zigbee2MQTT e decine di ecosistemi RF?
+Non nasce come alternativa grafica a Home Assistant, né come semplice gateway tra protocolli. Il suo obiettivo è governare l'impianto locale con criteri tipici dei sistemi industriali:
 
-La risposta è semplice:
+- comportamento prevedibile;
+- funzionamento locale;
+- comunicazioni non bloccanti;
+- stato condiviso coerente;
+- ownership delle risorse;
+- diagnostica integrata;
+- recovery controllato;
+- supporto multipiattaforma embedded.
 
-**perché DomoManager nasce con un obiettivo differente.**
+> **DomoManager porta nella casa la disciplina dei sistemi industriali senza rinunciare alla flessibilità delle integrazioni moderne.**
 
-Non vuole essere soltanto una piattaforma di integrazione o una
-raccolta di dispositivi intelligenti.
+## Indice
 
-Nasce per costruire una base domotica:
+- [Visione](#visione)
+- [Principi architetturali](#principi-architetturali)
+- [Architettura generale](#architettura-generale)
+- [Stato applicativo](#stato-applicativo)
+- [Runtime ed eventi](#runtime-ed-eventi)
+- [Backend e protocolli](#backend-e-protocolli)
+- [Domain engine](#domain-engine)
+- [Introspection e semantica](#introspection-e-semantica)
+- [Home Assistant](#home-assistant)
+- [Networking e risorse](#networking-e-risorse)
+- [Diagnostica e watchdog](#diagnostica-e-watchdog)
+- [Piattaforme](#piattaforme)
+- [Struttura della documentazione](#struttura-della-documentazione)
+- [Regole per contribuire](#regole-per-contribuire)
+- [Stato del progetto](#stato-del-progetto)
 
-- deterministica
-- industriale
-- cablata
-- locale
-- prevedibile
-- silenziosa
-- diagnosticabile
-- indipendente dal cloud
+## Visione
 
-La domotica moderna è diventata spesso un insieme di gadget:
+La domotica non deve essere un insieme di dispositivi indipendenti collegati a servizi esterni. Deve comportarsi come un sistema coerente capace di:
 
-- dispositivi che parlano principalmente via RF
-- cloud obbligatori o fortemente integrati
-- automazioni difficili da prevedere
-- firmware chiusi
-- ecosistemi frammentati
-- comportamenti variabili sotto carico
-- dipendenza dalla rete Wi-Fi
+1. acquisire il mondo fisico;
+2. validare e rappresentare lo stato;
+3. elaborare condizioni;
+4. prendere decisioni;
+5. comandare dispositivi e attuatori;
+6. esporre il proprio modello a sistemi esterni;
+7. spiegare il proprio comportamento attraverso diagnostica e log.
 
-DomoManager nasce per ribaltare questo paradigma.
+DomoManager privilegia:
 
+- cablaggio, Ethernet, RS485 e Modbus per le funzioni critiche;
+- radio e cloud quando aggiungono valore, non come requisito operativo;
+- logica locale;
+- configurazione dichiarativa;
+- protocolli e frontend separati dalla logica applicativa.
 
----
+Home Assistant è una proiezione e un livello di supervisione. DomoManager mantiene il controllo locale dello stato, delle automazioni e dell'impianto.
 
-## 2. La nostra visione
+## Principi architetturali
 
-DomoManager vuole riportare la domotica nel suo contesto naturale:
+### Determinismo
 
-**impiantistica, affidabile, industriale, cablata e prevedibile.**
+Ogni componente deve dichiarare:
 
-La casa non è un giocattolo.
+- quando è eleggibile;
+- quale lavoro esegue;
+- quali risorse possiede;
+- quali timeout e retry applica;
+- come segnala il proprio stato;
+- come recupera dopo un errore.
 
-Non è un insieme di lampadine smart.
+### Non-blocking
 
-È un sistema complesso che merita strumenti professionali.
+Le comunicazioni devono avanzare per passi controllati. MQTT, Web API, Bridge, Modbus, RS485 e trasporti dedicati non devono monopolizzare il ciclo applicativo.
 
-La nostra visione si basa su alcuni principi fondamentali:
+### Local-first
 
-- prima il cavo, poi la radio
-- determinismo prima della complessità
-- locale prima del cloud
-- buffer come fonte unica di verità
-- separazione tra logica applicativa e comunicazione
-- esecuzione non bloccante
-- diagnostica come parte dell'architettura
-- risorse hardware considerate parte del progetto software
+Le funzioni essenziali devono continuare a operare anche in assenza di Internet, cloud o integrazioni esterne.
 
+### Embedded-first
 
----
+CPU, RAM, socket, bus, connessioni e tempo di ciclo sono risorse architetturali. Ogni risorsa limitata deve avere:
 
-## 3. Pilastro 1 — Minimizzare le emissioni RF
+- owner;
+- lifecycle;
+- limiti;
+- diagnostica;
+- politica di rilascio e recovery.
 
-La casa moderna è invasa da:
+### Ownership esplicita
 
-- Zigbee
-- Wi-Fi
-- Bluetooth
-- Thread
-- Sub-GHz proprietari
-- mesh
-- repeater
-- bridge wireless
+Configurazione e inizializzazione non devono essere duplicate. Il composition root definisce il sistema; il componente proprietario inizializza e gestisce la risorsa.
 
-Ogni dispositivo wireless aggiunge una componente di complessità:
+### Nessuna duplicazione semantica
 
-- interferenze
-- latenza
-- dipendenza dalla qualità del segnale
-- gestione delle batterie
-- failure point aggiuntivi
-- maggiore difficoltà diagnostica
+Bitmask, mapping, unità, scaling e regole read/write appartengono al dominio proprietario. I frontend ne consumano il modello senza mantenere tabelle parallele.
 
-DomoManager segue un principio opposto:
-
-**prima il cavo, poi il resto.**
-
-Preferiamo:
-
-- Modbus cablato
-- RS485
-- ingressi digitali
-- ingressi analogici
-- sensori a filo
-- attuatori a relè
-- Ethernet
-
-La radio può essere utilizzata quando è realmente utile,
-ma non deve essere necessariamente la fondazione dell'impianto.
-
-
----
-
-## 4. Pilastro 2 — Portare la domotica verso un modello industriale
-
-DomoManager eredita concetti tipici dei sistemi industriali e dei PLC:
-
-- cicli deterministici
-- watchdog
-- gestione degli errori
-- fallback
-- failover
-- Hot Standby
-- diagnostica
-- controllo delle risorse
-- separazione delle responsabilità
-- gestione esplicita dello stato
-
-Il sistema utilizza un modello nel quale:
-
-**il comportamento applicativo non deve dipendere dal comportamento
-di un singolo servizio di comunicazione.**
-
-Un problema di MQTT, WebAPI o Bridge non deve trasformarsi
-automaticamente in un blocco del ciclo applicativo.
-
-Questo porta a un principio fondamentale:
-
-> **Nessun servizio secondario deve poter bloccare il ciclo principale
-> dell'applicazione.**
-
-La casa deve continuare a funzionare anche quando:
-
-- manca internet
-- il Wi-Fi non è disponibile
-- un servizio cloud è offline
-- un'integrazione esterna non risponde
-- una comunicazione presenta errori
-
-
----
-
-## 5. Pilastro 3 — Buffer come unica fonte di verità
-
-Il cuore dell'architettura è il **Buffer Engine**.
-
-Il Buffer rappresenta lo stato corrente del sistema.
-
-Non devono esistere copie arbitrarie dello stesso stato sparse
-nei vari moduli.
-
-Il modello è:
-
-```text
-DEVICE
-   │
-   ▼
-BACKEND
-   │
-   ▼
-BUFFER
-   │
-   ├──────────────┐
-   ▼              ▼
-APPLICATION    AUTOMATION
-   │              │
-   └──────┬───────┘
-          ▼
-       BUFFER
-          │
-          ▼
-      OUTPUT
-```
-
-Il Buffer contiene:
-
-- aree tipizzate
-- timestamp
-- change tracking
-- virtual areas
-- reverse
-- split
-- toggle
-- eventi interni
-
-Il Buffer è quindi:
-
-**Single Source of Truth.**
-
-Questo permette a:
-
-- Backend
-- Task Engine
-- Automation Engine
-- HVAC
-- Security
-- Power
-- Weather
-- MQTT
-- WebAPI
-- Bridge
-
-di lavorare su una rappresentazione coerente del sistema.
-
-
----
-
-## 6. Pilastro 4 — Separare applicazione e comunicazione
-
-Uno dei principi più importanti della nuova architettura è la
-separazione tra:
-
-**Application Runtime**
-
-e
-
-**Communication Runtime.**
-
-Il Task Engine gestisce i task applicativi:
-
-- Security / Sensors
-- HVAC
-- Averages
-- Power
-- Weather
-- altre funzioni applicative
-
-La comunicazione viene invece gestita dal:
-
-**Communication Scheduler.**
-
-Il modello è:
-
-```text
-                    TASK ENGINE
-                         │
-             ┌───────────┼───────────┐
-             ▼           ▼           ▼
-           HVAC       SECURITY    AVERAGES
-             │           │           │
-             └───────────┼───────────┘
-                         │
-                         ▼
-                      BUFFER
-                         │
-                         ▼
-               COMMUNICATION TASK
-                         │
-                         ▼
-              COMMUNICATION SCHEDULER
-                         │
-             ┌───────────┼───────────┐
-             ▼           ▼           ▼
-          BRIDGE        MQTT       WEBAPI
-```
-
-Questo permette di impedire che una comunicazione secondaria
-possa monopolizzare il ciclo applicativo.
-
-
----
-
-## 7. Pilastro 5 — Scheduling deterministico
-
-Il Task Engine registra ed esegue i task secondo:
-
-- intervallo
-- stato enabled / disabled
-- ordine controllato
-- ciclo di esecuzione
-
-La comunicazione utilizza invece un:
-
-**Communication Scheduler a timed round-robin.**
-
-Ogni servizio può avere:
-
-- interval
-- priority
-- enabled / disabled
-- callback dedicata
-
-Il modello impedisce che un singolo servizio di comunicazione
-possa occupare indefinitamente il runtime.
-
-La comunicazione viene quindi trattata come una risorsa schedulata,
-non come una funzione privilegiata rispetto all'applicazione.
-
-
----
-
-## 8. Pilastro 6 — Non-blocking by design
-
-La filosofia di DomoManager non considera il non-blocking
-un'ottimizzazione opzionale.
-
-È un requisito architetturale.
-
-Il principio è:
-
-> **La comunicazione deve avanzare attraverso piccoli passi
-> deterministici, senza bloccare il ciclo principale.**
-
-Questo vale per:
-
-- Modbus
-- RS485
-- Bridge
-- MQTT
-- WebAPI
-- gestione delle connessioni
-- retry
-- timeout
-- cooldown
-
-Il runtime deve continuare a eseguire le proprie responsabilità
-anche quando una comunicazione è lenta o temporaneamente
-non disponibile.
-
-
----
-
-## 9. Pilastro 7 — Le risorse hardware fanno parte dell'architettura
-
-In un sistema embedded le risorse non sono infinite.
-
-Devono essere considerati esplicitamente:
-
-- memoria
-- CPU
-- Ethernet
-- socket TCP
-- client simultanei
-- connessioni MQTT
-- connessioni Modbus
-- timeout
-- watchdog
-
-Una risorsa hardware esaurita non deve diventare un comportamento
-misterioso.
-
-Deve poter essere:
-
-1. rilevata
-2. registrata
-3. diagnosticata
-4. gestita
-5. resa visibile
-
-Per questo il resource management e la diagnostica fanno parte
-dell'architettura runtime.
-
-
----
-
-## 10. Pilastro 8 — Ridurre la complessità, aumentare la leggibilità
-
-DomoManager evita la cosiddetta "magia" software.
-
-Il sistema privilegia:
-
-- buffer centrale
-- automazioni dichiarative
-- condizioni esplicite
-- scene leggibili
-- sequenze strutturate
-- JSON comprensibile
-- diagnostica integrata
-- flussi dati tracciabili
-
-Ogni decisione deve essere spiegabile.
-
-Ogni valore deve avere una posizione precisa.
-
-Ogni errore deve poter essere ricondotto a una causa.
-
-
----
-
-## 11. L'utente come architetto, non come programmatore
-
-DomoManager è pensato per chi progetta impianti e automazioni,
-non esclusivamente per chi sviluppa software.
-
-Per questo privilegia:
-
-- automazioni dichiarative
-- scene
-- regole
-- condizioni
-- sequenze
-- configurazioni JSON
-- diagnostica leggibile
-
-L'obiettivo è permettere a un tecnico di costruire logiche
-complesse senza dover trasformare ogni esigenza in codice.
-
-
----
-
-## 12. Robustezza industriale, flessibilità domestica
-
-DomoManager combina concetti industriali con strumenti moderni.
-
-### Industrial
-
-- watchdog
-- fallback
-- error handling
-- Hot Standby
-- failover
-- diagnostica
-- cicli deterministici
-- gestione delle risorse
-
-### Moderno
-
-- MQTT
-- WebAPI
-- Bridge
-- Home Assistant
-- automazioni dinamiche
-- JSON
-- integrazioni esterne
-
-Il risultato desiderato è:
-
-**solido come un sistema industriale, flessibile come un framework
-moderno.**
-
-
----
-
-## 13. Il tempo come fondamento
-
-Il Time Manager non è un semplice servizio di data e ora.
-
-È il riferimento temporale del sistema.
-
-Gestisce:
-
-- RTC
-- NTP
-- epoch
-- sincronizzazione temporale
-- callback periodiche
-- secondi
-- minuti
-- ore
-- giorni
-
-Il tempo alimenta:
-
-- automazioni
-- HVAC
-- Power
-- Security
-- Weather
-- scheduled rules
-
-Il tempo non è semplicemente un valore.
-
-**È una dimensione del sistema.**
-
-
----
-
-## 14. La diagnostica come sistema immunitario
-
-Un sistema affidabile non deve limitarsi a funzionare.
-
-Deve anche spiegare quando qualcosa non funziona.
-
-La diagnostica osserva:
-
-- Buffer
-- Backend
-- Frontend
-- Task Engine
-- Communication Scheduler
-- dispositivi
-- Modbus
-- comunicazioni
-- Ethernet
-- socket
-- RTC
-- Security
-- HVAC
-- Power
-- Hot Standby
-- watchdog
-- overload
-
-L'obiettivo non è soltanto:
-
-**"cosa non funziona?"**
-
-ma:
-
-**"perché non funziona?"**
-
-La diagnostica è quindi parte integrante del runtime.
-
-
----
-
-## 15. Hot Standby
-
-La continuità operativa può essere estesa attraverso Hot Standby.
-
-Il sistema distingue:
-
-- MASTER
-- SLAVE
-
-Il MASTER gestisce il normale runtime operativo e le comunicazioni.
-
-Il comportamento del nodo SLAVE viene mantenuto separato per
-evitare conflitti sulle risorse di rete.
-
-Sono quindi parte del modello:
-
-- heartbeat
-- failover
-- sincronizzazione
-- state replication
-- process replication
-- gestione Ethernet
-- cambio di ruolo
-
-Il passaggio MASTER / SLAVE è parte del modello di affidabilità
-del sistema.
-
-
----
-
-## 16. La casa come ecosistema
-
-La casa non è un insieme di oggetti intelligenti.
-
-È un organismo.
-
-Il modello concettuale è:
-
-```text
-DEVICE       → organi
-BUFFER       → memoria / stato centrale
-TIME MANAGER → ritmo
-TASK ENGINE  → attività del sistema
-AUTOMATION   → comportamento
-COMMUNICATION→ sistema di comunicazione
-DIAGNOSTICS  → sistema immunitario
-HOT STANDBY  → continuità operativa
-```
-
-DomoManager è il sistema nervoso che coordina questi elementi.
-
-
-# ============================================================
-# 2. PANORAMICA GENERALE DEL SISTEMA
-
-DomoManager è organizzato in livelli separati, con responsabilità esplicite e flussi osservabili.
-
-```text
-HARDWARE / RETE
-      |
-      v
-BACKEND / DEVICE MANAGER / MODBUS / LOCAL I/O
-      |
-      v
-BUFFER ENGINE
-Single Source of Truth per le aree
-      |
-      +------------------+-------------------+
-      |                  |                   |
-      v                  v                   v
-APPLICATION ENGINES   AUTOMATION       INTROSPECTION
-Security / HVAC       Scene / Rule     Modello strutturale
-Averages / Power      Sequence         delle entity
-Solar / Weather            |                   |
-      |                    v                   v
-      +-----------------> BUFFER       SEMANTIC RESOLVER
-                                               |
-                                               v
-                                      HOME ASSISTANT MODEL
-                                               |
-                                               v
-COMMUNICATION TASK -> COMMUNICATION SCHEDULER -> MQTT / WEBAPI / BRIDGE
-```
-
-Principi invarianti:
-
-- il Buffer è la fonte unica di verità per le aree;
-- gli engine applicativi non dipendono dai protocolli di comunicazione;
-- l'Introspection non copia la configurazione, ma costruisce viste e correlazioni;
-- il resolver semantico arricchisce le entity senza modificare la configurazione originale;
-- Home Assistant è una proiezione del modello interno;
-- le variabili che non appartengono naturalmente al Buffer sono gestite dal RuntimeStore;
-- comunicazione e applicazione avanzano separatamente e in modo non bloccante.
-
-# 3. ARCHITETTURA TECNICA
-
-## 3.1 Backend, Device Manager e Buffer
-
-Il Backend acquisisce e attua lo stato tramite Device Manager, profili dispositivo, Modbus TCP/RTU e Local I/O. Gestisce inoltre routing, retry, timeout, cooldown ed errori.
-
-Il Buffer Engine conserva lo stato delle aree e rimane il punto di convergenza per Backend, applicazione, automazioni e comunicazioni.
-
-## 3.2 Application Engines
-
-Il Task Engine esegue gli engine applicativi secondo intervalli e responsabilità separate:
-
-- Security;
-- HVAC;
-- Averages;
-- Power;
-- Solar;
-- Weather;
-- altri servizi applicativi registrati.
-
-Gli engine leggono dal Buffer e producono aggiornamenti attraverso gli eventi interni di DomoManager.
-
-## 3.3 Automation Engine
-
-L'Automation Engine supporta scene, regole statiche e dinamiche, sequenze, condizioni semplici, trend, debounce, bitmask e condizioni composite.
-
-Le relazioni di automazione vengono esposte all'Introspection come input, output e stati tecnici.
-
-## 3.4 DomoIntrospection
-
-`DomoIntrospection` costruisce il modello strutturale senza duplicare la configurazione.
-
-Indicizza:
-
-- aree configurate;
-- associazioni area-dispositivo;
-- tipo fisico DI, DO, AI, AO, virtuale o sconosciuto;
-- Route, Toggle e Split;
-- input e output delle automazioni;
-- binding AEE, MQTT e WebAPI;
-- zone HVAC;
-- gruppi Average;
-- sorgenti Solar;
-- tag RuntimeStore;
-- visibilità e ruolo tecnico delle entity.
-
-Ogni `Entity` contiene identità, origine, gruppo, tipo fisico, riferimenti alla configurazione originale, semantica, accesso, visibilità, relazioni, provenienza e scala.
-
-### EntityOrigin
-
-```text
-AREA
-DERIVED
-SECURITY
-HVAC
-AVERAGE
-SOLAR
-POWER
-AEE
-RUNTIME
-EXTERNAL_SOURCE
-```
-
-### EntityGroup
-
-```text
-ROOT             -> DomoManager
-PHYSICAL_DEVICE  -> dispositivo fisico associato
-SECURITY         -> Sistema antifurto
-SOLAR            -> Inverter solare
-```
-
-### implementationOnly
-
-Una entity `implementationOnly` rimane nel modello interno ma non viene pubblicata. Rientrano tipicamente target interni Route/Split, stati tecnici e dettagli implementativi.
-
-## 3.5 DomoSemanticResolver
-
-`DomoSemanticResolver` trasforma il modello strutturale in un modello semantico pubblicabile.
-
-Determina:
-
-- `EntityKind`;
-- unità di misura;
-- `deviceClass`;
-- `stateClass`;
-- accesso read/write;
-- visibilità finale.
-
-La risoluzione usa, in ordine, semantica specialistica, struttura fisica e relazioni, dizionario lessicale e fallback `UNKNOWN`.
-
-```text
-UNKNOWN
-SENSOR
-BINARY_SENSOR
-SWITCH
-LIGHT
-COVER
-CLIMATE
-BUTTON
-NUMBER
-TEXT
-STATUS
-```
-
-Il resolver non deve contenere ID `AREA_*` applicativi cablati.
-
-## 3.6 Scaling
-
-`Entity::scale` converte il valore Buffer nel valore pubblicato:
-
-```text
-valorePubblicato = valoreBuffer * entity.scale
-```
-
-Per i gruppi Average:
-
-```text
-entity.scale = 1 / group.outScale
-```
-
-Lo scaling viene determinato dalla sorgente che produce il valore, non dal nome dell'area.
-
-## 3.7 DMRuntimeStore
-
-`DMRuntimeStore` gestisce variabili che non appartengono necessariamente a un'area Buffer.
-
-Supporta:
-
-- handle e ID stabili;
-- nome visualizzato;
-- BOOL, INT32, FLOAT, STRING e JSON;
-- READ_ONLY, WRITE_ONLY e READ_WRITE;
-- persistenza e pubblicazione opzionale;
-- metadati semantici;
-- limiti, step e precisione;
-- provenienza della scrittura.
-
-Topic Home Assistant:
-
-```text
-<prefix>/runtime/<id>/state
-<prefix>/runtime/<id>/set
-```
-
-L'identità pubblica è il Runtime ID, non il valore tecnico `area = -1`.
-
-## 3.8 Security
-
-Il sottosistema Security comprende:
-
-```text
-SecurityEngine
-    +-- SecurityOrchestrator
-    +-- WiredSensorsManager
-    +-- SecurityHmiInterface
-    +-- DomoManagerAlarmPanel
-```
-
-Gestisce sensori cablati, canali RT/H24, zone, armamento, eventi pannello, memorie, tacitazione, fault di comunicazione e bitmask di sensore, zona e sistema.
-
-La sincronizzazione con il Buffer è read/write. Le bitmask devono essere codificate e decodificate da helper interni al sottosistema Security che condividono un'unica sequenza dei segnali. In questo modo l'aggiunta o la modifica di un campo non disallinea lettura e scrittura.
-
-Home Assistant non deve duplicare la mappa dei bit con tabelle parallele.
-
-```text
-Security state
-      |
-      v
-Security codec/helper read-write
-      |
-      v
-Buffer status/command areas
-      |
-      v
-Introspection / semantic projection
-      |
-      v
-Home Assistant
-```
-
-## 3.9 Solar
-
-L'integrazione Solar registra nell'Introspection le aree configurate e le marca come origine e gruppo `SOLAR`.
-
-Le entity possono comprendere tensione, corrente e potenza fotovoltaica, tensione e percentuale batteria, temperatura, stato inverter e stato comunicazione.
-
-In Home Assistant sono aggregate nel dispositivo logico `Inverter solare`.
-
-## 3.10 Home Assistant
-
-L'integrazione è suddivisa in tre responsabilità:
-
-```text
-DMHomeAssistant
-    Discovery, topic, payload e Device Registry
-
-DMHAOrchestrator
-    Subscription, availability, snapshot, coda stati e comandi inbound
-
-HAMQTTTransport
-    Adattamento verso il client MQTT reale
-```
-
-### Discovery
-
-Sono pubblicate solo entity non hidden, semanticamente supportate e abilitate dalla configurazione del dominio.
-
-### Topic area
-
-```text
-<prefix>/area/<area>/state
-<prefix>/area/<area>/set
-```
-
-### Topic RuntimeStore
-
-```text
-<prefix>/runtime/<id>/state
-<prefix>/runtime/<id>/set
-```
-
-### Snapshot iniziale
-
-Dopo connessione, subscription, availability e discovery:
-
-1. le entity area leggibili vengono accodate dalla fotografia del Buffer;
-2. le entity Runtime leggibili vengono pubblicate dal RuntimeStore;
-3. gli aggiornamenti successivi vengono pubblicati incrementalmente.
-
-### Device Registry
-
-Le entity vengono aggregate sotto controller root, dispositivi fisici, Sistema antifurto e Inverter solare. I device secondari possono dichiarare il controller tramite `via_device`.
-
-## 3.11 Communication Runtime
-
-```text
-COMMUNICATION TASK
-        |
-        v
-COMMUNICATION SCHEDULER
-        +-- MQTT
-        +-- WebAPI
-        +-- Bridge
-```
-
-Il Communication Scheduler rispetta intervallo, priorità, round-robin temporizzato, budget di rete e socket, retry e recovery controllati.
-
-## 3.12 Diagnostica
-
-La diagnostica osserva Buffer, device, profili, relazioni Introspection, entity unknown e hidden, gruppi semantici, scaling, automazioni, task, scheduler, comunicazioni, Security, HVAC, Solar, Power, Weather, RuntimeStore, watchdog e Hot Standby.
-
-# 4. DIPENDENZE ARCHITETTURALI PRINCIPALI
-
-```text
-DomoManager.ino
-|
-+-- DMFrontend.hpp
-|   +-- DMFrontendEngines.hpp
-|   |   +-- SecurityEngine
-|   |   +-- HVAC / Averages / Power / Solar / Weather
-|   +-- DMIntrospection.hpp
-|   +-- DMSemanticResolver.hpp
-|   +-- DMRuntimeStore.hpp
-|   +-- DMHomeAssistant.hpp
-|   +-- DMHAOrchestrator.hpp
-|   +-- HAMQTTTransport
-|   +-- DMBridge.hpp
-|   +-- WebAPI
-|
-+-- DomoManager Core
-    +-- Device Manager
-    +-- Buffer Engine
-    +-- Modbus Engine
-    +-- Local I/O
-    +-- Automation Engine
-    +-- Task Engine
-    +-- Communication Scheduler
-    +-- Time Manager
-    +-- Diagnostics
-```
-
-Le dipendenze effettive devono essere verificate dagli `#include` del codice sorgente.
-
-# 5. FLUSSO DATI COMPLETO
+## Architettura generale
 
 ```text
 MONDO FISICO
      |
      v
-DEVICE / MODBUS / LOCAL I/O
+BACKEND / DEVICE / PHYSICAL I/O
      |
-     v
-BUFFER
-     +-------------------+--------------------+
-     |                   |                    |
-     v                   v                    v
-APPLICATION          AUTOMATION         INTROSPECTION
-     |                   |                    |
-     +---------> BUFFER <-+                    v
-                                          SEMANTICS
-                                              |
-                                              v
-                                      HOME ASSISTANT MODEL
-                                              |
-                                              v
-                                      MQTT COMMUNICATION
+     +---------------------+
+     |                     |
+     v                     v
+  BUFFER            DMRUNTIMESTORE
+ area -> long       handle -> typed value
+     |                     |
+     +----------+----------+
+                |
+                v
+       EVENTMANAGER / DMRUNTIME
+                |
+      +---------+----------+
+      |                    |
+      v                    v
+DOMAIN ENGINES       AUTOMATION ENGINE
+      |                    |
+      +---------+----------+
+                |
+                v
+       SHARED STATE / COMMANDS
+                |
+      +---------+----------+
+      |                    |
+      v                    v
+INTROSPECTION       PROTOCOL ORCHESTRATORS
+      |                    |
+      v                    v
+SEMANTIC RESOLVER   MQTT / WEB API / BRIDGE
+      |                    |
+      v                    v
+FRONTEND MODELS     DMNETWORKMANAGER
+                           |
+                           v
+                     SOCKETMANAGER
 ```
 
-Per i RuntimeTag:
+L'architettura distingue sei responsabilità:
+
+1. **acquisizione e attuazione**;
+2. **stato applicativo condiviso**;
+3. **eventi e coordinamento runtime**;
+4. **logica dei domini e automazioni**;
+5. **modello strutturale e semantico**;
+6. **frontend, protocolli e risorse di rete**.
+
+## Stato applicativo
+
+### Buffer
+
+Il Buffer è la fonte autorevole dello stato numerico condiviso delle aree.
+
+Gestisce:
+
+- valori numerici;
+- timestamp;
+- change tracking;
+- aree virtuali;
+- mapping di scrittura;
+- informazioni diagnostiche;
+- changed map.
+
+Route, toggle e split lavorano sul dominio delle aree, ma appartengono ai rispettivi manager logici.
+
+### DMRuntimeStore
+
+`DMRuntimeStore` completa il Buffer per dati non rappresentabili naturalmente come `area -> long`.
+
+Supporta:
+
+- `BOOL`;
+- `INT32`;
+- `FLOAT`;
+- `STRING32` e `STRING64`;
+- `JSON128` e `JSON256`;
+- accesso `READ_ONLY`, `WRITE_ONLY` e `READ_WRITE`;
+- metadati semantici;
+- persistenza dichiarata;
+- flag sensitive;
+- revisioni e dirty tracking;
+- controllo dell'integrità;
+- accesso O(1) tramite handle.
+
+Il percorso runtime usa gli handle. Gli ID testuali sono riservati principalmente a setup, introspezione e parsing dei comandi esterni.
+
+### Stato tecnico interno
+
+Timer, debounce, code, richieste pendenti, connessioni, retry, cooldown e macchine a stati rimangono nel componente proprietario. Quando incidono sull'operatività devono essere osservabili dalla diagnostica.
+
+## Runtime ed eventi
+
+### EventManager
+
+`EventManager` separa la produzione degli eventi dal loro consumo.
+
+Le sorgenti comprendono:
+
+- Modbus;
+- I/O fisici;
+- route;
+- toggle;
+- split;
+- automazioni;
+- comandi frontend;
+- servizi interni.
+
+Gli eventi vengono processati con un budget limitato per iterazione, evitando catene ricorsive e monopolizzazione del loop.
+
+### DMRuntime
+
+`DMRuntime` coordina:
+
+- `PhysicalIOManager`;
+- ciclo Modbus;
+- `EventManager`;
+- route, toggle, split e threshold;
+- `AutomationEngine`;
+- scheduler asincrono;
+- medie;
+- callback applicative;
+- watchdog;
+- diagnostica;
+- completamento dei cicli backend.
+
+Il runtime combina:
+
+- task pesati;
+- contatori di rotazione;
+- intervalli temporali;
+- prerequisiti di ciclo;
+- callback;
+- pacing di rete;
+- macchine a stati.
+
+Non esiste un unico Task Engine uniforme che esegue integralmente tutti i sottosistemi a ogni iterazione.
+
+## Backend e protocolli
+
+### Device Manager
+
+Il Device Manager governa:
+
+- dispositivi programmabili;
+- profili hardware;
+- canali;
+- associazioni tra device e aree;
+- errori visibili;
+- stato parked;
+- diagnostica dei dispositivi.
+
+### Modbus
+
+Il motore Modbus supporta:
+
+- Modbus TCP e RTU;
+- selezione degli IP;
+- round-robin;
+- scritture pendenti;
+- pacing;
+- timeout;
+- retry;
+- cooldown ed esclusione;
+- connessioni persistenti;
+- integrazione con il runtime di rete.
+
+Le scritture possono ricevere priorità controllata senza aggirare IP manager, arbitraggio o lifecycle delle risorse.
+
+### Physical I/O
+
+`PhysicalIOManager` gestisce:
+
+- inizializzazione degli I/O locali;
+- polling;
+- conversione del livello attivo;
+- debounce non bloccante;
+- pubblicazione degli eventi;
+- comando delle uscite.
+
+L'inizializzazione hardware deve avere un unico owner.
+
+### Web API
+
+Il motore Web API fornisce:
+
+- client e server HTTP;
+- richieste accodate;
+- correlazione delle risposte;
+- timeout;
+- autenticazione;
+- parsing key/value e JSON;
+- gestione dei body chunked;
+- profili applicativi e webhook.
+
+### Bridge e AEE
+
+AEE descrive variabili sincronizzabili, direzioni e schema. Il Bridge gestisce heartbeat, ACK, ritrasmissione, snapshot iniziale, allineamento e trasferimento multiframe.
+
+### Solar
+
+Il sottosistema Solar comprende:
+
+- trasporti UART e TCP;
+- discovery asincrona dei comandi;
+- polling con pacing;
+- parsing e CRC;
+- snapshot strutturato;
+- aggiornamento delle aree;
+- diagnostica.
+
+## Domain engine
+
+### Security
+
+Il dominio Security comprende:
+
+- sensori cablati;
+- canali RT, H24, MASK e LEN;
+- zone;
+- startup inhibit;
+- armamento;
+- allarmi;
+- tamper e trouble;
+- bypass;
+- memoria e tacitazione;
+- partizioni;
+- word e bitmask di stato;
+- comandi e diagnostica.
+
+Lettura e scrittura condividono lo stesso codec e lo stesso ordine canonico dei bit.
+
+### HVAC
+
+Il dominio HVAC comprende zone, setpoint, pompe di calore, fan coil, circolazione, ACS, sbrinamento, valvola a tre vie, anti-legionella e protezioni legate alle aperture.
+
+### Power
+
+Il dominio Power comprende gestione dei carichi e supervisione elettrica:
+
+- limiti e priorità;
+- suggerimenti di attacco o distacco;
+- tensione principale;
+- soglie con isteresi;
+- stato 24 V;
+- fault;
+- funzionamento a batteria;
+- segnali extra;
+- allarmi e snapshot diagnostici.
+
+### Weather
+
+Il dominio Weather gestisce temperatura, vento, pioggia, luminosità, medie mobili, transizioni giorno/notte, raffiche, eventi e allarmi con debounce.
+
+Il primo campione e lo stato non inizializzato devono essere gestiti senza divisioni per zero.
+
+### Averages
+
+I gruppi di media applicano scala di ingresso, aggregazione e scala di uscita. La pubblicazione semantica segue:
 
 ```text
-DMRuntimeStore -> DomoIntrospection -> DomoSemanticResolver
-               -> DMHomeAssistant -> DMHAOrchestrator
+published value = Buffer value * Entity::scale
+Entity::scale   = 1 / outScale
 ```
 
-# 6. CICLO DI ESECUZIONE
+Scale e denominatori devono essere validati.
 
-```text
-LOOP
- +-- Backend cycle
- |     +-- Time
- |     +-- Device Manager
- |     +-- Modbus / Local I/O
- |     +-- Buffer update
- +-- Frontend / Task Engine
- |     +-- Security / HVAC / Averages / Power / Solar / Weather
- +-- Automation
- |     +-- Buffer update
- +-- Communication Task
-       +-- Communication Scheduler
-             +-- MQTT / WebAPI / Bridge
-```
+### Access Control
 
-Introspection e Semantic Resolver costruiscono il modello. La pubblicazione runtime usa il modello già risolto.
+Il controllo accessi coordina lettori, normalizzazione dei codici, autorizzazione, relay, callback e variabili runtime correlate.
 
-# 7. REGOLE DI PROGETTAZIONE
+## Automation Engine
 
-## 7.1 Nessuna duplicazione della configurazione
+L'Automation Engine opera sul modello applicativo e supporta:
 
-Introspection conserva riferimenti agli oggetti originali. Le proiezioni esterne non devono introdurre mappe applicative duplicate.
+- scene;
+- regole a soglia;
+- trend;
+- bitmask;
+- condizioni temporali;
+- condizioni multiple;
+- regole composite;
+- sequenze;
+- configurazione JSON;
+- validazione.
 
-## 7.2 Nessun ID applicativo cablato nel framework
+Le azioni vengono trasformate in aggiornamenti di stato ed eventi. L'engine non deve conoscere il protocollo concreto dell'attuatore.
 
-I moduli generici non devono contenere `AREA_*` specifiche dell'installazione.
+## Introspection e semantica
 
-## 7.3 Read/write simmetrico
+### DomoIntrospection
 
-Quando uno stato è comandabile, codifica e decodifica devono condividere ordine e semantica.
+`DomoIntrospection` costruisce una vista strutturale del sistema conservando riferimenti agli oggetti originali.
 
-## 7.4 Buffer-centric
+Il modello descrive:
 
-Le aree Buffer rimangono la fonte di verità. RuntimeStore è usato per variabili che non appartengono naturalmente al Buffer.
+- entity;
+- relazioni;
+- origine;
+- gruppo;
+- tipo fisico;
+- riferimenti a device e configurazione;
+- runtime handle;
+- accesso;
+- visibilità;
+- scaling;
+- provenienza.
 
-## 7.5 Non-blocking
+Le entity tecniche possono essere marcate `implementationOnly`: restano diagnosticabili ma non vengono pubblicate.
 
-Una comunicazione lenta o guasta non deve bloccare Backend, Task Engine, Security o Automation.
+### DomoSemanticResolver
 
-## 7.6 Diagnostica esplicita
+`DomoSemanticResolver` arricchisce il modello strutturale determinando:
 
-Unknown, hidden, scaling, origine, gruppo e relazioni devono essere osservabili nei report.
+- `EntityKind`;
+- unità;
+- device class;
+- state class;
+- accesso;
+- gruppo;
+- visibilità finale.
 
-## 7.7 Stabilità degli identificatori
+La risoluzione applica semantica specialistica, struttura e relazioni, dizionario lessicale e fallback `UNKNOWN`.
 
-Gli ID Home Assistant e RuntimeStore devono rimanere stabili attraverso riavvii e refactor compatibili.
+I moduli generici non devono contenere identificatori `AREA_*` specifici dell'installazione.
 
-# 8. STATO DELL'INTEGRAZIONE HOME ASSISTANT
+## Home Assistant
 
-Il modello corrente supporta:
+L'integrazione è divisa in tre responsabilità.
 
-- Discovery MQTT automatica;
+### DMHomeAssistant
+
+Genera:
+
+- MQTT Discovery;
+- topic;
+- payload;
 - availability;
-- sensori e attuatori derivati semanticamente;
-- Device Registry per controller, device fisici, Security e Solar;
+- Device Registry;
+- proiezione semantica delle entity.
+
+### DMHAOrchestrator
+
+Gestisce:
+
+- connection lifecycle;
+- subscription dei command topic;
+- availability;
+- discovery;
 - snapshot iniziale;
+- `PendingState`;
 - aggiornamenti incrementali;
-- comandi area;
-- tag RuntimeStore read/write;
-- feedback sullo state topic;
-- scaling delle aree Average.
+- routing dei comandi;
+- recovery dopo riconnessione.
 
-Le bitmask Security restano proprietà del sottosistema Security. La proiezione verso binary sensor o `alarm_control_panel` deve partire dal codec/helper read/write interno alla Security, non da configurazioni parallele nel layer Home Assistant.
+### HAMQTTTransport
 
-# 9. PRINCIPI OPERATIVI
+Adatta l'orchestratore al client MQTT tramite callback di connessione, publish e subscribe. Non trasferisce al layer Home Assistant la proprietà del client.
 
-- determinismo;
-- non-blocking;
-- Buffer come fonte unica di verità;
-- isolamento dei servizi;
-- consapevolezza delle risorse;
-- osservabilità;
-- funzionamento locale;
-- progettazione embedded-first;
-- configurazione dichiarativa;
-- separazione tra struttura, semantica e protocollo.
+### Topic
 
-# 10. OBIETTIVO FINALE
+```text
+<prefix>/status
+<prefix>/area/<area>/state
+<prefix>/area/<area>/set
+<prefix>/runtime/<id>/state
+<prefix>/runtime/<id>/set
+```
 
-DomoManager vuole offrire una base domotica affidabile come un PLC, leggibile, estendibile, locale, prevedibile sotto carico e diagnosticabile.
+### Sequenza di connessione
 
-Home Assistant rappresenta il livello di supervisione e interazione. DomoManager conserva il controllo deterministico dell'impianto, dello stato e delle automazioni.
+```text
+CONNECTED
+   |
+   v
+SUBSCRIBE COMMAND TOPICS
+   |
+   v
+PUBLISH AVAILABILITY
+   |
+   v
+PUBLISH DISCOVERY
+   |
+   v
+PUBLISH INITIAL SNAPSHOT
+   |
+   v
+PUBLISH INCREMENTAL CHANGES
+```
 
-# DOMOMANAGER
+In caso di disconnessione, subscription, availability, discovery e snapshot devono poter ripartire. Un errore iniziale dello snapshot non deve impedire il recovery successivo.
 
-# THE OPERATING SYSTEM FOR THE HOME
+### Comandi
+
+I comandi area attraversano validazione dell'entity, parsing, callback e owner del dominio. I comandi RuntimeStore verificano ID, handle, tipo e accesso.
+
+Un comando esterno non raggiunge direttamente un attuatore e non aggira il modello interno.
+
+## Networking e risorse
+
+DomoManager non utilizza un Communication Scheduler universale per tutti i protocolli.
+
+```text
+PROTOCOL ENGINES
+  +-- Modbus
+  +-- MQTT
+  +-- Web API
+  +-- Bridge
+  +-- Solar TCP
+          |
+          v
+DMNETWORKMANAGER
+  +-- protocol registration
+  +-- arbitration
+  +-- pacing
+  +-- protocol state
+          |
+          v
+SOCKETMANAGER
+  +-- owner
+  +-- kind
+  +-- exact slot
+  +-- lifecycle
+          |
+          v
+PLATFORM NETWORK
+```
+
+Ogni protocollo deve dichiarare:
+
+- owner;
+- criterio di avanzamento;
+- priorità o pacing;
+- timeout;
+- retry;
+- risorse richieste;
+- condizioni di rilascio;
+- diagnostica.
+
+## FrontendStatus
+
+`FrontendStatus` rappresenta lo stato tecnico comune dei frontend tramite una word a 16 bit:
+
+```text
+bit 0   Enabled
+bit 1   Running
+bit 2   Initialized
+bit 3   Connected
+bit 4   Active
+bit 5   Recovering
+bit 6   Degraded
+bit 7   Fault
+bit 8-15 Reserved
+```
+
+`Connected` non è un requisito universale di operatività, perché alcuni frontend possono essere operativi senza un client connesso.
+
+## Diagnostica e watchdog
+
+La diagnostica osserva:
+
+- Buffer e RuntimeStore;
+- device e profili;
+- aree mai inizializzate o inizializzate più volte;
+- EventManager;
+- automazioni e scheduler;
+- timing e spike;
+- Modbus e RS485;
+- Ethernet, protocolli e socket;
+- MQTT e recovery;
+- Introspection e Semantic Resolver;
+- entity `UNKNOWN`, hidden e implementation-only;
+- Security, HVAC, Power, Weather e Solar;
+- FrontendStatus;
+- Hot Standby.
+
+Il watchdog protegge la progressione complessiva del runtime. Non sostituisce la gestione degli errori dei protocolli.
+
+## Hot Standby
+
+Il supporto Hot Standby può comprendere:
+
+- heartbeat;
+- rilevazione del peer;
+- ruolo master/slave;
+- failover e failback;
+- replica dello stato;
+- replica dei dati di processo;
+- sincronizzazione temporale.
+
+La disponibilità del supporto non implica che sia abilitato in ogni build o configurazione.
+
+## Piattaforme
+
+Il backend di piattaforma astrae:
+
+- Arduino Opta;
+- ESP32-S3;
+- GPIO;
+- LED diagnostici;
+- RTC;
+- Ethernet;
+- W5500;
+- expander I/O;
+- client e server TCP;
+- API Modbus comuni.
+
+Le differenze di piattaforma devono rimanere sotto `DMPlatform`, `DMPlatformNetwork` e `DMPlatformModbus`, evitando condizioni hardware disperse nei domain engine.
+
+## Struttura della documentazione
+
+La documentazione tecnica è organizzata in documenti progressivi:
+
+1. `1_FILOSOFIA.md`  
+   Principi, obiettivi e criteri di progettazione.
+
+2. `2_PANORAMICA.md`  
+   Vista generale di componenti, domini e integrazioni.
+
+3. `3_ARCHITETTURA.md`  
+   Architettura tecnica dettagliata, lifecycle e ownership.
+
+4. `4_DIAGRAMMA_DIPENDENZE_FILES.md`  
+   Dipendenze fisiche, architetturali e runtime.
+
+5. `5_DIAGRAMMA_ARCHITETTURA.md`  
+   Diagrammi a blocchi dell'architettura.
+
+6. `6_DIAGRAMMA_FLUSSO_DATI.md`  
+   Percorsi dei dati, eventi, comandi e pubblicazione.
+
+7. `7_DIAGRAMMA_CICLO_EXEC.md`  
+   Ciclo incrementale, task pesati, protocolli e recovery.
+
+Il README è il punto di ingresso. I documenti successivi aumentano progressivamente il dettaglio.
+
+## Regole per contribuire
+
+Ogni nuovo modulo deve dichiarare:
+
+- responsabilità;
+- owner;
+- dipendenze;
+- stato applicativo letto o prodotto;
+- stato tecnico interno;
+- eventi prodotti e consumati;
+- criterio di scheduling;
+- timeout e retry;
+- risorse utilizzate;
+- lifecycle;
+- recovery;
+- diagnostica;
+- eventuale modello Introspection e semantico.
+
+### Checklist
+
+- [ ] ownership unica dell'inizializzazione;
+- [ ] nessuna configurazione duplicata;
+- [ ] stato condiviso distinto dallo stato tecnico;
+- [ ] Buffer o RuntimeStore scelto correttamente;
+- [ ] lavoro limitato per iterazione;
+- [ ] validazione di indici, tipi e scale;
+- [ ] gestione dello stato non inizializzato;
+- [ ] nessuna divisione per zero;
+- [ ] codec read/write condiviso;
+- [ ] socket e connessioni rilasciati correttamente;
+- [ ] recovery dopo disconnessione;
+- [ ] snapshot iniziale quando necessario;
+- [ ] flag di completamento aggiornati dopo progressione reale;
+- [ ] diagnostica sufficiente;
+- [ ] nessun `AREA_*` installazione-specifico nei moduli generici;
+- [ ] compatibilità con le piattaforme dichiarate.
+
+## Stato del progetto
+
+DomoManager è un progetto in evoluzione. Architettura, firmware e documentazione devono avanzare insieme.
+
+Prima di considerare una funzione stabile è necessario verificare:
+
+- comportamento sulla piattaforma target;
+- recovery dopo errori e disconnessioni;
+- uso delle risorse;
+- diagnostica;
+- coerenza con Buffer, RuntimeStore ed EventManager;
+- integrazione con Introspection e frontend;
+- assenza di regressioni nei cicli esistenti.
+
+## Obiettivo finale
+
+DomoManager vuole offrire una base domotica:
+
+- affidabile come un sistema industriale;
+- leggibile come un framework moderno;
+- locale;
+- prevedibile sotto carico;
+- estendibile;
+- diagnosticabile;
+- consapevole delle risorse embedded.
+
+> **La complessità non deve essere scaricata sull'utente. Deve essere governata dall'architettura.**
+
+---
+
+**DOMOMANAGER**  
+**THE OPERATING SYSTEM FOR THE HOME**  
+**STATE. EVENTS. OWNERSHIP. PROGRESSION.**
