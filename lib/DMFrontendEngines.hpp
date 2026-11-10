@@ -25,6 +25,7 @@
 #include "DMMQTT.hpp"
 #include "DMFrontendOrchestrators.hpp"
 #include "DMIntrospection.hpp"
+#include "DMSemanticResolver.hpp"
 #include "DMIntrusion.hpp"
 #include "DMPlatformNetwork.hpp"
 #include "DMPlatformModbus.hpp"
@@ -796,38 +797,135 @@ public:
     }
 };
 
-class AEEEngine {
+class AEEEngine
+{
 public:
-    AEERegistry registry;
-    AEEManagement* manager = nullptr;
-
-    struct ReceiveContext {
+    struct ReceiveContext
+    {
         Buffer* buffer = nullptr;
         EventManager* events = nullptr;
         int aeeSource = -1;
     };
 
 private:
+    AEERegistry registry;
+    AEEManagement* manager = nullptr;
+
     ReceiveContext receiveContext;
 
 public:
+    AEEEngine() = default;
 
-    static AEEEngine& instance() {
-        static AEEEngine inst;
-        return inst;
+    ~AEEEngine()
+    {
+        clear();
     }
 
-    void Setup(const FrontendConfig::Bridge::AEE& cfg) {
-        manager = new AEEManagement(cfg.vars, cfg.count);
-        manager->registerAll(registry);
+    AEEEngine(const AEEEngine&) = delete;
+    AEEEngine& operator=(const AEEEngine&) = delete;
+
+    AEEEngine(AEEEngine&&) = delete;
+    AEEEngine& operator=(AEEEngine&&) = delete;
+
+    // ============================================================
+    // SETUP
+    // ============================================================
+
+    bool setup(
+        const FrontendConfig::Bridge::AEE& cfg)
+    {
+        clear();
+
+        if (!cfg.vars || cfg.count == 0)
+        {
+            LOG_EF(
+                "AEE",
+                "Configurazione AEE non valida"
+            );
+
+            return false;
+        }
+
+        manager =
+            new AEEManagement(
+                cfg.vars,
+                cfg.count
+            );
+
+        if (!manager)
+        {
+            LOG_EF(
+                "AEE",
+                "Allocazione AEEManagement fallita"
+            );
+
+            return false;
+        }
+
+        manager->registerAll(
+            registry
+        );
+
+        LOG_IF(
+            "AEE",
+            "AEE inizializzata con %u variabili",
+            static_cast<unsigned>(
+                registry.size()
+            )
+        );
+
+        return true;
     }
 
-    static AEERegistry& getAEE() {
-        return instance().registry;
+    // ============================================================
+    // CLEAR
+    // ============================================================
+
+    void clear()
+    {
+        /*
+         * Prima si eliminano dal registry i riferimenti non
+         * proprietari, poi si distruggono le variabili possedute
+         * da AEEManagement.
+         */
+        registry.clear();
+
+        delete manager;
+        manager = nullptr;
+
+        receiveContext =
+            ReceiveContext{};
     }
 
-    static AEEManagement& getMgr() {
-        return *instance().manager;
+    // ============================================================
+    // ACCESSORS
+    // ============================================================
+
+    AEERegistry& getRegistry()
+    {
+        return registry;
+    }
+
+    const AEERegistry& getRegistry() const
+    {
+        return registry;
+    }
+
+    AEEManagement* getManager()
+    {
+        return manager;
+    }
+
+    const AEEManagement* getManager() const
+    {
+        return manager;
+    }
+
+    bool isReady() const
+    {
+        return
+            manager != nullptr &&
+            registry.size() > 0;
     }
 
     // ============================================================
@@ -839,9 +937,14 @@ public:
         EventManager& events,
         int aeeSource)
     {
-        receiveContext.buffer = &buffer;
-        receiveContext.events = &events;
-        receiveContext.aeeSource = aeeSource;
+        receiveContext.buffer =
+            &buffer;
+
+        receiveContext.events =
+            &events;
+
+        receiveContext.aeeSource =
+            aeeSource;
     }
 
     // ============================================================
@@ -849,65 +952,90 @@ public:
     // ============================================================
 
     void applyReceived(
-        AEEVariableBase* v,
+        AEEVariableBase* variable,
         unsigned long now)
     {
-        if (!v)
+        if (!variable)
             return;
 
         if (!receiveContext.buffer ||
             !receiveContext.events)
+        {
+            LOG_WF(
+                "AEE::RX",
+                "Contesto ricezione AEE non inizializzato"
+            );
+
             return;
+        }
 
-        // --------------------------------------------------------
-        // La variabile deve essere ricevibile dal Peer.
-        // --------------------------------------------------------
+        const AEEDirection direction =
+            variable->def.direction;
 
-        if (v->def.direction != AEEDirection::ModuleToFrontend &&
-            v->def.direction != AEEDirection::Bidirectional)
+        if (
+            direction !=
+                AEEDirection::ModuleToFrontend &&
+            direction !=
+                AEEDirection::Bidirectional
+        )
         {
             return;
         }
 
-        // ========================================================
-        // 1. BUFFER AREA
-        // ========================================================
-
-        if (v->def.sourceType == AEEVarSourceType::BufferArea)
+        if (
+            variable->def.sourceType ==
+            AEEVarSourceType::BufferArea
+        )
         {
-            applyBufferArea(v, now);
+            applyBufferArea(
+                variable,
+                now
+            );
+
             return;
         }
 
-        // ========================================================
-        // 2. FUNZIONE / SISTEMA
-        // ========================================================
-
-        onAEEVarChanged(v, now);
+        onAEEVarChanged(
+            variable,
+            now
+        );
     }
 
 private:
-
     // ============================================================
-    // AEE BUFFER AREA → BUFFER + EVENT MANAGER
+    // AEE BUFFER AREA -> BUFFER + EVENT MANAGER
     // ============================================================
 
     void applyBufferArea(
-        AEEVariableBase* v,
+        AEEVariableBase* variable,
         unsigned long now)
     {
-        Buffer& buffer = *receiveContext.buffer;
+        (void)now;
 
-        const int area = v->def.bufferArea;
+        if (!variable ||
+            !receiveContext.buffer)
+        {
+            return;
+        }
 
-        if (area < 0 || area >= buffer.size())
+        Buffer& buffer =
+            *receiveContext.buffer;
+
+        const int area =
+            variable->def.bufferArea;
+
+        if (
+            area < 0 ||
+            area >= buffer.size()
+        )
         {
             LOG_WF(
                 "AEE::RX",
                 "Area non valida per '%s': %d",
-                v->def.name,
+                variable->def.name.c_str(),
                 area
             );
+
             return;
         }
 
@@ -917,22 +1045,30 @@ private:
         // BOOL
         // --------------------------------------------------------
 
-        if (auto* b = as<bool>(v))
+        if (auto* boolVariable =
+                as<bool>(variable))
         {
-            if (v->def.bitIndex >= 0)
+            if (
+                variable->def.bitIndex >= 0
+            )
             {
-                // Mantieni tutti gli altri bit.
-                value = buffer.getValueFast(area);
+                value =
+                    buffer.getValueFast(
+                        area
+                    );
 
                 bitWrite(
                     value,
-                    v->def.bitIndex,
-                    b->get()
+                    variable->def.bitIndex,
+                    boolVariable->get()
                 );
             }
             else
             {
-                value = b->get() ? 1L : 0L;
+                value =
+                    boolVariable->get()
+                        ? 1L
+                        : 0L;
             }
         }
 
@@ -940,118 +1076,172 @@ private:
         // INT
         // --------------------------------------------------------
 
-        else if (auto* i = as<int>(v))
+        else if (
+            auto* intVariable =
+                as<int>(variable)
+        )
         {
-            value = static_cast<long>(
-                i->get() / v->def.scale
-            );
+            if (
+                variable->def.scale ==
+                0.0f
+            )
+            {
+                LOG_WF(
+                    "AEE::RX",
+                    "Scala nulla per '%s'",
+                    variable->def.name.c_str()
+                );
+
+                return;
+            }
+
+            value =
+                static_cast<long>(
+                    intVariable->get() /
+                    variable->def.scale
+                );
         }
 
         // --------------------------------------------------------
         // FLOAT
         // --------------------------------------------------------
 
-        else if (auto* f = as<float>(v))
+        else if (
+            auto* floatVariable =
+                as<float>(variable)
+        )
         {
-            value = static_cast<long>(
-                f->get() / v->def.scale
-            );
+            if (
+                variable->def.scale ==
+                0.0f
+            )
+            {
+                LOG_WF(
+                    "AEE::RX",
+                    "Scala nulla per '%s'",
+                    variable->def.name.c_str()
+                );
+
+                return;
+            }
+
+            value =
+                static_cast<long>(
+                    floatVariable->get() /
+                    variable->def.scale
+                );
         }
+
+        // --------------------------------------------------------
+        // UNSUPPORTED
+        // --------------------------------------------------------
 
         else
         {
             LOG_WF(
                 "AEE::RX",
                 "Tipo non supportato per '%s'",
-                v->def.name
+                variable->def.name.c_str()
             );
+
             return;
         }
 
         // --------------------------------------------------------
-        // 1) Scrittura nel Buffer
+        // BUFFER EVENT
         // --------------------------------------------------------
 
-        if (DomoManager::instance)
+        if (!DomoManager::instance)
         {
-            DomoManager::instance->forceEvent(
-                area,
-                value,
-                static_cast<uint8_t>(
-                    receiveContext.aeeSource
-                )
-            );
-
-            LOG_DF(
+            LOG_WF(
                 "AEE::RX",
-                "AEE '%s' -> Buffer area=%d value=%ld",
-                v->def.name,
-                area,
-                value
+                "DomoManager non disponibile"
             );
-        }
-    }
 
+            return;
+        }
+
+        DomoManager::instance->forceEvent(
+            area,
+            value,
+            static_cast<uint8_t>(
+                receiveContext.aeeSource
+            )
+        );
+
+        LOG_DF(
+            "AEE::RX",
+            "AEE '%s' -> Buffer area=%d value=%ld",
+            variable->def.name.c_str(),
+            area,
+            value
+        );
+    }
 
     // ============================================================
     // POST PROCESSOR AEE
-    //
-    // Qui confluisce la vecchia OnAEEVarChanged().
     // ============================================================
 
     void onAEEVarChanged(
-        AEEVariableBase* v,
+        AEEVariableBase* variable,
         unsigned long now)
     {
-        if (!v)
+        (void)now;
+
+        if (!variable)
             return;
 
         // ========================================================
         // NONE / MESSAGGI DI SISTEMA
         // ========================================================
 
-        if (v->def.sourceType == AEEVarSourceType::None)
+        if (
+            variable->def.sourceType ==
+            AEEVarSourceType::None
+        )
         {
             // ----------------------------------------------------
             // EPOCH
             // ----------------------------------------------------
 
-            if (strcmp(
-                    v->def.name,
-                    "epoch") == 0)
+            if (
+                variable->def.name ==
+                "epoch"
+            )
             {
-                auto* e = as<int>(v);
+                auto* epochVariable =
+                    as<int>(variable);
 
-                if (!e)
+                if (!epochVariable)
                 {
                     LOG_WF(
                         "AEE",
                         "epoch ricevuto con tipo non valido"
                     );
+
                     return;
                 }
 
-                int epoch = e->get();
+                const int epoch =
+                    epochVariable->get();
 
                 LOG_IF(
                     "AEE",
-                    "Epoch ricevuto dal PEER: %d → applico al RTC",
+                    "Epoch ricevuto dal PEER: %d -> applico al RTC",
                     epoch
                 );
 
-                receiveContext.buffer; // nessun uso, solo contesto AEE
-
-                // Qui non usiamo il Buffer.
-                // Serve il TimeManager del DOMO.
                 if (DomoManager::instance)
                 {
                     DomoManager::instance
                         ->getTimeManager()
                         .getRTC()
-                        .applyEpoch(epoch);
+                        .applyEpoch(
+                            epoch
+                        );
                 }
 
-                v->clearChanged();
+                variable->clearChanged();
 
                 return;
             }
@@ -1063,13 +1253,15 @@ private:
         // FUNCTION
         // ========================================================
 
-        if (v->def.sourceType ==
-            AEEVarSourceType::Function)
+        if (
+            variable->def.sourceType ==
+            AEEVarSourceType::Function
+        )
         {
-            // Post processor applicativo.
-            //
-            // Qui aggiungeremo le eventuali AEE Function
-            // ricevibili dal Peer.
+            /*
+             * Punto di estensione per future funzioni AEE
+             * ricevibili dal peer.
+             */
             return;
         }
     }
@@ -1078,22 +1270,30 @@ private:
 class BridgeEngine
 {
 private:
+    // ============================================================
+    // PACER
+    // ============================================================
 
-    class DomoBridgePacer : public IBridgePacer
+    class DomoBridgePacer
+        : public IBridgePacer
     {
     private:
         DMNetworkManager& network;
-        DMNetworkManager::ProtocolId protocolId;
+
+        DMNetworkManager::ProtocolId
+            protocolId;
 
     public:
         DomoBridgePacer(
-            DMNetworkManager& n,
+            DMNetworkManager& networkRef,
             DMNetworkManager::ProtocolId id)
-            : network(n),
+            : network(networkRef),
               protocolId(id)
-        {}
+        {
+        }
 
-        bool acquire(unsigned long now) override
+        bool acquire(
+            unsigned long now) override
         {
             return network.tryAcquire(
                 protocolId,
@@ -1101,7 +1301,8 @@ private:
             );
         }
 
-        void release(unsigned long now) override
+        void release(
+            unsigned long now) override
         {
             network.release(
                 protocolId,
@@ -1110,38 +1311,188 @@ private:
         }
     };
 
+private:
+    uint8_t id = 0;
+
+    String name =
+        "BRIDGE";
 
     DMMasterBridge bridge;
-    DomoBridgePacer* pacer = nullptr;
 
+    DomoBridgePacer* pacer =
+        nullptr;
 
 public:
+    BridgeEngine() = default;
 
-    static BridgeEngine& instance()
+    BridgeEngine(
+        uint8_t bridgeId,
+        const char* bridgeName)
+        : id(bridgeId),
+          name(
+              bridgeName
+                  ? bridgeName
+                  : "BRIDGE"
+          )
     {
-        static BridgeEngine inst;
-        return inst;
     }
 
-
-    static DMMasterBridge& get()
+    ~BridgeEngine()
     {
-        return instance().bridge;
+        delete pacer;
+        pacer = nullptr;
     }
 
+    BridgeEngine(
+        const BridgeEngine&) = delete;
 
-    void setupPacer(
+    BridgeEngine& operator=(
+        const BridgeEngine&) = delete;
+
+    BridgeEngine(
+        BridgeEngine&&) = delete;
+
+    BridgeEngine& operator=(
+        BridgeEngine&&) = delete;
+
+    // ============================================================
+    // IDENTITY
+    // ============================================================
+
+    uint8_t getId() const
+    {
+        return id;
+    }
+
+    const String& getName() const
+    {
+        return name;
+    }
+
+    void setIdentity(
+        uint8_t bridgeId,
+        const char* bridgeName)
+    {
+        id =
+            bridgeId;
+
+        name =
+            bridgeName
+                ? bridgeName
+                : "BRIDGE";
+    }
+
+    // ============================================================
+    // BRIDGE ACCESS
+    // ============================================================
+
+    DMMasterBridge& getBridge()
+    {
+        return bridge;
+    }
+
+    const DMMasterBridge& getBridge() const
+    {
+        return bridge;
+    }
+
+    // ============================================================
+    // RECEIVE CALLBACK
+    // ============================================================
+
+    void setReceiveCallback(
+        std::function<
+            void(
+                AEEVariableBase*,
+                unsigned long
+            )
+        > callback)
+    {
+        bridge.onFrontendAEEChange =
+            std::move(callback);
+    }
+
+    // ============================================================
+    // INIT
+    // ============================================================
+
+    void init(
+        ICommandTransport& transport,
+        AEERegistry& registry,
+        bool master = true)
+    {
+        bridge.init(
+            &transport,
+            registry,
+            master
+        );
+
+        LOG_IF(
+            "BRIDGE",
+            "BridgeEngine '%s' inizializzato id=%u",
+            name.c_str(),
+            static_cast<unsigned>(
+                id
+            )
+        );
+    }
+
+    // ============================================================
+    // PACER
+    // ============================================================
+
+    bool setupPacer(
         DMNetworkManager& network,
         DMNetworkManager::ProtocolId protocolId)
     {
-        delete pacer;
+        if (protocolId < 0)
+        {
+            LOG_EF(
+                "BRIDGE",
+                "Protocol ID non valido per '%s'",
+                name.c_str()
+            );
 
-        pacer = new DomoBridgePacer(
-            network,
-            protocolId
+            return false;
+        }
+
+        delete pacer;
+        pacer = nullptr;
+
+        pacer =
+            new DomoBridgePacer(
+                network,
+                protocolId
+            );
+
+        if (!pacer)
+        {
+            LOG_EF(
+                "BRIDGE",
+                "Allocazione pacer fallita per '%s'",
+                name.c_str()
+            );
+
+            return false;
+        }
+
+        bridge.setPacer(
+            *pacer
         );
 
-        bridge.setPacer(*pacer);
+        return true;
+    }
+
+    // ============================================================
+    // LOOP
+    // ============================================================
+
+    void loop(
+        unsigned long now)
+    {
+        bridge.loop(
+            now
+        );
     }
 };
 
@@ -7766,6 +8117,91 @@ public:
 class SecurityEngine
 {
 private:
+    // ============================================================
+    // SECURITY COMMAND AREA LOOKUP
+    //
+    // Verifica se l'area ricevuta appartiene alle aree comando
+    // configurate per il sottosistema Security.
+    //
+    // Non modifica alcuno stato.
+    // Non genera log.
+    // Non applica alcun comando.
+    // ============================================================
+
+    static bool IsCommandArea(
+        int area)
+    {
+        if (area < 0 ||
+            !context.config)
+        {
+            return false;
+        }
+
+        const FrontendConfig::Security& config =
+            *context.config;
+
+        // ========================================================
+        // PANEL COMMAND AREAS
+        // ========================================================
+
+        if (config.panelBitCommandArea >= 0 &&
+            area == config.panelBitCommandArea)
+        {
+            return true;
+        }
+
+        if (config.panelCommandArea >= 0 &&
+            area == config.panelCommandArea)
+        {
+            return true;
+        }
+
+        // ========================================================
+        // ZONE COMMAND AREAS
+        // ========================================================
+
+        if (config.zones &&
+            config.zoneCount > 0)
+        {
+            for (size_t index = 0;
+                index < config.zoneCount;
+                ++index)
+            {
+                const int commandArea =
+                    config.zones[index].cmdArea;
+
+                if (commandArea >= 0 &&
+                    area == commandArea)
+                {
+                    return true;
+                }
+            }
+        }
+
+        // ========================================================
+        // SENSOR COMMAND AREAS
+        // ========================================================
+
+        if (config.sensors &&
+            config.count > 0)
+        {
+            for (size_t index = 0;
+                index < config.count;
+                ++index)
+            {
+                const int commandArea =
+                    config.sensors[index].cmdArea;
+
+                if (commandArea >= 0 &&
+                    area == commandArea)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
 
     // ============================================================
     // ALARM CALLBACK
@@ -8557,6 +8993,55 @@ public:
     }
 
     // ============================================================
+    // EVENT MANAGER CALLBACK
+    //
+    // Riceve gli eventi globali da EventManager, ma inoltra ad
+    // ApplyCommand() esclusivamente le aree comando appartenenti
+    // al sottosistema Security.
+    // ============================================================
+
+    static void EventCallback(
+        const EventManager::Event& event)
+    {
+        // ========================================================
+        // RUNTIME VALIDATION
+        // ========================================================
+
+        if (!runtime.initialized ||
+            !context.manager ||
+            !context.config ||
+            !context.config->enabled)
+        {
+            return;
+        }
+
+        // ========================================================
+        // SECURITY AREA FILTER
+        // ========================================================
+
+        if (!IsCommandArea(
+                event.area))
+        {
+            return;
+        }
+
+        // ========================================================
+        // COMMAND DISPATCH
+        // ========================================================
+
+        const unsigned long now =
+            context.manager
+                ->getTimeManager()
+                .nowMs();
+
+        ApplyCommand(
+            event.area,
+            event.value,
+            now
+        );
+    }
+
+    // ============================================================
     // APPLY COMMAND
     // ============================================================
 
@@ -8565,10 +9050,26 @@ public:
         long value,
         unsigned long now)
     {
+        // ========================================================
+        // RUNTIME VALIDATION
+        // ========================================================
+
         if (!runtime.initialized ||
             !context.config ||
-            !context.manager)
+            !context.manager ||
+            area < 0)
+        {
             return false;
+        }
+
+        using Orchestrator =
+            SecurityOrchestrator;
+
+        FrontendConfig::Security& securityConfig =
+            *context.config;
+
+        DomoManager& manager =
+            *context.manager;
 
         LOG_IF(
             "SECURITY",
@@ -8582,51 +9083,67 @@ public:
         // PANEL BIT COMMAND
         // ========================================================
 
-        if (context.config->panelBitCommandArea >= 0 &&
-            area == context.config->panelBitCommandArea)
+        if (securityConfig.panelBitCommandArea >= 0 &&
+            area == securityConfig.panelBitCommandArea)
         {
             LOG_IF(
                 "SECURITY",
-                "PANEL BIT AREA MATCH: area=%d value=0x%08lX",
+                "PANEL BIT AREA MATCH: "
+                "area=%d value=0x%08lX",
                 area,
-                (unsigned long)value
+                static_cast<unsigned long>(
+                    value
+                )
             );
 
             const bool handled =
-                SecurityOrchestrator::
-                    ApplyPanelBitCommand(
-                        area,
-                        value
-                    );
-
-            if (handled)
-            {
-                runtime.changeFlags |=
-                    SecurityOrchestrator::CHANGE_COMMAND;
-
-                context.manager->getBuffer()
-                    .WriteElement(
-                        area,
-                        0,
-                        false,
-                        now
-                    );
-
-                LOG_IF(
-                    "SECURITY",
-                    "PANEL BIT CMD RESET: area=%d value=0",
-                    area
+                Orchestrator::ApplyPanelBitCommand(
+                    area,
+                    value
                 );
-            }
-            else
+
+            if (!handled)
             {
                 LOG_WF(
                     "SECURITY",
-                    "Panel bit command rejected area=%d value=0x%08lX",
+                    "Panel bit command rejected: "
+                    "area=%d value=0x%08lX",
                     area,
-                    (unsigned long)value
+                    static_cast<unsigned long>(
+                        value
+                    )
                 );
+
+                /*
+                * L'area appartiene comunque al sottosistema Security.
+                * Il comando è stato riconosciuto, ma il valore è stato
+                * rifiutato dall'orchestrator.
+                */
+                return true;
             }
+
+            runtime.changeFlags |=
+                Orchestrator::CHANGE_COMMAND;
+
+            /*
+            * I comandi a bit sono impulsivi.
+            * Dopo l'elaborazione la relativa area viene azzerata.
+            */
+            manager
+                .getBuffer()
+                .WriteElement(
+                    area,
+                    0,
+                    false,
+                    now
+                );
+
+            LOG_IF(
+                "SECURITY",
+                "PANEL BIT CMD applied and reset: "
+                "area=%d value=0",
+                area
+            );
 
             return true;
         }
@@ -8635,60 +9152,39 @@ public:
         // ALARM PANEL COMMAND
         // ========================================================
 
-        if (context.config->panelCommandArea >= 0 &&
-            area == context.config->panelCommandArea)
+        if (securityConfig.panelCommandArea >= 0 &&
+            area == securityConfig.panelCommandArea)
         {
             const bool handled =
-                SecurityOrchestrator::
-                    ApplyPanelCommand(
-                        area,
-                        value
-                    );
-
-            if (handled)
-            {
-                runtime.changeFlags |=
-                    SecurityOrchestrator::CHANGE_COMMAND;
-
-                LOG_IF(
-                    "SECURITY",
-                    "PANEL CMD area=%d value=%ld",
+                Orchestrator::ApplyPanelCommand(
                     area,
                     value
                 );
-            }
-            else
+
+            if (!handled)
             {
                 LOG_WF(
                     "SECURITY",
-                    "Panel command rejected area=%d value=%ld",
+                    "Panel command rejected: "
+                    "area=%d value=%ld",
                     area,
                     value
                 );
+
+                /*
+                * Anche in questo caso l'area è stata riconosciuta
+                * come area Security.
+                */
+                return true;
             }
 
-            return true;
-        }
-
-        // ========================================================
-        // SINGLE SENSOR
-        // ========================================================
-
-        if (SecurityOrchestrator::
-                ApplySecurityCommand(
-                    area,
-                    value
-                ))
-        {
-            runtime.changeFlags|=
-                SecurityOrchestrator::CHANGE_COMMAND|
-                SecurityOrchestrator::CHANGE_SENSOR|
-                SecurityOrchestrator::CHANGE_ZONE|
-                SecurityOrchestrator::CHANGE_SYSTEM;
+            runtime.changeFlags |=
+                Orchestrator::CHANGE_COMMAND;
 
             LOG_IF(
                 "SECURITY",
-                "SENSOR CMD area=%d value=%ld",
+                "PANEL CMD applied: "
+                "area=%d value=%ld",
                 area,
                 value
             );
@@ -8697,10 +9193,34 @@ public:
         }
 
         // ========================================================
-        // NOT A SECURITY COMMAND
+        // SENSOR / ZONE COMMAND
+        //
+        // ApplySecurityCommand esegue internamente il routing sulle
+        // cmdArea dei sensori e delle zone.
         // ========================================================
 
-        return false;
+        if (!Orchestrator::ApplySecurityCommand(
+                area,
+                value))
+        {
+            return false;
+        }
+
+        runtime.changeFlags |=
+            Orchestrator::CHANGE_COMMAND |
+            Orchestrator::CHANGE_SENSOR  |
+            Orchestrator::CHANGE_ZONE    |
+            Orchestrator::CHANGE_SYSTEM;
+
+        LOG_IF(
+            "SECURITY",
+            "SENSOR/ZONE CMD applied: "
+            "area=%d value=%ld",
+            area,
+            value
+        );
+
+        return true;
     }
 
     // ============================================================
@@ -8754,141 +9274,146 @@ public:
     }
 };
 
-class TaskEngineBase
+// ============================================================
+// TASK ENGINE
+//
+// Registra esclusivamente i task standard del frontend.
+//
+// Non conosce:
+// - AEEEngine;
+// - BridgeEngine;
+// - MQTTEngine;
+// - DomoManagerFrontendEngine;
+// - CommunicationScheduler.
+//
+// I servizi applicativi e di comunicazione vengono registrati
+// dal composition root tramite AddTask().
+// ============================================================
+
+class TaskEngine
 {
+public:
+    using TaskFn =
+        void (*)(
+            DomoManager& manager,
+            unsigned long now
+        );
+
 private:
-
-    // ============================================================
-    // AEE
-    // ============================================================
-
-    static AEERegistry* aee()
-    {
-        return &AEEEngine::getAEE();
-    }
-
-
-    // ============================================================
-    // COMMUNICATION SCHEDULER
-    // ============================================================
-
-    static inline CommunicationScheduler communicationScheduler{3};
-
-
-    // ============================================================
-    // COMMUNICATION SERVICES
-    // ============================================================
-
-    static void Communication_Bridge(unsigned long now)
-    {
-        BridgeEngine::get().loop(now);
-    }
-
-
-    static void Communication_MQTT(unsigned long now)
-    {
-        MQTTEngine::Loop(now);
-    }
-
-
-    // ============================================================
+    // ========================================================
     // TASK: HVAC
-    // ============================================================
+    // ========================================================
 
     static void Task_HVAC(
         DomoManager& manager,
         unsigned long now)
     {
-        const auto& cfg =
-            TaskEngineOrchestrator::getCfg().hvac;
+        const FrontendConfig& frontendConfig =
+            TaskEngineOrchestrator::getCfg();
 
+        const auto& config =
+            frontendConfig.hvac;
 
-        // --------------------------------------------------------
+        // ----------------------------------------------------
         // TIME
-        // --------------------------------------------------------
+        // ----------------------------------------------------
 
-        struct tm t;
+        struct tm currentTime {};
 
         manager
             .getTimeManager()
-            .getDateTime(t);
+            .getDateTime(
+                currentTime
+            );
 
+        HeatPumpController::HVACTime hvacTime;
 
-        HeatPumpController::HVACTime ht;
+        hvacTime.dayOfWeek =
+            currentTime.tm_wday;
 
-        ht.dayOfWeek = t.tm_wday;
-        ht.hour      = t.tm_hour;
-        ht.minute    = t.tm_min;
+        hvacTime.hour =
+            currentTime.tm_hour;
 
+        hvacTime.minute =
+            currentTime.tm_min;
 
-        // --------------------------------------------------------
+        // ----------------------------------------------------
         // ZONE TEMPERATURES
-        // --------------------------------------------------------
+        // ----------------------------------------------------
 
-        auto& buffer =
-            manager.getBuffer();
+        static constexpr size_t
+            MAX_ZONE_TEMPERATURES = 16;
 
-        constexpr size_t MAX_ZONE_TEMPERATURES = 16;
-
-        static float zoneTemps[MAX_ZONE_TEMPERATURES];
-
+        static float zoneTemperatures[
+            MAX_ZONE_TEMPERATURES
+        ] {};
 
         const size_t zoneCount =
-            (cfg.zoneCount < MAX_ZONE_TEMPERATURES)
-                ? cfg.zoneCount
-                : MAX_ZONE_TEMPERATURES;
+            config.zoneCount <
+                MAX_ZONE_TEMPERATURES
+                    ? config.zoneCount
+                    : MAX_ZONE_TEMPERATURES;
 
+        Buffer& buffer =
+            manager.getBuffer();
 
-        for (size_t i = 0; i < zoneCount; ++i)
+        for (
+            size_t index = 0;
+            index < zoneCount;
+            ++index
+        )
         {
             const int area =
-                cfg.zones[i].temperatureArea;
+                config
+                    .zones[index]
+                    .temperatureArea;
 
-            zoneTemps[i] =
-                buffer.getValueFast(area) / 10.0f;
+            zoneTemperatures[index] =
+                area >= 0
+                    ? static_cast<float>(
+                        buffer.getValueFast(
+                            area
+                        )
+                    ) / 10.0f
+                    : 0.0f;
         }
 
+        // ----------------------------------------------------
+        // GLOBAL VALUES
+        // ----------------------------------------------------
 
-        // --------------------------------------------------------
-        // GLOBAL TEMPERATURES / WINDOW
-        // --------------------------------------------------------
-
-        const float tInterna =
-            cfg.readIndoorTemp
-                ? cfg.readIndoorTemp()
+        const float indoorTemperature =
+            config.readIndoorTemp
+                ? config.readIndoorTemp()
                 : 0.0f;
 
-
-        const float tEsterna =
-            cfg.readOutdoorTemp
-                ? cfg.readOutdoorTemp()
+        const float outdoorTemperature =
+            config.readOutdoorTemp
+                ? config.readOutdoorTemp()
                 : 0.0f;
 
-
-        const bool finestraAperta =
-            cfg.readWindowOpen
-                ? cfg.readWindowOpen()
+        const bool windowOpen =
+            config.readWindowOpen
+                ? config.readWindowOpen()
                 : false;
 
-
-        // --------------------------------------------------------
-        // HVAC ENGINE
-        // --------------------------------------------------------
+        // ----------------------------------------------------
+        // ENGINE
+        // ----------------------------------------------------
 
         HVACEngine::Loop(
             now,
-            zoneTemps,
-            tInterna,
-            tEsterna,
-            finestraAperta,
-            ht
+            zoneTemperatures,
+            indoorTemperature,
+            outdoorTemperature,
+            windowOpen,
+            hvacTime
         );
     }
 
-
-    // ============================================================
+    // ========================================================
     // TASK: AVERAGES
-    // ============================================================
+    // ========================================================
 
     static void Task_Averages(
         DomoManager& manager,
@@ -8896,84 +9421,79 @@ private:
     {
         (void)now;
 
-        const auto& cfg =
+        const FrontendConfig& config =
             TaskEngineOrchestrator::getCfg();
 
-        auto& buffer =
+        Buffer& buffer =
             manager.getBuffer();
 
         auto& averages =
             manager.getAverages();
 
-        // --------------------------------------------------------
-        // GROUPS
-        // --------------------------------------------------------
-
-        for (size_t g = 0;
-             g < cfg.averages.gruppiCount;
-             ++g)
+        for (
+            size_t groupIndex = 0;
+            groupIndex <
+                config.averages.gruppiCount;
+            ++groupIndex
+        )
         {
-            const auto& gruppo =
-                cfg.averages.gruppi[g];
+            const auto& group =
+                config
+                    .averages
+                    .gruppi[groupIndex];
 
-
-            // ----------------------------------------------------
-            // MEASUREMENTS
-            // ----------------------------------------------------
-
-            for (size_t i = 0;
-                 i < gruppo.count;
-                 ++i)
+            for (
+                size_t sensorIndex = 0;
+                sensorIndex < group.count;
+                ++sensorIndex
+            )
             {
-                const auto& s =
-                    gruppo.sensori[i];
+                const auto& sensor =
+                    group.sensori[
+                        sensorIndex
+                    ];
 
+                if (sensor.area < 0)
+                    continue;
 
-                const float raw =
-                    buffer.getValueFast(s.area);
+                const float rawValue =
+                    static_cast<float>(
+                        buffer.getValueFast(
+                            sensor.area
+                        )
+                    );
 
-
-                const float value =
-                    raw * s.factor;
-
+                const float scaledValue =
+                    rawValue *
+                    sensor.factor;
 
                 averages.addMeasurement(
-                    gruppo.nome,
-                    value
+                    group.nome,
+                    scaledValue
                 );
             }
-
-
-            // ----------------------------------------------------
-            // AVERAGE
-            // ----------------------------------------------------
 
             const float average =
                 averages.groupAverage(
-                    gruppo.nome
+                    group.nome
                 );
 
+            if (group.areaOut < 0)
+                continue;
 
-            // ----------------------------------------------------
-            // OUTPUT
-            // ----------------------------------------------------
-
-            if (gruppo.areaOut >= 0)
-            {
-                manager.forceInternalEvent(
-                    gruppo.areaOut,
-                    static_cast<long>(
-                        average *
-                        gruppo.outScale
-                    )
-                );
-            }
+            manager.forceInternalEvent(
+                group.areaOut,
+                static_cast<long>(
+                    average *
+                    group.outScale
+                )
+            );
         }
-    } 
+    }
 
-    // ============================================================
-    // TASK: SENSORS / SECURITY
-    // ============================================================
+    // ========================================================
+    // TASK: SECURITY SENSORS
+    // ========================================================
 
     static void Task_Sensors(
         DomoManager& manager,
@@ -8985,191 +9505,97 @@ private:
         );
     }
 
-
-    // ============================================================
-    // TASK: AEE DUMP
-    // ============================================================
-
-    static void Task_AEE_Dump(
-        DomoManager& manager,
-        unsigned long now)
-    {
-        (void)manager;
-        (void)now;
-
-
-        AEERegistry* registry =
-            aee();
-
-
-        if (!registry)
-            return;
-
-
-        StaticJsonDocument<1024> doc;
-
-
-        registry->forEach(
-            [&](AEEVariableBase* v)
-            {
-                if (v)
-                    v->toJson(doc);
-            }
-        );
-
-
-        String out;
-
-        serializeJson(
-            doc,
-            out
-        );
-
-
-        LOG_IF(
-            "AEE-DUMP",
-            "%s",
-            out.c_str()
-        );
-    }
-
-
-    // ============================================================
-    // TASK: COMMUNICATION
-    // ============================================================
-
-    static void Task_Communication(
-        DomoManager& manager,
-        unsigned long now)
-    {
-        // --------------------------------------------------------
-        // HOT STANDBY
-        // --------------------------------------------------------
-
-        #if HOTSTANDBY_ENABLED
-
-        if (!manager.isClusterMaster())
-            return;
-
-        #endif
-
-
-        // --------------------------------------------------------
-        // POWER-ON CYCLE
-        // --------------------------------------------------------
-
-        if (!manager.getPowerOnCycleCompleted())
-            return;
-
-
-        // --------------------------------------------------------
-        // COMMUNICATION ROUND ROBIN
-        // --------------------------------------------------------
-
-        communicationScheduler.update(now);
-    }
-
-
 public:
-
-    // ============================================================
+    // ========================================================
     // SETUP
-    //
-    // Registra tutti i task standard del frontend.
-    // ============================================================
+    // ========================================================
 
     static void Setup(
-        const FrontendConfig& cfg)
+        const FrontendConfig& config)
     {
-        // ========================================================
-        // ORCHESTRATOR
-        // ========================================================
-
         TaskEngineOrchestrator::Setup(
-            cfg
+            config
         );
 
-        // ========================================================
-        // STANDARD TASKS
-        // ========================================================
+        // ----------------------------------------------------
+        // SECURITY
+        // ----------------------------------------------------
 
         TaskEngineOrchestrator::AddTask(
             Task_Sensors,
-            cfg.security.intervalMs,
-            cfg.security.enabled
+            normalizedInterval(
+                config.security.intervalMs
+            ),
+            config.security.enabled
         );
+
+        // ----------------------------------------------------
+        // HVAC
+        // ----------------------------------------------------
 
         TaskEngineOrchestrator::AddTask(
             Task_HVAC,
-            cfg.hvac.intervalMs,
-            cfg.hvac.enabled
+            normalizedInterval(
+                config.hvac.intervalMs
+            ),
+            config.hvac.enabled
         );
+
+        // ----------------------------------------------------
+        // AVERAGES
+        // ----------------------------------------------------
 
         TaskEngineOrchestrator::AddTask(
             Task_Averages,
-            cfg.averages.intervalMs,
-            cfg.averages.enabled
+            normalizedInterval(
+                config.averages.intervalMs
+            ),
+            config.averages.enabled
         );
 
-        /*
-        * Sempre presente.
-        *
-        * Gestisce il round-robin dei servizi di comunicazione.
-        */
-        TaskEngineOrchestrator::AddTask(
-            Task_Communication,
-            15,
-            true
+        LOG_IF(
+            "TASK-ENGINE",
+            "Task standard registrati: count=%u",
+            static_cast<unsigned>(
+                TaskEngineOrchestrator::
+                    getTaskCount()
+            )
         );
-
-        // ========================================================
-        // COMMUNICATION SERVICES
-        // ========================================================
-
-        if (cfg.bridge.enabled)
-        {
-            communicationScheduler.add(
-                Communication_Bridge,
-                20,
-                100,
-                true
-            );
-        }
-
-        if (cfg.mqtt.enabled)
-        {
-            communicationScheduler.add(
-                Communication_MQTT,
-                50,
-                50,
-                true
-            );
-        }
     }
 
-
-    // ============================================================
+    // ========================================================
     // ADD TASK
     //
-    // Entry point per i task custom definiti dal frontend.
-    // ============================================================
+    // Entry point per:
+    // - task tecnici registrati dal composition root;
+    // - task applicativi registrati da DMFrontend.
+    // ========================================================
 
-    static void AddTask(
-        void (*fn)(DomoManager&, unsigned long),
+    static bool AddTask(
+        TaskFn function,
         uint32_t intervalMs,
         bool enabled = true)
     {
-        TaskEngineOrchestrator::AddTask(
-            fn,
-            intervalMs,
+        if (!function)
+        {
+            LOG_WF(
+                "TASK-ENGINE",
+                "AddTask ignorato: callback NULL"
+            );
+
+            return false;
+        }
+
+        return TaskEngineOrchestrator::AddTask(
+            function,
+            normalizedInterval(intervalMs),
             enabled
         );
     }
 
-
-    // ============================================================
+    // ========================================================
     // LOOP
-    // ============================================================
+    // ========================================================
 
     static void Loop(
         DomoManager& manager,
@@ -9181,10 +9607,9 @@ public:
         );
     }
 
-
-    // ============================================================
+    // ========================================================
     // FRONTEND CYCLE
-    // ============================================================
+    // ========================================================
 
     static bool hasFrontendCycleCompleted()
     {
@@ -9193,11 +9618,45 @@ public:
                 hasFrontendCycleCompleted();
     }
 
-
     static void resetFrontendCycleFlag()
     {
         TaskEngineOrchestrator::
             resetFrontendCycleFlag();
+    }
+
+    // ========================================================
+    // DIAGNOSTICS
+    // ========================================================
+
+    static uint16_t getTaskCount()
+    {
+        return
+            TaskEngineOrchestrator::
+                getTaskCount();
+    }
+
+    static uint16_t getMaxTasksPerCycle()
+    {
+        return
+            TaskEngineOrchestrator::
+                getMaxTasksPerCycle();
+    }
+
+private:
+    // ========================================================
+    // INTERVAL NORMALIZATION
+    //
+    // Un intervallo nullo renderebbe il task sempre pronto.
+    // In assenza di una richiesta esplicita, normalizziamo a 1 ms.
+    // ========================================================
+
+    static uint32_t normalizedInterval(
+        uint32_t intervalMs)
+    {
+        return
+            intervalMs > 0
+                ? intervalMs
+                : 1UL;
     }
 };
 
@@ -9692,4 +10151,331 @@ public:
 
     #endif
 };
+
+// ============================================================
+// INTROSPECTION ENGINE
+//
+// Costruisce e risolve semanticamente il modello Introspection.
+//
+// Non possiede:
+// - DomoManager;
+// - DomoIntrospection;
+// - AEERegistry;
+// - configurazione frontend.
+//
+// Tutte le dipendenze vengono ricevute dal composition root.
+// ============================================================
+
+class IntrospectionEngine
+{
+public:
+
+    // ========================================================
+    // BUILD RESULT
+    // ========================================================
+
+    struct Result
+    {
+        bool success =
+            false;
+
+        size_t deviceCount =
+            0;
+
+        size_t profilesFound =
+            0;
+
+        size_t profilesMissing =
+            0;
+
+        size_t profileAreaMismatches =
+            0;
+
+        size_t entityCount =
+            0;
+    };
+
+private:
+
+    // ========================================================
+    // DEVICE PROFILE VALIDATION
+    // ========================================================
+
+    static void ValidateDeviceProfiles(
+        const DomoManagerConfig::Devices& devices,
+        const DeviceProfiles& deviceProfiles,
+        Result& result)
+    {
+        result.deviceCount =
+            devices.list.size();
+
+        for (size_t deviceIndex = 0;
+             deviceIndex < devices.list.size();
+             ++deviceIndex)
+        {
+            const auto& device =
+                devices.list[
+                    deviceIndex
+                ];
+
+            const auto* profile =
+                deviceProfiles.get(
+                    device.profile.c_str()
+                );
+
+            if (!profile)
+            {
+                ++result.profilesMissing;
+
+                LOG_WF(
+                    "INTROSPECTION",
+                    "Profile missing: "
+                    "deviceIndex=%u device='%s' "
+                    "profile='%s' areas=%u",
+                    static_cast<unsigned>(
+                        deviceIndex
+                    ),
+                    device.name.c_str(),
+                    device.profile.c_str(),
+                    static_cast<unsigned>(
+                        device.areas.size()
+                    )
+                );
+
+                continue;
+            }
+
+            ++result.profilesFound;
+
+            size_t expandedItems =
+                0;
+
+            for (size_t channelIndex = 0;
+                 channelIndex < profile->size();
+                 ++channelIndex)
+            {
+                const int items =
+                    (*profile)[
+                        channelIndex
+                    ].items;
+
+                if (items > 0)
+                {
+                    expandedItems +=
+                        static_cast<size_t>(
+                            items
+                        );
+                }
+            }
+
+            if (expandedItems !=
+                device.areas.size())
+            {
+                ++result.profileAreaMismatches;
+
+                LOG_WF(
+                    "INTROSPECTION",
+                    "Profile/areas mismatch: "
+                    "deviceIndex=%u device='%s' "
+                    "profile='%s' expandedItems=%u areas=%u",
+                    static_cast<unsigned>(
+                        deviceIndex
+                    ),
+                    device.name.c_str(),
+                    device.profile.c_str(),
+                    static_cast<unsigned>(
+                        expandedItems
+                    ),
+                    static_cast<unsigned>(
+                        device.areas.size()
+                    )
+                );
+            }
+        }
+    }
+
+public:
+
+    // ========================================================
+    // BUILD
+    // ========================================================
+
+    static Result Build(
+        DomoIntrospection& introspection,
+        DomoManager& manager,
+        const FrontendConfig& config,
+        AEERegistry* aeeRegistry)
+    {
+        Result result;
+
+        // ====================================================
+        // DEVICE PROFILES
+        //
+        // Per ora conserva il comportamento attuale.
+        // Tutti i profili configurati sono stati verificati
+        // come disponibili in questa istanza.
+        // ====================================================
+
+        static DeviceProfiles
+            deviceProfiles;
+
+        ValidateDeviceProfiles(
+            config
+                .domoManager
+                .devices,
+            deviceProfiles,
+            result
+        );
+
+        LOG_IF(
+            "INTROSPECTION",
+            "Profile check: "
+            "devices=%u found=%u missing=%u mismatches=%u",
+            static_cast<unsigned>(
+                result.deviceCount
+            ),
+            static_cast<unsigned>(
+                result.profilesFound
+            ),
+            static_cast<unsigned>(
+                result.profilesMissing
+            ),
+            static_cast<unsigned>(
+                result.profileAreaMismatches
+            )
+        );
+
+        // ====================================================
+        // CONTEXT
+        // ====================================================
+
+        DomoIntrospection::Context ctx;
+
+        ctx.domo =
+            &config.domoManager;
+
+        ctx.deviceProfiles =
+            &deviceProfiles;
+
+        ctx.buffer =
+            &manager.getBuffer();
+
+        ctx.runtimeStore =
+            &manager.getRuntimeStore();
+
+        ctx.averages =
+            &manager.getAverages();
+
+        ctx.averagesConfig =
+            &config.averages;
+
+        ctx.time =
+            &manager.getTimeManager();
+
+        ctx.automationEngine =
+            &manager.getAutomation();
+
+        ctx.aeeRegistry =
+            aeeRegistry;
+
+        ctx.mqtt =
+            &config.mqtt;
+
+        ctx.webApi =
+            &config.webApi;
+
+        ctx.hvac =
+            &config.hvac;
+
+        ctx.solar =
+            config.solarInverters.count > 0
+                ? &config
+                    .solarInverters
+                    .inverter[0]
+                : nullptr;
+
+        // ====================================================
+        // REQUIRED CONTEXT VALIDATION
+        // ====================================================
+
+        if (!ctx.domo ||
+            !ctx.deviceProfiles ||
+            !ctx.buffer ||
+            !ctx.runtimeStore)
+        {
+            LOG_E(
+                "INTROSPECTION",
+                "Build failed: invalid context"
+            );
+
+            return result;
+        }
+
+        if (result.profilesMissing > 0 ||
+            result.profileAreaMismatches > 0)
+        {
+            LOG_WF(
+                "INTROSPECTION",
+                "Build continuing with profile errors: "
+                "missing=%u mismatches=%u",
+                static_cast<unsigned>(
+                    result.profilesMissing
+                ),
+                static_cast<unsigned>(
+                    result.profileAreaMismatches
+                )
+            );
+        }
+
+        // ====================================================
+        // STRUCTURAL BUILD
+        // ====================================================
+
+        introspection.build(
+            ctx
+        );
+
+        result.entityCount =
+            introspection.entityCount();
+
+        LOG_IF(
+            "INTROSPECTION",
+            "Structural build completed: entities=%u",
+            static_cast<unsigned>(
+                result.entityCount
+            )
+        );
+
+        // ====================================================
+        // SEMANTIC RESOLUTION
+        //
+        // Deve avvenire prima che Home Assistant utilizzi
+        // l'istanza Introspection.
+        // ====================================================
+
+        DomoSemanticResolver
+            semanticResolver;
+
+        const auto semanticResult =
+            semanticResolver.resolve(
+                introspection
+            );
+
+        (void)semanticResult;
+
+        LOG_IF(
+            "INTROSPECTION",
+            "Semantic resolution completed: entities=%u",
+            static_cast<unsigned>(
+                introspection.entityCount()
+            )
+        );
+
+        result.success =
+            introspection.entityCount() > 0;
+
+        return result;
+    }
+};
+
 #endif

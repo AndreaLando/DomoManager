@@ -131,6 +131,16 @@ struct DomoManagerConfig {
         int maxClients=1;
     } hmi;
 
+    // --- MODBUS TCP to RTU ---
+    struct Modbus {
+        bool enabled = true;
+        uint16_t timeoutMs = 200; //200ms non scendere mai sotto questo valore 15.05.2026
+        /**
+        * @brief Abilita il report diagnostico a ogni evento Power.
+        */
+        bool reporting = false;
+    } modbus;
+
     Watchdog::Params watchdog;
 
     struct Devices {
@@ -378,14 +388,6 @@ struct FrontendConfig {
         } aee;
 
     } bridge;
-
-    // -----------------------------
-    // 3) CONFIG MODBUS
-    // -----------------------------
-    struct Modbus {
-        bool enabled = false;
-        uint16_t timeoutMs = 150;
-    } modbus;
 
     // -----------------------------
     // 4) CONFIG MQTT (nuovo)

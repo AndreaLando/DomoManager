@@ -44,9 +44,9 @@ DEFINE_AREA(AREA_PMETER_FREQUENCY, 14)
 
 
 DEFINE_AREA(AREA_CAMERA_WIN1_ALM, 16) 
-DEFINE_AREA(AREA_CAMERA_WIN2_ALM, 18) 
-DEFINE_AREA(AREA_CAMERA_WIN3_ALM, 62) /////////// Deve essere variato
-DEFINE_AREA(AREA_CUCINA_SMOKE_ALM, 63) /////////// Deve essere variato
+DEFINE_AREA(AREA_CAMERA_WIN2_ALM, 300) /////////// Deve essere variato
+DEFINE_AREA(AREA_CAMERA_WIN3_ALM, 18) 
+DEFINE_AREA(AREA_CUCINA_SMOKE_ALM, 19) /////////// Deve essere variato
 
 
 
@@ -179,7 +179,7 @@ DEFINE_AREA(AREA_REOLINK_INGRESSO_ALARM, 281)   //Bit allarmi telecamera Reolink
 // ************ PHISICAL DEVICES *******************************
 IPAddress WaveShareP1_Addr=IPAddress(192, 168, 12, 203);
 IPAddress WaveSharePT_Addr=IPAddress(192, 168, 12, 204);
-IPAddress WaveShareCantina_Addr=IPAddress(192, 168, 12, 205);
+IPAddress WaveShareCantina_Addr=IPAddress(192, 168, 12, 206);
 
 static const DomoManagerConfig::Devices mainDevicesConfig = {
     {
@@ -784,7 +784,7 @@ static const char* AUTOMATION_JSON = R"json(
 DomoManagerConfig makeDomoConfig() {
     DomoManagerConfig cfg;   // usa tutti i default della struct
 
-    cfg.hmi.enabled = false;   // opzionale, è già default
+    cfg.hmi.enabled = true;   // opzionale, è già default
     cfg.hmi.port = 502;        // default
     cfg.hmi.pollingMs = 250;   // default
     cfg.hmi.maxClients = 1;

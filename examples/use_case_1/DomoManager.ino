@@ -69,6 +69,9 @@ static const int watchAreas[] = {
 static FrontendConfig mainConfig = [](){
     FrontendConfig c;
 
+    // --- DomoManager ---
+    c.domoManager=domoConfig;
+
     c.pins.userButton = DMPlatform::UserButton;
     c.pins.leds = {
         DMPlatform::LedD0, // RS485 Read
@@ -84,18 +87,12 @@ static FrontendConfig mainConfig = [](){
     c.net.subnet  = IPAddress(255, 255, 255, 0);
 
     // --- BRIDGE ---
-    c.bridge.enabled    = false;
+    c.bridge.enabled    = true;
     c.bridge.ip         = IPAddress(192,168,12,201); //Indirizzo del PEER
     c.bridge.localPort  = 8888;
     c.bridge.remotePort = 8888;
     c.bridge.aee.vars  = AEE_VARS;
     c.bridge.aee.count = sizeof(AEE_VARS) / sizeof(AEEVarDef);
-
-
-    // --- MODBUS TCP to RTU ---
-    c.modbus.enabled = true;
-    c.modbus.timeoutMs = 200; //200ms non scendere mai sotto questo valore 15.05.2026
-    
     
     // ============================================================================
     // CONFIG MQTT NEL FRONTEND
@@ -106,9 +103,6 @@ static FrontendConfig mainConfig = [](){
     c.mqtt.clientCount =
         sizeof(MQTT_CLIENTS) /
         sizeof(MQTT_CLIENTS[0]);
-
-    // --- DomoManager ---
-    c.domoManager=domoConfig;
     
     // --- HVAC ---
     c.hvac.enabled    = false;
@@ -220,7 +214,7 @@ static FrontendConfig mainConfig = [](){
     auto& solar0 =
         c.solarInverters.inverter[0];
 
-    solar0.enabled        = false;
+    solar0.enabled        = true;
     solar0.reportOnChange = false;
     solar0.autoDiscovery  = true;
     solar0.intervalMs     = 5; // Loop veloce: protocollo non bloccante
@@ -267,8 +261,6 @@ static FrontendConfig mainConfig = [](){
 
 void setup() {
     Serial.begin(19200);
-
-    DMPlatform::SetupPlatformIO();
     DomoManagerFrontendEngine::Setup(mainConfig);
 }
 

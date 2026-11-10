@@ -504,7 +504,7 @@ public:
     }
 
     static void ReportMissingBufferDefinitions(DomoManager& dm);
-    static void ReportDeviceErrors(DomoManager& dm);
+    
     static void ReportWatchdogs(DomoManager& dm);        
     static void ReportDeviceProfiles(DomoManager& dm);   
     static void ReportRTC(DomoManager& dm);              
@@ -546,7 +546,7 @@ public:
 
         if (cfg.reportDeviceErrors)
         {
-            DeviceManager::Diagnostic::ReportErrors(
+            DeviceManagerDiagnostic::Report(
                 manager.devices()
             );
         }

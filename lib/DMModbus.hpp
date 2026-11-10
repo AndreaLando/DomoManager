@@ -26,6 +26,908 @@
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
 
+class ModbusPollingProfiler
+{
+public:
+
+    // ========================================================================
+    // STAGE
+    // ========================================================================
+
+    enum class Stage : uint8_t
+    {
+        ENSURE = 0,
+        READ,
+        PROCESS,
+        WRITE,
+        COUNT
+    };
+
+    // ========================================================================
+    // TIMING
+    // ========================================================================
+
+    struct Timing
+    {
+        uint32_t cycles =
+            0;
+
+        uint32_t totalUs =
+            0;
+
+        uint32_t minUs =
+            UINT32_MAX;
+
+        uint32_t maxUs =
+            0;
+
+        uint32_t lastUs =
+            0;
+
+        inline void add(
+            uint32_t elapsedUs)
+        {
+            lastUs =
+                elapsedUs;
+
+            if (elapsedUs < minUs)
+            {
+                minUs =
+                    elapsedUs;
+            }
+
+            if (elapsedUs > maxUs)
+            {
+                maxUs =
+                    elapsedUs;
+            }
+
+            /*
+             * Protezione dall'overflow.
+             *
+             * Le statistiche vengono azzerate senza perdere
+             * l'ultima misura corrente.
+             */
+            if (
+                UINT32_MAX -
+                totalUs <
+                elapsedUs
+            )
+            {
+                cycles =
+                    1;
+
+                totalUs =
+                    elapsedUs;
+
+                minUs =
+                    elapsedUs;
+
+                maxUs =
+                    elapsedUs;
+
+                return;
+            }
+
+            totalUs +=
+                elapsedUs;
+
+            if (cycles < UINT32_MAX)
+            {
+                ++cycles;
+            }
+        }
+
+        inline uint32_t averageUs() const
+        {
+            return
+                cycles > 0
+                    ? totalUs / cycles
+                    : 0;
+        }
+
+        inline uint32_t minimumUs() const
+        {
+            return
+                cycles > 0
+                    ? minUs
+                    : 0;
+        }
+
+        inline void reset()
+        {
+            cycles =
+                0;
+
+            totalUs =
+                0;
+
+            minUs =
+                UINT32_MAX;
+
+            maxUs =
+                0;
+
+            lastUs =
+                0;
+        }
+    };
+
+    // ========================================================================
+    // ACTIVE MEASUREMENT
+    // ========================================================================
+
+    struct ActiveTiming
+    {
+        uint32_t startedAtUs =
+            0;
+
+        bool active =
+            false;
+
+        inline void begin()
+        {
+            startedAtUs =
+                micros();
+
+            active =
+                true;
+        }
+
+        inline bool end(
+            uint32_t& elapsedUs)
+        {
+            if (!active)
+            {
+                elapsedUs =
+                    0;
+
+                return false;
+            }
+
+            elapsedUs =
+                static_cast<uint32_t>(
+                    micros() -
+                    startedAtUs
+                );
+
+            startedAtUs =
+                0;
+
+            active =
+                false;
+
+            return true;
+        }
+
+        inline void cancel()
+        {
+            startedAtUs =
+                0;
+
+            active =
+                false;
+        }
+    };
+
+    // ========================================================================
+    // CLIENT STATE COUNTERS
+    // ========================================================================
+
+    struct StateCounters
+    {
+        uint32_t readDone =
+            0;
+
+        uint32_t writeDone =
+            0;
+
+        uint32_t cycleOk =
+            0;
+
+        uint32_t deviceError =
+            0;
+
+        uint32_t error =
+            0;
+
+        uint32_t waiting =
+            0;
+
+        inline void reset()
+        {
+            readDone =
+                0;
+
+            writeDone =
+                0;
+
+            cycleOk =
+                0;
+
+            deviceError =
+                0;
+
+            error =
+                0;
+
+            waiting =
+                0;
+        }
+    };
+
+    // ========================================================================
+    // PER-IP RUNTIME
+    // ========================================================================
+
+    struct IpRuntime
+    {
+        Timing ensure;
+        Timing read;
+        Timing process;
+        Timing write;
+
+        ActiveTiming activeEnsure;
+        ActiveTiming activeRead;
+        ActiveTiming activeProcess;
+        ActiveTiming activeWrite;
+
+        StateCounters states;
+
+        uint32_t runCalls =
+            0;
+
+        uint32_t lastRunAt =
+            0;
+
+        int lastState =
+            -1;
+
+        inline void cancelActive()
+        {
+            activeEnsure.cancel();
+            activeRead.cancel();
+            activeProcess.cancel();
+            activeWrite.cancel();
+        }
+
+        inline void reset()
+        {
+            ensure.reset();
+            read.reset();
+            process.reset();
+            write.reset();
+
+            cancelActive();
+
+            states.reset();
+
+            runCalls =
+                0;
+
+            lastRunAt =
+                0;
+
+            lastState =
+                -1;
+        }
+    };
+
+private:
+
+    // ========================================================================
+    // DYNAMIC STORAGE
+    //
+    // Dimensionato una sola volta durante Begin().
+    // Nessuna allocazione durante il polling.
+    // ========================================================================
+
+    std::vector<IpRuntime>
+        ipRuntime;
+
+    bool enabled =
+        false;
+
+    uint32_t lastReportAt =
+        0;
+
+public:
+
+    // ========================================================================
+    // CONFIGURE
+    // ========================================================================
+
+    bool configure(
+        size_t ipCount,
+        bool enable)
+    {
+        enabled =
+            false;
+
+        lastReportAt =
+            0;
+
+        ipRuntime.clear();
+
+        if (ipCount == 0)
+        {
+            enabled =
+                enable;
+
+            return true;
+        }
+
+        /*
+         * Una sola allocazione in fase di setup.
+         */
+        ipRuntime.resize(
+            ipCount
+        );
+
+        enabled =
+            enable;
+
+        return
+            ipRuntime.size() ==
+            ipCount;
+    }
+
+    // ========================================================================
+    // ENABLE
+    // ========================================================================
+
+    inline void setEnabled(
+        bool value)
+    {
+        enabled =
+            value;
+
+        if (!enabled)
+        {
+            cancelActiveStages();
+        }
+    }
+
+    inline bool isEnabled() const
+    {
+        return enabled;
+    }
+
+    inline size_t ipCount() const
+    {
+        return
+            ipRuntime.size();
+    }
+
+    // ========================================================================
+    // RUN
+    // ========================================================================
+
+    inline void beginRun(
+        int ipIndex,
+        uint32_t now)
+    {
+        if (
+            !enabled ||
+            !validIpIndex(ipIndex)
+        )
+        {
+            return;
+        }
+
+        IpRuntime& runtime =
+            ipRuntime[
+                static_cast<size_t>(
+                    ipIndex
+                )
+            ];
+
+        if (runtime.runCalls < UINT32_MAX)
+        {
+            ++runtime.runCalls;
+        }
+
+        runtime.lastRunAt =
+            now;
+    }
+
+    inline void endRun(
+        int ipIndex,
+        int state,
+        int readDoneState,
+        int writeDoneState,
+        int cycleOkState,
+        int deviceErrorState,
+        int errorState,
+        int waitingState,
+        uint32_t now)
+    {
+        if (
+            !enabled ||
+            !validIpIndex(ipIndex)
+        )
+        {
+            return;
+        }
+
+        IpRuntime& runtime =
+            ipRuntime[
+                static_cast<size_t>(
+                    ipIndex
+                )
+            ];
+
+        runtime.lastState =
+            state;
+
+        runtime.lastRunAt =
+            now;
+
+        if (state == readDoneState)
+        {
+            incrementCounter(
+                runtime.states.readDone
+            );
+        }
+        else if (state == writeDoneState)
+        {
+            incrementCounter(
+                runtime.states.writeDone
+            );
+        }
+        else if (state == cycleOkState)
+        {
+            incrementCounter(
+                runtime.states.cycleOk
+            );
+        }
+        else if (state == deviceErrorState)
+        {
+            incrementCounter(
+                runtime.states.deviceError
+            );
+        }
+        else if (state == errorState)
+        {
+            incrementCounter(
+                runtime.states.error
+            );
+        }
+        else if (state == waitingState)
+        {
+            incrementCounter(
+                runtime.states.waiting
+            );
+        }
+
+        runtime.cancelActive();
+    }
+
+    // ========================================================================
+    // STAGE BEGIN
+    // ========================================================================
+
+    inline void beginStage(
+        int ipIndex,
+        Stage stage)
+    {
+        if (
+            !enabled ||
+            !validIpIndex(ipIndex)
+        )
+        {
+            return;
+        }
+
+        activeTiming(
+            ipRuntime[
+                static_cast<size_t>(
+                    ipIndex
+                )
+            ],
+            stage
+        ).begin();
+    }
+
+    // ========================================================================
+    // STAGE END
+    // ========================================================================
+
+    inline void endStage(
+        int ipIndex,
+        Stage stage)
+    {
+        if (
+            !enabled ||
+            !validIpIndex(ipIndex)
+        )
+        {
+            return;
+        }
+
+        IpRuntime& runtime =
+            ipRuntime[
+                static_cast<size_t>(
+                    ipIndex
+                )
+            ];
+
+        uint32_t elapsedUs =
+            0;
+
+        if (
+            !activeTiming(
+                runtime,
+                stage
+            ).end(
+                elapsedUs
+            )
+        )
+        {
+            return;
+        }
+
+        timing(
+            runtime,
+            stage
+        ).add(
+            elapsedUs
+        );
+    }
+
+    // ========================================================================
+    // ACCESS
+    // ========================================================================
+
+    inline const IpRuntime* get(
+        int ipIndex) const
+    {
+        if (!validIpIndex(ipIndex))
+        {
+            return nullptr;
+        }
+
+        return
+            &ipRuntime[
+                static_cast<size_t>(
+                    ipIndex
+                )
+            ];
+    }
+
+    // ========================================================================
+    // RESET
+    // ========================================================================
+
+    void resetStatistics()
+    {
+        for (
+            auto& runtime :
+            ipRuntime
+        )
+        {
+            runtime.reset();
+        }
+
+        lastReportAt =
+            0;
+    }
+
+    inline void cancelActiveStages()
+    {
+        for (
+            auto& runtime :
+            ipRuntime
+        )
+        {
+            runtime.cancelActive();
+        }
+    }
+
+    // ========================================================================
+    // REPORT IF DUE
+    // ========================================================================
+
+    template<typename IpContainer>
+    bool reportIfDue(
+        uint32_t now,
+        uint32_t intervalMs,
+        const IpContainer& ips)
+    {
+        if (!enabled)
+        {
+            return false;
+        }
+
+        if (
+            intervalMs > 0 &&
+            static_cast<uint32_t>(
+                now -
+                lastReportAt
+            ) <
+            intervalMs
+        )
+        {
+            return false;
+        }
+
+        lastReportAt =
+            now;
+
+        report(
+            ips
+        );
+
+        return true;
+    }
+
+    // ========================================================================
+    // REPORT
+    // ========================================================================
+
+    template<typename IpContainer>
+    void report(
+        const IpContainer& ips) const
+    {
+        LOG_WF(
+            "MDB-PROF",
+            "===== MODBUS POLLING REPORT | Ips=%u =====",
+            static_cast<unsigned>(
+                ipRuntime.size()
+            )
+        );
+
+        if (ipRuntime.empty())
+        {
+            LOG_WF(
+                "MDB-PROF",
+                "No IP configured"
+            );
+
+            return;
+        }
+
+        bool anyExecution =
+            false;
+
+        const size_t count =
+            ipRuntime.size() <
+                    ips.size()
+                ? ipRuntime.size()
+                : ips.size();
+
+        for (
+            size_t ipIndex = 0;
+            ipIndex < count;
+            ++ipIndex
+        )
+        {
+            const IpRuntime& runtime =
+                ipRuntime[ipIndex];
+
+            if (runtime.runCalls == 0)
+            {
+                continue;
+            }
+
+            anyExecution =
+                true;
+
+            const IPAddress& ip =
+                ips[ipIndex].IP;
+
+            LOG_WF(
+                "MDB-PROF",
+                "IP[%u]=%u.%u.%u.%u "
+                "Run=%lu RD=%lu WD=%lu OK=%lu "
+                "DevErr=%lu Err=%lu Wait=%lu "
+                "LastState=%d LastAt=%lu",
+                static_cast<unsigned>(
+                    ipIndex
+                ),
+                static_cast<unsigned>(
+                    ip[0]
+                ),
+                static_cast<unsigned>(
+                    ip[1]
+                ),
+                static_cast<unsigned>(
+                    ip[2]
+                ),
+                static_cast<unsigned>(
+                    ip[3]
+                ),
+                static_cast<unsigned long>(
+                    runtime.runCalls
+                ),
+                static_cast<unsigned long>(
+                    runtime.states.readDone
+                ),
+                static_cast<unsigned long>(
+                    runtime.states.writeDone
+                ),
+                static_cast<unsigned long>(
+                    runtime.states.cycleOk
+                ),
+                static_cast<unsigned long>(
+                    runtime.states.deviceError
+                ),
+                static_cast<unsigned long>(
+                    runtime.states.error
+                ),
+                static_cast<unsigned long>(
+                    runtime.states.waiting
+                ),
+                runtime.lastState,
+                static_cast<unsigned long>(
+                    runtime.lastRunAt
+                )
+            );
+
+            reportTiming(
+                "ENSURE",
+                runtime.ensure
+            );
+
+            reportTiming(
+                "READ",
+                runtime.read
+            );
+
+            reportTiming(
+                "PROCESS",
+                runtime.process
+            );
+
+            reportTiming(
+                "WRITE",
+                runtime.write
+            );
+        }
+
+        if (!anyExecution)
+        {
+            LOG_WF(
+                "MDB-PROF",
+                "RunClient not executed"
+            );
+        }
+
+        LOG_WF(
+            "MDB-PROF",
+            "===== END MODBUS POLLING REPORT ====="
+        );
+    }
+
+private:
+
+    // ========================================================================
+    // VALID IP INDEX
+    // ========================================================================
+
+    inline bool validIpIndex(
+        int ipIndex) const
+    {
+        return
+            ipIndex >= 0 &&
+            static_cast<size_t>(
+                ipIndex
+            ) <
+            ipRuntime.size();
+    }
+
+    // ========================================================================
+    // SATURATING COUNTER
+    // ========================================================================
+
+    static inline void incrementCounter(
+        uint32_t& counter)
+    {
+        if (counter < UINT32_MAX)
+        {
+            ++counter;
+        }
+    }
+
+    // ========================================================================
+    // ACTIVE TIMING SELECTOR
+    // ========================================================================
+
+    static inline ActiveTiming& activeTiming(
+        IpRuntime& runtime,
+        Stage stage)
+    {
+        switch (stage)
+        {
+            case Stage::ENSURE:
+                return runtime.activeEnsure;
+
+            case Stage::READ:
+                return runtime.activeRead;
+
+            case Stage::PROCESS:
+                return runtime.activeProcess;
+
+            case Stage::WRITE:
+                return runtime.activeWrite;
+
+            case Stage::COUNT:
+            default:
+                return runtime.activeEnsure;
+        }
+    }
+
+    // ========================================================================
+    // TIMING SELECTOR
+    // ========================================================================
+
+    static inline Timing& timing(
+        IpRuntime& runtime,
+        Stage stage)
+    {
+        switch (stage)
+        {
+            case Stage::ENSURE:
+                return runtime.ensure;
+
+            case Stage::READ:
+                return runtime.read;
+
+            case Stage::PROCESS:
+                return runtime.process;
+
+            case Stage::WRITE:
+                return runtime.write;
+
+            case Stage::COUNT:
+            default:
+                return runtime.ensure;
+        }
+    }
+
+    // ========================================================================
+    // TIMING REPORT
+    // ========================================================================
+
+    static void reportTiming(
+        const char* name,
+        const Timing& timing)
+    {
+        if (timing.cycles == 0)
+        {
+            return;
+        }
+
+        LOG_WF(
+            "MDB-PROF",
+            "  %s "
+            "Cycles=%lu "
+            "Last=%lu us "
+            "Min=%lu us "
+            "Max=%lu us "
+            "Avg=%lu us",
+            name
+                ? name
+                : "",
+            static_cast<unsigned long>(
+                timing.cycles
+            ),
+            static_cast<unsigned long>(
+                timing.lastUs
+            ),
+            static_cast<unsigned long>(
+                timing.minimumUs()
+            ),
+            static_cast<unsigned long>(
+                timing.maxUs
+            ),
+            static_cast<unsigned long>(
+                timing.averageUs()
+            )
+        );
+    }
+};
+
 class IpManager {
 private:
     class PriorityDeviceCursor {
@@ -634,7 +1536,52 @@ public:
 
 class ModbusManager
 {
+public: 
+    enum class ClientState
+    {
+        READ_DONE,
+        WRITE_DONE,
+        CYCLE_OK,
+        DEVICE_ERROR,
+        ERROR,
+        WAITING
+    };
+
+   
 private:
+    inline ClientState CompleteProfiledRun(
+        int ipIndex,
+        ClientState state)
+    {
+        profiler.endRun(
+            ipIndex,
+            static_cast<int>(
+                state
+            ),
+            static_cast<int>(
+                ClientState::READ_DONE
+            ),
+            static_cast<int>(
+                ClientState::WRITE_DONE
+            ),
+            static_cast<int>(
+                ClientState::CYCLE_OK
+            ),
+            static_cast<int>(
+                ClientState::DEVICE_ERROR
+            ),
+            static_cast<int>(
+                ClientState::ERROR
+            ),
+            static_cast<int>(
+                ClientState::WAITING
+            ),
+            millis()
+        );
+
+        return state;
+    }
+
     DMNetworkManager* net = nullptr;
     int modbusProtocolId = -1;
 
@@ -1293,17 +2240,13 @@ private:
     }
 
     // ============================================================
-    // PERFORMANCE
+    // MODBUS POLLING PROFILER
+    //
+    // Dimensionato una volta con il numero reale degli IP.
+    // Nessuna allocazione nel ciclo Modbus.
     // ============================================================
 
-    DriverTimingStats timing;
-
-    PerformanceProfiler profiler{5, 8};
-
-    uint8_t PROF_ENSURE;
-    uint8_t PROF_READ;
-    uint8_t PROF_PROCESS;
-    uint8_t PROF_WRITE;
+    ModbusPollingProfiler profiler;
 
     // ============================================================
     // WRITE PENDING PER IP
@@ -1371,10 +2314,57 @@ public:
     // TIMING
     // ============================================================
 
+    inline void setTimingEnabled(
+        bool value)
+    {
+        profiler.setEnabled(
+            value
+        );
+    }
+
+    inline bool isTimingEnabled() const
+    {
+        return
+            profiler.isEnabled();
+    }
+
+    inline void resetDeviceTiming()
+    {
+        profiler.resetStatistics();
+    }
+
     inline void reportDeviceTiming()
     {
-        timing.reportIpTiming(
-            "Modbus Device Cycle"
+        if (!ipManager)
+        {
+            LOG_WF(
+                "MDB-PROF",
+                "Report unavailable: IpManager not initialized"
+            );
+
+            return;
+        }
+
+        profiler.report(
+            ipManager->GetIps()
+        );
+    }
+
+    inline void reportDeviceTimingIfDue(
+        unsigned long now,
+        unsigned long intervalMs = 30000UL)
+    {
+        if (!ipManager)
+            return;
+
+        profiler.reportIfDue(
+            static_cast<uint32_t>(
+                now
+            ),
+            static_cast<uint32_t>(
+                intervalMs
+            ),
+            ipManager->GetIps()
         );
     }
 
@@ -1449,55 +2439,97 @@ public:
         DMNetworkManager& netManager,
         int modbusId)
     {
-        this->m_ledController = &ledsController;
-        this->buffer         = &buffer;
-        this->prgDevices     = &prgDevices;
-        this->thresholds     = &tresholds;
-        this->ipManager      = &ipManager;
-        this->somethingChanged = sc;
-        this->net              = &netManager;
-        this->modbusProtocolId = modbusId;
+        // ========================================================
+        // EXTERNAL REFERENCES
+        // ========================================================
 
-        // Stato READ/WRITE indipendente per ogni IP.
+        this->m_ledController =
+            &ledsController;
+
+        this->buffer =
+            &buffer;
+
+        this->prgDevices =
+            &prgDevices;
+
+        this->thresholds =
+            &tresholds;
+
+        this->ipManager =
+            &ipManager;
+
+        this->somethingChanged =
+            sc;
+
+        this->net =
+            &netManager;
+
+        this->modbusProtocolId =
+            modbusId;
+
+        // ========================================================
+        // PER-IP CLIENT STATES
+        // ========================================================
+
+        const size_t ipCount =
+            ipManager
+                .GetIps()
+                .size();
+
         clientStates.clear();
+
         clientStates.resize(
-            ipManager.GetIps().size()
+            ipCount
         );
 
-        // Costruzione mappa area → device.
+        // ========================================================
+        // AREA TO DEVICE MAP
+        // ========================================================
+
         areaMap.buildOnce(
             prgDevices
         );
 
-        // Performance profiler.
-        PROF_ENSURE =
-            profiler.addStage("ENS");
+        // ========================================================
+        // PROFILER
+        //
+        // Una sola allocazione durante il setup.
+        // ========================================================
 
-        PROF_READ =
-            profiler.addStage("READ");
-
-        PROF_PROCESS =
-            profiler.addStage("PROC");
-
-        PROF_WRITE =
-            profiler.addStage("WRITE");
+        if (!profiler.configure(
+                ipCount,
+                false
+            ))
+        {
+            LOG_EF(
+                "MDB-PROF",
+                "Unable to configure profiler"
+                " | Ips=%u",
+                static_cast<unsigned>(
+                    ipCount
+                )
+            );
+        }
+        else
+        {
+            LOG_IF(
+                "MDB-PROF",
+                "Profiler initialized"
+                " | Enabled=%u"
+                " | Ips=%u"
+                " | Devices=%u",
+                profiler.isEnabled()
+                    ? 1U
+                    : 0U,
+                static_cast<unsigned>(
+                    ipCount
+                ),
+                static_cast<unsigned>(
+                    prgDevices.size()
+                )
+            );
+        }
     }
-
-
-    // ============================================================
-    // CLIENT STATE
-    // ============================================================
-
-    enum class ClientState
-    {
-        READ_DONE,
-        WRITE_DONE,
-        CYCLE_OK,
-        DEVICE_ERROR,
-        ERROR,
-        WAITING
-    };
-
 
     // ============================================================
     // STATE MAPPING
@@ -1556,9 +2588,6 @@ public:
     }
 
 
-    // ============================================================
-    // RUN CLIENT
-    // ============================================================
     ClientState RunClient(
         DMPlatform::Modbus::TCPClient& modbusClient,
         short ipIndex,
@@ -1566,138 +2595,186 @@ public:
         std::vector<uint16_t>& mbRead,
         unsigned long now)
     {
-        // --------------------------------------------------------
-        // VALIDAZIONE IP
-        // --------------------------------------------------------
+        // ========================================================
+        // IP VALIDATION
+        // ========================================================
 
-        if (ipIndex < 0 ||
-            static_cast<size_t>(ipIndex) >= clientStates.size())
+        if (
+            ipIndex < 0 ||
+            static_cast<size_t>(
+                ipIndex
+            ) >=
+            clientStates.size()
+        )
         {
             LOG_EF(
                 "ModbusManager",
-                "RunClient INVALID ipIndex=%d states=%d",
-                ipIndex,
-                (int)clientStates.size()
+                "RunClient INVALID"
+                " | IpIndex=%d"
+                " | States=%u",
+                static_cast<int>(
+                    ipIndex
+                ),
+                static_cast<unsigned>(
+                    clientStates.size()
+                )
             );
 
             return ClientState::ERROR;
         }
 
+        // ========================================================
+        // RUN PROFILING
+        // ========================================================
+
+        profiler.beginRun(
+            ipIndex,
+            now
+        );
+
+        // ========================================================
+        // PER-IP STATE
+        // ========================================================
 
         ClientStepState& clientState =
-            clientStates[ipIndex];
+            clientStates[
+                static_cast<size_t>(
+                    ipIndex
+                )
+            ];
 
         ClientStep& step =
             clientState.step;
 
+        // ========================================================
+        // PERSISTENT CONNECTION
+        // ========================================================
 
-        // --------------------------------------------------------
-        // CONNESSIONE MODBUS PERSISTENTE
-        // --------------------------------------------------------
+        static PersistentModbusConnection
+            connection(
+                modbusClient
+            );
 
-        static PersistentModbusConnection conn(modbusClient);
-
-
-        // --------------------------------------------------------
-        // SOCKET MANAGER CONTEXT
-        // --------------------------------------------------------
+        // ========================================================
+        // SOCKET CONTEXT
+        // ========================================================
 
         if (net)
         {
-            conn.setSocketContext(
+            connection.setSocketContext(
                 *net,
-                net->getProtocol(
-                    modbusProtocolId
-                ).socketOwner
+                net
+                    ->getProtocol(
+                        modbusProtocolId
+                    )
+                    .socketOwner
             );
         }
 
-
         auto& ip =
-            ipManager->GetIps()[ipIndex];
+            ipManager
+                ->GetIps()[
+                    static_cast<size_t>(
+                        ipIndex
+                    )
+                ];
 
-
-        // --------------------------------------------------------
+        // ========================================================
         // ENSURE CONNECTION
-        // --------------------------------------------------------
+        // ========================================================
 
-        profiler.begin(
-            PROF_ENSURE,
+        profiler.beginStage(
             ipIndex,
-            millis()
+            ModbusPollingProfiler::
+                Stage::ENSURE
         );
 
         const auto ensureResult =
-            conn.ensure(
+            connection.ensure(
                 ipIndex,
                 *ipManager,
                 port,
                 now
             );
 
-        profiler.end(
-            PROF_ENSURE,
+        profiler.endStage(
             ipIndex,
-            millis()
+            ModbusPollingProfiler::
+                Stage::ENSURE
         );
 
-
-        // --------------------------------------------------------
-        // WAITING
-        // --------------------------------------------------------
-
-        if (ensureResult ==
-            PersistentModbusConnection::EnsureResult::WAITING)
+        if (
+            ensureResult ==
+            PersistentModbusConnection::
+                EnsureResult::WAITING
+        )
         {
-            // Nessun errore.
-            // Il giro corrente viene semplicemente rimandato.
-            return ClientState::WAITING;
+            return CompleteProfiledRun(
+                ipIndex,
+                ClientState::WAITING
+            );
         }
 
-
-        // --------------------------------------------------------
-        // FAILED
-        // --------------------------------------------------------
-
-        if (ensureResult ==
-            PersistentModbusConnection::EnsureResult::FAILED)
+        if (
+            ensureResult ==
+            PersistentModbusConnection::
+                EnsureResult::FAILED
+        )
         {
             LOG_WF(
                 "ModbusManager",
-                "Modbus TCP non connesso → salto lettura "
-                "(IP=%d.%d.%d.%d)",
-                ip.IP[0],
-                ip.IP[1],
-                ip.IP[2],
-                ip.IP[3]
+                "Modbus TCP not connected"
+                " | IP=%u.%u.%u.%u"
+                " | IpIndex=%d",
+                static_cast<unsigned>(
+                    ip.IP[0]
+                ),
+                static_cast<unsigned>(
+                    ip.IP[1]
+                ),
+                static_cast<unsigned>(
+                    ip.IP[2]
+                ),
+                static_cast<unsigned>(
+                    ip.IP[3]
+                ),
+                static_cast<int>(
+                    ipIndex
+                )
             );
 
-            step = ClientStep::READ;
+            step =
+                ClientStep::READ;
 
             if (net)
             {
                 net->updateProtocolState(
                     modbusProtocolId,
-                    DMNetworkManager::Protocol::State::ERROR
+                    DMNetworkManager::
+                        Protocol::
+                            State::ERROR
                 );
             }
 
-            return ClientState::ERROR;
+            return CompleteProfiledRun(
+                ipIndex,
+                ClientState::ERROR
+            );
         }
-
 
         // ========================================================
         // READ
         // ========================================================
 
-        if (step == ClientStep::READ)
+        if (
+            step ==
+            ClientStep::READ
+        )
         {
-            timing.startDevice(now);
-
-            profiler.begin(
-                PROF_READ,
+            profiler.beginStage(
                 ipIndex,
-                millis()
+                ModbusPollingProfiler::
+                    Stage::READ
             );
 
             const bool readOk =
@@ -1708,127 +2785,142 @@ public:
                     now
                 );
 
-            profiler.end(
-                PROF_READ,
+            profiler.endStage(
                 ipIndex,
-                millis()
+                ModbusPollingProfiler::
+                    Stage::READ
             );
-
 
             if (!readOk)
             {
-                step = ClientStep::READ;
+                step =
+                    ClientStep::READ;
 
                 if (net)
                 {
                     net->updateProtocolState(
                         modbusProtocolId,
-                        DMNetworkManager::Protocol::State::DEVICE_ERROR
+                        DMNetworkManager::
+                            Protocol::
+                                State::DEVICE_ERROR
                     );
                 }
 
-                return ClientState::DEVICE_ERROR;
+                return CompleteProfiledRun(
+                    ipIndex,
+                    ClientState::DEVICE_ERROR
+                );
             }
 
-
-            conn.touch(millis());
-
-            // ----------------------------------------------------
-            // FIX:
-            // salva il tempo della READ nello stato dell'IP.
-            //
-            // NON usare:
-            // static unsigned long& lastReadTime = now;
-            //
-            // perché 'now' è un parametro locale della funzione.
-            // ----------------------------------------------------
-
-            clientState.lastReadTime = now;
-
-
-            // ----------------------------------------------------
-            // PROCESS BUFFER
-            // ----------------------------------------------------
-
-            profiler.begin(
-                PROF_PROCESS,
-                ipIndex,
+            connection.touch(
                 millis()
+            );
+
+            clientState.lastReadTime =
+                now;
+
+            // ====================================================
+            // PROCESS BUFFER
+            // ====================================================
+
+            profiler.beginStage(
+                ipIndex,
+                ModbusPollingProfiler::
+                    Stage::PROCESS
             );
 
             const auto& changedMap =
                 buffer->getChangedMap();
 
-            bool somethingChangedNeeded = false;
+            bool somethingChangedNeeded =
+                false;
 
-            for (const auto& area : changedMap)
+            for (
+                const auto& area :
+                changedMap
+            )
             {
                 const int areaToWrite =
-                    buffer->GetAreaToWrite(area);
+                    buffer->GetAreaToWrite(
+                        area
+                    );
 
-                if (areaToWrite > 0)
+                if (areaToWrite <= 0)
+                    continue;
+
+                const BufferSourceInfo& entry =
+                    buffer->getFieldEntry(
+                        area
+                    );
+
+                const uint16_t value =
+                    static_cast<uint16_t>(
+                        entry.value
+                    );
+
+                const auto result =
+                    buffer->WriteElement(
+                        areaToWrite,
+                        value,
+                        now
+                    );
+
+                if (
+                    result ==
+                    Buffer::WriteResult::CHANGED
+                )
                 {
-                    const BufferSourceInfo& entry =
-                        buffer->getFieldEntry(area);
-
-                    const uint16_t value =
-                        static_cast<uint16_t>(entry.value);
-
-                    const auto result =
-                        buffer->WriteElement(
-                            areaToWrite,
-                            value,
-                            now
-                        );
-
-                    if (result == Buffer::WriteResult::CHANGED)
-                    {
-                        somethingChangedNeeded = true;
-                    }
+                    somethingChangedNeeded =
+                        true;
                 }
             }
 
-
-            if (somethingChangedNeeded &&
-                somethingChanged)
+            if (
+                somethingChangedNeeded &&
+                somethingChanged
+            )
             {
                 somethingChanged();
             }
 
-
-            profiler.end(
-                PROF_PROCESS,
+            profiler.endStage(
                 ipIndex,
-                millis()
+                ModbusPollingProfiler::
+                    Stage::PROCESS
             );
 
-
-            // Passa alla WRITE.
-            step = ClientStep::WRITE;
+            step =
+                ClientStep::WRITE;
 
             if (net)
             {
                 net->updateProtocolState(
                     modbusProtocolId,
-                    DMNetworkManager::Protocol::State::READ_DONE
+                    DMNetworkManager::
+                        Protocol::
+                            State::READ_DONE
                 );
             }
 
-
-            return ClientState::READ_DONE;
+            return CompleteProfiledRun(
+                ipIndex,
+                ClientState::READ_DONE
+            );
         }
-
 
         // ========================================================
         // WRITE
         // ========================================================
 
-        if (step == ClientStep::WRITE)
+        if (
+            step ==
+            ClientStep::WRITE
+        )
         {
-            profiler.begin(
-                PROF_WRITE,
+            profiler.beginStage(
                 ipIndex,
-                millis()
+                ModbusPollingProfiler::
+                    Stage::WRITE
             );
 
             const bool writeOk =
@@ -1838,79 +2930,98 @@ public:
                     now
                 );
 
-            profiler.end(
-                PROF_WRITE,
+            profiler.endStage(
                 ipIndex,
-                millis()
+                ModbusPollingProfiler::
+                    Stage::WRITE
             );
-
 
             if (!writeOk)
             {
-                // Il ciclo corrente è terminato con errore.
-                // La pending rimasta nel Buffer verrà ritentata
-                // successivamente.
-                step = ClientStep::READ;
+                step =
+                    ClientStep::READ;
 
                 if (net)
                 {
                     net->updateProtocolState(
                         modbusProtocolId,
-                        DMNetworkManager::Protocol::State::DEVICE_ERROR
+                        DMNetworkManager::
+                            Protocol::
+                                State::DEVICE_ERROR
                     );
                 }
 
-                return ClientState::DEVICE_ERROR;
+                return CompleteProfiledRun(
+                    ipIndex,
+                    ClientState::DEVICE_ERROR
+                );
             }
-
-
-            timing.endDevice(
-                now,
-                ipIndex
-            );
-
-
-            // ----------------------------------------------------
-            // FIX:
-            // usa il timestamp appartenente all'IP corrente.
-            // ----------------------------------------------------
 
             ipManager->setLastCycleDuration(
                 ipIndex,
-                now - clientState.lastReadTime
+                static_cast<unsigned long>(
+                    now -
+                    clientState.lastReadTime
+                )
             );
 
+            connection.touch(
+                millis()
+            );
 
-            conn.touch(millis());
-            step = ClientStep::READ;
-
+            step =
+                ClientStep::READ;
 
             if (net)
             {
                 net->updateProtocolState(
                     modbusProtocolId,
-                    DMNetworkManager::Protocol::State::CYCLE_OK
+                    DMNetworkManager::
+                        Protocol::
+                            State::CYCLE_OK
                 );
             }
 
-
-            return ClientState::CYCLE_OK;
+            return CompleteProfiledRun(
+                ipIndex,
+                ClientState::CYCLE_OK
+            );
         }
 
+        // ========================================================
+        // INVALID STATE
+        // ========================================================
 
-        // --------------------------------------------------------
-        // STATO IMPOSSIBILE
-        // --------------------------------------------------------
+        LOG_EF(
+            "ModbusManager",
+            "Invalid client step"
+            " | IpIndex=%d"
+            " | Step=%d",
+            static_cast<int>(
+                ipIndex
+            ),
+            static_cast<int>(
+                step
+            )
+        );
+
+        step =
+            ClientStep::READ;
 
         if (net)
         {
             net->updateProtocolState(
                 modbusProtocolId,
-                DMNetworkManager::Protocol::State::ERROR
+                DMNetworkManager::
+                    Protocol::
+                        State::ERROR
             );
         }
 
-        return ClientState::ERROR;
+        return CompleteProfiledRun(
+            ipIndex,
+            ClientState::ERROR
+        );
     }
 
 

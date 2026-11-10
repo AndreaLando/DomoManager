@@ -4203,6 +4203,8 @@ private:
     bool TryInitialize(
         unsigned long now)
     {
+        (void)now;
+
         LOG_DF(
             "SOLAR",
             "[%u] init step 1: cleanup",
@@ -4301,14 +4303,91 @@ private:
 
         if (!beginResult)
         {
-            LOG_WF(
+            /*
+            * La diagnostica deve essere acquisita prima di chiamare
+            * DestroyCommunicationObjects(), perché tale funzione elimina
+            * l'istanza inverter.
+            */
+            const Diagnostics& diagnostics =
+                inverter->diagnostics();
+
+            const char* protocolName =
+                inverter->protocolName();
+
+            const char* modelName =
+                inverter->modelName();
+
+            LOG_EF(
                 "SOLAR",
-                "[%u] inverter begin failed "
-                "duration=%lu ms",
+                "[%u] inverter begin failed: "
+                "protocol=%s model=%s "
+                "transport=%u "
+                "host=%u.%u.%u.%u port=%u "
+                "tcpTimeout=%lu queryTimeout=%lu "
+                "duration=%lu "
+                "queries=%lu success=%lu failed=%lu "
+                "nak=%lu timeout=%lu transportErrors=%lu "
+                "invalid=%lu parseErrors=%lu",
                 static_cast<unsigned>(
                     orchestratorId
                 ),
-                beginDuration
+                protocolName
+                    ? protocolName
+                    : "?",
+                modelName
+                    ? modelName
+                    : "?",
+                static_cast<unsigned>(
+                    configuration->transport
+                ),
+                static_cast<unsigned>(
+                    configuration->tcp.host[0]
+                ),
+                static_cast<unsigned>(
+                    configuration->tcp.host[1]
+                ),
+                static_cast<unsigned>(
+                    configuration->tcp.host[2]
+                ),
+                static_cast<unsigned>(
+                    configuration->tcp.host[3]
+                ),
+                static_cast<unsigned>(
+                    configuration->tcp.port
+                ),
+                static_cast<unsigned long>(
+                    configuration->tcp.timeoutMs
+                ),
+                static_cast<unsigned long>(
+                    configuration->queryTimeoutMs
+                ),
+                static_cast<unsigned long>(
+                    beginDuration
+                ),
+                static_cast<unsigned long>(
+                    diagnostics.totalQueries
+                ),
+                static_cast<unsigned long>(
+                    diagnostics.successfulQueries
+                ),
+                static_cast<unsigned long>(
+                    diagnostics.failedQueries
+                ),
+                static_cast<unsigned long>(
+                    diagnostics.nakResponses
+                ),
+                static_cast<unsigned long>(
+                    diagnostics.timeoutResponses
+                ),
+                static_cast<unsigned long>(
+                    diagnostics.transportErrors
+                ),
+                static_cast<unsigned long>(
+                    diagnostics.invalidResponses
+                ),
+                static_cast<unsigned long>(
+                    diagnostics.parseErrors
+                )
             );
 
             DestroyCommunicationObjects();
@@ -4335,7 +4414,9 @@ private:
             static_cast<unsigned>(
                 orchestratorId
             ),
-            beginDuration
+            static_cast<unsigned long>(
+                beginDuration
+            )
         );
 
         /*
@@ -5442,7 +5523,7 @@ public:
     // ADD TASK
     // ============================================================
 
-    static void AddTask(
+    static bool AddTask(
         TaskFn fn,
         uint32_t intervalMs,
         bool enabled)
@@ -5454,7 +5535,7 @@ public:
                 "AddTask: callback nullo"
             );
 
-            return;
+            return false;
         }
 
         if (tasks.size() >= STORAGE_MAX_TASKS)
@@ -5466,7 +5547,7 @@ public:
                 static_cast<unsigned>(STORAGE_MAX_TASKS)
             );
 
-            return;
+            return false;
         }
 
         tasks.push_back({
@@ -5475,6 +5556,8 @@ public:
             0,
             enabled
         });
+
+        return true;
     }
 
     // ============================================================

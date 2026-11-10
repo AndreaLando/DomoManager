@@ -22,6 +22,7 @@
 #include "DMBuffers.hpp"
 #include "DMSignal.hpp"
 #include "DMBaseClassCore.hpp"
+#include "DMBaseClassUtils.hpp"
 #include "DMEthernet.hpp"
 #include "DMPlatformModbus.hpp"
 #include "DMPlatform.hpp"
@@ -502,262 +503,911 @@ public:
 
         return maxArea;
     }
+};
 
-    // =========================================================
-    // DIAGNOSTIC
-    // =========================================================
+// ============================================================================
+// DEVICE MANAGER DIAGNOSTIC
+/* Note:
+                    • Analisi centralizzata dello stato dispositivi
+                    • Classificazione READ_ONLY, WRITE_ONLY e READ_WRITE
+                    • Report dispositivi Modbus
+                    • Rilevamento indisponibilità globale device leggibili
 
-    class Diagnostic
+   ============================================================================ */
+
+
+class DeviceManagerDiagnostic
+{
+public:
+
+    // ========================================================================
+    // COMMUNICATION TYPE
+    // ========================================================================
+
+    enum class CommunicationType : uint8_t
     {
-    public:
-        static void ReportErrors(
-            const DeviceManager& manager)
+        NO_IO = 0,
+
+        READ_ONLY,
+
+        WRITE_ONLY,
+
+        READ_WRITE
+    };
+
+
+    // ========================================================================
+    // DEVICE STATE
+    // ========================================================================
+
+    enum class DeviceState : uint8_t
+    {
+        READ_OK = 0,
+
+        NOT_VERIFIED,
+
+        ERROR,
+
+        PARKED,
+
+        NO_IO
+    };
+
+
+    // ========================================================================
+    // GLOBAL STATE
+    // ========================================================================
+
+    enum class GlobalState : uint8_t
+    {
+        NOT_VERIFIABLE = 0,
+
+        OK,
+
+        DEGRADED,
+
+        ERROR
+    };
+
+
+    // ========================================================================
+    // HEALTH SUMMARY
+    // ========================================================================
+
+    struct HealthSummary
+    {
+        size_t totalDevices =
+            0;
+
+        size_t readableDevices =
+            0;
+
+        size_t readableOk =
+            0;
+
+        size_t readableErrors =
+            0;
+
+        size_t readableParked =
+            0;
+
+        size_t outputOnlyDevices =
+            0;
+
+        size_t outputOnlyNotVerified =
+            0;
+
+        size_t outputOnlyErrors =
+            0;
+
+        size_t outputOnlyParked =
+            0;
+
+        size_t noIoDevices =
+            0;
+
+        size_t totalErrors =
+            0;
+
+        size_t totalParked =
+            0;
+
+        uint64_t errorMask =
+            0;
+
+        uint64_t parkedMask =
+            0;
+
+        GlobalState globalState =
+            GlobalState::NOT_VERIFIABLE;
+
+        bool allReadableUnavailable =
+            false;
+
+        bool allConfiguredUnavailable =
+            false;
+    };
+
+
+    // ========================================================================
+    // DEVICE CAPABILITIES
+    // ========================================================================
+
+    static bool HasReadableChannels(
+        const GenericPrgDevice& device)
+    {
+        const int channelCount =
+            static_cast<int>(
+                device.GetChannelsSize()
+            );
+
+        for (
+            int channel = 0;
+            channel < channelCount;
+            ++channel
+        )
         {
-            const auto& devices =
-                manager.getDevices();
-
-            uint64_t errorMask =
-                0;
-
-            uint64_t parkedMask =
-                0;
-
-            size_t totalErrors =
-                0;
-
-            size_t totalParked =
-                0;
-
-            size_t totalOk =
-                0;
-
-
-            Serial.println(
-                "\n===== DEVICE ERROR REPORT ====="
-            );
-
-
-            for (size_t index = 0;
-                index < devices.size();
-                ++index)
-            {
-                const GenericPrgDevice& device =
-                    devices[index];
-
-                const Errors& error =
-                    device.GetError();
-
-                const DMIPAddress& ip =
-                    device.GetIp();
-
-
-                if (error.IsVisibleParked())
-                {
-                    ++totalParked;
-
-                    if (index < 64)
-                    {
-                        parkedMask |=
-                            1ULL << index;
-                    }
-
-
-                    PrintDevice(
-                        index,
-                        "PARKED",
-                        device,
-                        ip
-                    );
-
-                    continue;
-                }
-
-
-                if (error.IsVisibleError())
-                {
-                    ++totalErrors;
-
-                    if (index < 64)
-                    {
-                        errorMask |=
-                            1ULL << index;
-                    }
-
-
-                    PrintDevice(
-                        index,
-                        "ERROR",
-                        device,
-                        ip
-                    );
-
-                    continue;
-                }
-
-
-                ++totalOk;
-            }
-
-
-            Serial.println(
-                "\n____ SUMMARY ____"
-            );
-
-            Serial.print(
-                "Total devices: "
-            );
-
-            Serial.println(
-                devices.size()
-            );
-
-
-            Serial.print(
-                "OK: "
-            );
-
-            Serial.println(
-                totalOk
-            );
-
-
-            Serial.print(
-                "Errors: "
-            );
-
-            Serial.println(
-                totalErrors
-            );
-
-
-            Serial.print(
-                "Parked: "
-            );
-
-            Serial.println(
-                totalParked
-            );
-
-
-            PrintMask(
-                "Error bitmask",
-                errorMask
-            );
-
-            PrintMask(
-                "Parked bitmask",
-                parkedMask
-            );
-
-
-            if (totalErrors == 0 &&
-                totalParked == 0)
-            {
-                Serial.println(
-                    "Nessun device in errore o parked."
+            const auto& channelInfo =
+                device.GetChannelInfo(
+                    channel
                 );
+
+            if (
+                channelInfo.type ==
+                    GenericPrgDevice::DI ||
+                channelInfo.type ==
+                    GenericPrgDevice::AI
+            )
+            {
+                return true;
             }
-
-
-            Serial.println(
-                "===== END DEVICE ERROR REPORT =====\n"
-            );
         }
 
+        return false;
+    }
 
-    private:
-        static void PrintDevice(
-            size_t index,
-            const char* state,
-            const GenericPrgDevice& device,
-            const DMIPAddress& ip)
+
+    static bool HasWritableChannels(
+        const GenericPrgDevice& device)
+    {
+        const int channelCount =
+            static_cast<int>(
+                device.GetChannelsSize()
+            );
+
+        for (
+            int channel = 0;
+            channel < channelCount;
+            ++channel
+        )
         {
-            DMPlatform::SerialPrintf(
-                "Device %u -> %s"
-                " | %s"
-                " | Zona=%s"
-                " | Installazione=%s"
-                " | IP=%u.%u.%u.%u"
-                " | Addr=%u"
-                "\n",
-                static_cast<unsigned>(
-                    index
+            const auto& channelInfo =
+                device.GetChannelInfo(
+                    channel
+                );
+
+            if (
+                channelInfo.type ==
+                    GenericPrgDevice::DO ||
+                channelInfo.type ==
+                    GenericPrgDevice::AO
+            )
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+
+    // ========================================================================
+    // COMMUNICATION CLASSIFICATION
+    // ========================================================================
+
+    static CommunicationType GetCommunicationType(
+        const GenericPrgDevice& device)
+    {
+        const bool readable =
+            HasReadableChannels(
+                device
+            );
+
+        const bool writable =
+            HasWritableChannels(
+                device
+            );
+
+        if (
+            readable &&
+            writable
+        )
+        {
+            return
+                CommunicationType::READ_WRITE;
+        }
+
+        if (readable)
+        {
+            return
+                CommunicationType::READ_ONLY;
+        }
+
+        if (writable)
+        {
+            return
+                CommunicationType::WRITE_ONLY;
+        }
+
+        return
+            CommunicationType::NO_IO;
+    }
+
+
+    // ========================================================================
+    // DEVICE STATE CLASSIFICATION
+    // ========================================================================
+
+    static DeviceState GetDeviceState(
+        const GenericPrgDevice& device)
+    {
+        const Errors& error =
+            device.GetError();
+
+        if (error.IsVisibleParked())
+        {
+            return
+                DeviceState::PARKED;
+        }
+
+        if (error.IsVisibleError())
+        {
+            return
+                DeviceState::ERROR;
+        }
+
+        const CommunicationType type =
+            GetCommunicationType(
+                device
+            );
+
+        if (
+            type ==
+                CommunicationType::READ_ONLY ||
+            type ==
+                CommunicationType::READ_WRITE
+        )
+        {
+            return
+                DeviceState::READ_OK;
+        }
+
+        if (
+            type ==
+            CommunicationType::WRITE_ONLY
+        )
+        {
+            /*
+             * Un dispositivo solo uscita non può essere
+             * verificato dal polling READ.
+             */
+            return
+                DeviceState::NOT_VERIFIED;
+        }
+
+        return
+            DeviceState::NO_IO;
+    }
+
+
+    // ========================================================================
+    // ANALYZE
+    // ========================================================================
+
+    static HealthSummary Analyze(
+        const DeviceManager& manager)
+    {
+        HealthSummary summary;
+
+        const auto& devices =
+            manager.getDevices();
+
+        summary.totalDevices =
+            devices.size();
+
+        for (
+            size_t index = 0;
+            index < devices.size();
+            ++index
+        )
+        {
+            const GenericPrgDevice& device =
+                devices[index];
+
+            const CommunicationType type =
+                GetCommunicationType(
+                    device
+                );
+
+            const DeviceState state =
+                GetDeviceState(
+                    device
+                );
+
+            const bool readable =
+                type ==
+                    CommunicationType::READ_ONLY ||
+                type ==
+                    CommunicationType::READ_WRITE;
+
+            const bool outputOnly =
+                type ==
+                    CommunicationType::WRITE_ONLY;
+
+            // ------------------------------------------------------------
+            // GLOBAL ERROR COUNTERS
+            // ------------------------------------------------------------
+
+            if (
+                state ==
+                DeviceState::ERROR
+            )
+            {
+                ++summary.totalErrors;
+
+                if (index < 64)
+                {
+                    summary.errorMask |=
+                        1ULL << index;
+                }
+            }
+            else if (
+                state ==
+                DeviceState::PARKED
+            )
+            {
+                ++summary.totalParked;
+
+                if (index < 64)
+                {
+                    summary.parkedMask |=
+                        1ULL << index;
+                }
+            }
+
+            // ------------------------------------------------------------
+            // READABLE DEVICES
+            // ------------------------------------------------------------
+
+            if (readable)
+            {
+                ++summary.readableDevices;
+
+                if (
+                    state ==
+                    DeviceState::ERROR
+                )
+                {
+                    ++summary.readableErrors;
+                }
+                else if (
+                    state ==
+                    DeviceState::PARKED
+                )
+                {
+                    ++summary.readableParked;
+                }
+                else
+                {
+                    ++summary.readableOk;
+                }
+
+                continue;
+            }
+
+            // ------------------------------------------------------------
+            // OUTPUT-ONLY DEVICES
+            // ------------------------------------------------------------
+
+            if (outputOnly)
+            {
+                ++summary.outputOnlyDevices;
+
+                if (
+                    state ==
+                    DeviceState::ERROR
+                )
+                {
+                    ++summary.outputOnlyErrors;
+                }
+                else if (
+                    state ==
+                    DeviceState::PARKED
+                )
+                {
+                    ++summary.outputOnlyParked;
+                }
+                else
+                {
+                    ++summary.outputOnlyNotVerified;
+                }
+
+                continue;
+            }
+
+            // ------------------------------------------------------------
+            // NO-I/O DEVICE
+            // ------------------------------------------------------------
+
+            ++summary.noIoDevices;
+        }
+
+        // --------------------------------------------------------------------
+        // GLOBAL READABLE STATE
+        // --------------------------------------------------------------------
+
+        summary.allReadableUnavailable =
+            summary.readableDevices > 0 &&
+            (
+                summary.readableErrors +
+                summary.readableParked
+            ) ==
+            summary.readableDevices;
+
+        // --------------------------------------------------------------------
+        // GLOBAL CONFIGURED STATE
+        // --------------------------------------------------------------------
+
+        summary.allConfiguredUnavailable =
+            summary.totalDevices > 0 &&
+            (
+                summary.totalErrors +
+                summary.totalParked
+            ) ==
+            summary.totalDevices;
+
+        // --------------------------------------------------------------------
+        // GLOBAL STATE
+        // --------------------------------------------------------------------
+
+        if (
+            summary.readableDevices ==
+            0
+        )
+        {
+            summary.globalState =
+                GlobalState::NOT_VERIFIABLE;
+        }
+        else if (
+            summary.allReadableUnavailable
+        )
+        {
+            summary.globalState =
+                GlobalState::ERROR;
+        }
+        else if (
+            summary.readableErrors > 0 ||
+            summary.readableParked > 0
+        )
+        {
+            summary.globalState =
+                GlobalState::DEGRADED;
+        }
+        else
+        {
+            summary.globalState =
+                GlobalState::OK;
+        }
+
+        return summary;
+    }
+
+
+    // ========================================================================
+    // REPORT
+    // ========================================================================
+
+    static void Report(
+        const DeviceManager& manager)
+    {
+        const HealthSummary summary =
+            Analyze(
+                manager
+            );
+
+        const auto& devices =
+            manager.getDevices();
+
+        Serial.println();
+
+        Serial.println(
+            "===== DEVICE COMMUNICATION REPORT ====="
+        );
+
+        // --------------------------------------------------------------------
+        // DEVICE DETAILS
+        // --------------------------------------------------------------------
+
+        for (
+            size_t index = 0;
+            index < devices.size();
+            ++index
+        )
+        {
+            const GenericPrgDevice& device =
+                devices[index];
+
+            PrintDevice(
+                index,
+                device,
+                GetCommunicationType(
+                    device
                 ),
-                state
-                    ? state
-                    : "?",
-                device.GetName(),
-                device.GetZone(),
-                device.GetInstallationLocation(),
-                static_cast<unsigned>(
-                    ip[0]
-                ),
-                static_cast<unsigned>(
-                    ip[1]
-                ),
-                static_cast<unsigned>(
-                    ip[2]
-                ),
-                static_cast<unsigned>(
-                    ip[3]
-                ),
-                static_cast<unsigned>(
-                    device.GetDeviceAddress()
+                GetDeviceState(
+                    device
                 )
             );
         }
 
+        // --------------------------------------------------------------------
+        // SUMMARY
+        // --------------------------------------------------------------------
 
-        static void PrintMask(
-            const char* label,
-            uint64_t mask)
+        Serial.println();
+
+        Serial.println(
+            "____ COMMUNICATION SUMMARY ____"
+        );
+
+        PrintCount(
+            "Configured devices",
+            summary.totalDevices
+        );
+
+        Serial.println();
+
+        PrintCount(
+            "Readable devices",
+            summary.readableDevices
+        );
+
+        PrintCount(
+            "  Read OK",
+            summary.readableOk
+        );
+
+        PrintCount(
+            "  Read ERROR",
+            summary.readableErrors
+        );
+
+        PrintCount(
+            "  Read PARKED",
+            summary.readableParked
+        );
+
+        Serial.println();
+
+        PrintCount(
+            "Output-only devices",
+            summary.outputOnlyDevices
+        );
+
+        PrintCount(
+            "  Not verified",
+            summary.outputOnlyNotVerified
+        );
+
+        PrintCount(
+            "  Output ERROR",
+            summary.outputOnlyErrors
+        );
+
+        PrintCount(
+            "  Output PARKED",
+            summary.outputOnlyParked
+        );
+
+        if (
+            summary.noIoDevices >
+            0
+        )
         {
-            Serial.print(
-                label
-                    ? label
-                    : "Mask"
+            Serial.println();
+
+            PrintCount(
+                "Devices without I/O channels",
+                summary.noIoDevices
             );
-
-            Serial.print(
-                " = 0x"
-            );
-
-
-            const uint32_t high =
-                static_cast<uint32_t>(
-                    mask >> 32
-                );
-
-            const uint32_t low =
-                static_cast<uint32_t>(
-                    mask &
-                    0xFFFFFFFFULL
-                );
-
-
-            if (high != 0)
-            {
-                DMPlatform::SerialPrintf(
-                    "%08lX%08lX\n",
-                    static_cast<unsigned long>(
-                        high
-                    ),
-                    static_cast<unsigned long>(
-                        low
-                    )
-                );
-            }
-            else
-            {
-                DMPlatform::SerialPrintf(
-                    "%lX\n",
-                    static_cast<unsigned long>(
-                        low
-                    )
-                );
-            }
         }
-    };
+
+        Serial.println();
+
+        PrintCount(
+            "Total visible errors",
+            summary.totalErrors
+        );
+
+        PrintCount(
+            "Total parked",
+            summary.totalParked
+        );
+
+        // --------------------------------------------------------------------
+        // GLOBAL STATE
+        // --------------------------------------------------------------------
+
+        Serial.println();
+
+        Serial.print(
+            "Global Modbus status: "
+        );
+
+        Serial.println(
+            GlobalStateToString(
+                summary.globalState
+            )
+        );
+
+        if (
+            summary.allReadableUnavailable
+        )
+        {
+            Serial.println(
+                "CRITICAL: all readable Modbus devices "
+                "are unavailable."
+            );
+        }
+
+        Serial.print(
+            "All readable devices unavailable: "
+        );
+
+        Serial.println(
+            summary.allReadableUnavailable
+                ? "YES"
+                : "NO"
+        );
+
+        Serial.print(
+            "All configured devices unavailable: "
+        );
+
+        Serial.println(
+            summary.allConfiguredUnavailable
+                ? "YES"
+                : "NO"
+        );
+
+        Serial.println();
+
+        PrintMask(
+            "Error bitmask",
+            summary.errorMask
+        );
+
+        PrintMask(
+            "Parked bitmask",
+            summary.parkedMask
+        );
+
+        Serial.println(
+            "===== END DEVICE COMMUNICATION REPORT ====="
+        );
+
+        Serial.println();
+    }
+
+
+    // ========================================================================
+    // STRING HELPERS
+    // ========================================================================
+
+    static const char* CommunicationTypeToString(
+        CommunicationType type)
+    {
+        switch (type)
+        {
+            case CommunicationType::READ_ONLY:
+                return "READ_ONLY";
+
+            case CommunicationType::WRITE_ONLY:
+                return "WRITE_ONLY";
+
+            case CommunicationType::READ_WRITE:
+                return "READ_WRITE";
+
+            case CommunicationType::NO_IO:
+            default:
+                return "NO_IO";
+        }
+    }
+
+
+    static const char* DeviceStateToString(
+        DeviceState state)
+    {
+        switch (state)
+        {
+            case DeviceState::READ_OK:
+                return "READ_OK";
+
+            case DeviceState::NOT_VERIFIED:
+                return "NOT_VERIFIED";
+
+            case DeviceState::ERROR:
+                return "ERROR";
+
+            case DeviceState::PARKED:
+                return "PARKED";
+
+            case DeviceState::NO_IO:
+            default:
+                return "NO_IO";
+        }
+    }
+
+
+    static const char* GlobalStateToString(
+        GlobalState state)
+    {
+        switch (state)
+        {
+            case GlobalState::OK:
+                return "OK";
+
+            case GlobalState::DEGRADED:
+                return "DEGRADED";
+
+            case GlobalState::ERROR:
+                return "ERROR";
+
+            case GlobalState::NOT_VERIFIABLE:
+            default:
+                return "NOT_VERIFIABLE";
+        }
+    }
+
+
+private:
+
+    // ========================================================================
+    // PRINT DEVICE
+    // ========================================================================
+
+    static void PrintDevice(
+        size_t index,
+        const GenericPrgDevice& device,
+        CommunicationType type,
+        DeviceState state)
+    {
+        const DMIPAddress& ip =
+            device.GetIp();
+
+        DMPlatform::SerialPrintf(
+            "Device %u"
+            " | State=%s"
+            " | Type=%s"
+            " | Name=%s"
+            " | Zone=%s"
+            " | Installation=%s"
+            " | IP=%u.%u.%u.%u"
+            " | Address=%u"
+            "\n",
+            static_cast<unsigned>(
+                index
+            ),
+            DeviceStateToString(
+                state
+            ),
+            CommunicationTypeToString(
+                type
+            ),
+            device.GetName()
+                ? device.GetName()
+                : "",
+            device.GetZone()
+                ? device.GetZone()
+                : "",
+            device.GetInstallationLocation()
+                ? device.GetInstallationLocation()
+                : "",
+            static_cast<unsigned>(
+                ip[0]
+            ),
+            static_cast<unsigned>(
+                ip[1]
+            ),
+            static_cast<unsigned>(
+                ip[2]
+            ),
+            static_cast<unsigned>(
+                ip[3]
+            ),
+            static_cast<unsigned>(
+                device.GetDeviceAddress()
+            )
+        );
+    }
+
+
+    // ========================================================================
+    // PRINT COUNT
+    // ========================================================================
+
+    static void PrintCount(
+        const char* label,
+        size_t value)
+    {
+        Serial.print(
+            label
+                ? label
+                : "Count"
+        );
+
+        Serial.print(
+            ": "
+        );
+
+        Serial.println(
+            static_cast<unsigned long>(
+                value
+            )
+        );
+    }
+
+
+    // ========================================================================
+    // PRINT MASK
+    // ========================================================================
+
+    static void PrintMask(
+        const char* label,
+        uint64_t mask)
+    {
+        Serial.print(
+            label
+                ? label
+                : "Mask"
+        );
+
+        Serial.print(
+            " = 0x"
+        );
+
+        const uint32_t high =
+            static_cast<uint32_t>(
+                mask >> 32
+            );
+
+        const uint32_t low =
+            static_cast<uint32_t>(
+                mask &
+                0xFFFFFFFFULL
+            );
+
+        if (high != 0)
+        {
+            DMPlatform::SerialPrintf(
+                "%08lX%08lX\n",
+                static_cast<unsigned long>(
+                    high
+                ),
+                static_cast<unsigned long>(
+                    low
+                )
+            );
+        }
+        else
+        {
+            DMPlatform::SerialPrintf(
+                "%lX\n",
+                static_cast<unsigned long>(
+                    low
+                )
+            );
+        }
+    }
 };
 
 class ToggleManager {

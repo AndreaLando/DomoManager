@@ -3041,7 +3041,7 @@ private:
                     area;
 
                 relation.name =
-                    def.name;
+                    def.name.c_str();
 
                 relation.aee =
                     variable;

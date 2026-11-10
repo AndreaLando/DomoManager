@@ -1737,17 +1737,55 @@ public:
         }
     }
 
-    void Update(ModbusTCPClient& client, unsigned long now) {
-        const unsigned long start_us = micros();
-        const auto state = RunModbusCycle(client, now);
-        leds.update(now);
+    void Update(
+        ModbusTCPClient& client,
+        unsigned long now)
+    {
+        const unsigned long startUs =
+            micros();
 
-        if (state.executed) {
-            const unsigned long exec_us = micros() - start_us;
-            const unsigned long exec_ms = (exec_us + 999UL) / 1000UL;
-            UpdateTiming(timings.updateCycle, exec_ms,
-                         config.watchdog.spikeThresholdFactor_fp);
+        const ModbusCycleResult cycleResult =
+            RunModbusCycle(
+                client,
+                now
+            );
+
+        leds.update(
+            now
+        );
+
+        if (cycleResult.executed)
+        {
+            const unsigned long elapsedUs =
+                micros() -
+                startUs;
+
+            const unsigned long elapsedMs =
+                (
+                    elapsedUs +
+                    999UL
+                ) /
+                1000UL;
+
+            UpdateTiming(
+                timings.updateCycle,
+                elapsedMs,
+                config
+                    .watchdog
+                    .spikeThresholdFactor_fp
+            );
         }
+
+        /*
+        * Report esterno al percorso interno di RunClient().
+        * Nessun log viene prodotto durante READ/WRITE.
+        */
+        logic
+            .getModbus()
+            .reportDeviceTimingIfDue(
+                now,
+                30000UL
+            );
     }
 
     void forceInternalEvent(int area, long value) {

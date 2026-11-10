@@ -699,16 +699,187 @@ private:
         }
     }
 
-    void OnDeviceErrorStateChanged(GenericPrgDevice* dev) {
-        (void)dev;
-        int totalErrors = 0;
-        for (auto& d : deviceManager.getDevices())
-            if (d.GetError().IsVisibleError() || d.GetError().IsVisibleParked())
-                ++totalErrors;
+    void OnDeviceErrorStateChanged(
+        GenericPrgDevice* dev)
+    {
+        if (!dev)
+        {
+            LOG_EF(
+                "DomoManager",
+                "Device error callback received with null device"
+            );
 
-        m_leds.set(LedController::FOUR, totalErrors > 0);
-        runtime.forceInternalEvent(DeviceManager::AREA_SYSTEM_ERRORS, totalErrors);
-        LOG_DF("DomoManager", "Device error state changed → totalErrors=%d", totalErrors);
+            return;
+        }
+
+        // ========================================================================
+        // MODBUS CONFIGURATION
+        // ========================================================================
+
+        const auto& modbusConfig =
+            config.modbus;
+
+        // ========================================================================
+        // ANALYZE CURRENT DEVICE HEALTH
+        // ========================================================================
+
+        const DeviceManagerDiagnostic::
+            HealthSummary summary =
+                DeviceManagerDiagnostic::Analyze(
+                    deviceManager
+                );
+
+        const int totalUnavailable =
+            static_cast<int>(
+                summary.totalErrors +
+                summary.totalParked
+            );
+
+        // ========================================================================
+        // ERROR LED
+        // ========================================================================
+
+        m_leds.set(
+            LedController::FOUR,
+            totalUnavailable > 0
+        );
+
+        // ========================================================================
+        // SYSTEM ERROR AREA
+        //
+        // Mantiene la semantica esistente:
+        // numero totale di device ERROR o PARKED.
+        // ========================================================================
+
+        runtime.forceInternalEvent(
+            DeviceManager::
+                AREA_SYSTEM_ERRORS,
+            totalUnavailable
+        );
+
+        // ========================================================================
+        // GLOBAL READABLE MODBUS HEALTH
+        //
+        // Il log viene prodotto solamente quando cambia lo stato globale:
+        //
+        //   almeno un device leggibile disponibile
+        //       <->
+        //   tutti i device leggibili indisponibili
+        // ========================================================================
+
+        static bool initialized =
+            false;
+
+        static bool previousAllReadableUnavailable =
+            false;
+
+        if (
+            !initialized ||
+            summary.allReadableUnavailable !=
+                previousAllReadableUnavailable
+        )
+        {
+            initialized =
+                true;
+
+            previousAllReadableUnavailable =
+                summary.allReadableUnavailable;
+
+            if (
+                summary.allReadableUnavailable
+            )
+            {
+                LOG_EF(
+                    "DomoManager",
+                    "GLOBAL MODBUS ERROR"
+                    " | All readable devices unavailable"
+                    " | Readable=%u"
+                    " | Errors=%u"
+                    " | Parked=%u"
+                    " | OutputOnlyNotVerified=%u"
+                    " | TotalUnavailable=%d",
+                    static_cast<unsigned>(
+                        summary.readableDevices
+                    ),
+                    static_cast<unsigned>(
+                        summary.readableErrors
+                    ),
+                    static_cast<unsigned>(
+                        summary.readableParked
+                    ),
+                    static_cast<unsigned>(
+                        summary.outputOnlyNotVerified
+                    ),
+                    totalUnavailable
+                );
+            }
+            else
+            {
+                LOG_WF(
+                    "DomoManager",
+                    "GLOBAL MODBUS STATUS"
+                    " | State=%s"
+                    " | Readable=%u"
+                    " | ReadOk=%u"
+                    " | Errors=%u"
+                    " | Parked=%u"
+                    " | OutputOnlyNotVerified=%u",
+                    DeviceManagerDiagnostic::
+                        GlobalStateToString(
+                            summary.globalState
+                        ),
+                    static_cast<unsigned>(
+                        summary.readableDevices
+                    ),
+                    static_cast<unsigned>(
+                        summary.readableOk
+                    ),
+                    static_cast<unsigned>(
+                        summary.readableErrors
+                    ),
+                    static_cast<unsigned>(
+                        summary.readableParked
+                    ),
+                    static_cast<unsigned>(
+                        summary.outputOnlyNotVerified
+                    )
+                );
+            }
+        }
+
+        if (!modbusConfig.reporting)
+        {
+            return;
+        }
+
+        LOG_WF(
+            "DomoManager",
+            "Device error state changed"
+            " | Device=%s"
+            " | VisibleError=%u"
+            " | VisibleParked=%u"
+            " | TotalErrors=%u"
+            " | TotalParked=%u",
+            dev->GetName()
+                ? dev->GetName()
+                : "",
+            dev
+                ->GetError()
+                .IsVisibleError()
+                    ? 1U
+                    : 0U,
+            dev
+                ->GetError()
+                .IsVisibleParked()
+                    ? 1U
+                    : 0U,
+            static_cast<unsigned>(
+                summary.totalErrors
+            ),
+            static_cast<unsigned>(
+                summary.totalParked
+            )
+        );
     }
 
 public:
@@ -951,6 +1122,33 @@ public:
                 LOG_IF("DumpDevicesByIP", "   devIdx=%d", devIdx);
         }
         LOG_IF("DumpDevicesByIP", "=== END DUMP ===");
+    }
+
+    // ========================================================================
+    // DEVICE COMMUNICATION HEALTH
+    // ========================================================================
+
+    DeviceManagerDiagnostic::HealthSummary
+    getDeviceHealthSummary() const
+    {
+        return
+            DeviceManagerDiagnostic::Analyze(
+                deviceManager
+            );
+    }
+
+    bool areAllReadableDevicesUnavailable() const
+    {
+        return
+            getDeviceHealthSummary()
+                .allReadableUnavailable;
+    }
+
+    bool areAllConfiguredDevicesUnavailable() const
+    {
+        return
+            getDeviceHealthSummary()
+                .allConfiguredUnavailable;
     }
 };
 

@@ -1,5 +1,5 @@
-#ifndef DMBridge_HPP
-#define DMBridge_HPP
+#ifndef DMBRIDGE_HPP
+#define DMBRIDGE_HPP
 
 /* ============================================================================
    SVILUPPATORE
@@ -7,140 +7,366 @@
 
    Nome:            Andrea Lando
    Contatto:        mail@domo-manager.it
-  
-   Versione modulo: 1.0.0
-   Ultima modifica: 2026‑03‑24
+
+   Versione modulo: 1.1.0
+   Ultima modifica: 2026-11-08
+
    Note:
-                    • Nessuna
+                    - Stato Bridge reso per istanza.
+                    - Snapshot iniziale riarmabile.
+                    - Cache schema per istanza.
+                    - Resend AEE con stesso payload e stesso sequence.
+                    - Gestione ACK duplicati schema.
 
    ============================================================================ */
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
+#include <functional>
+#include <vector>
 
 #include "DMTransport.hpp"
-
+#include "DMAEECore.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
 
-class DMBridge;   // forward
-class BridgeProtocol {
+
+class DMBridge;
+
+
+// ============================================================
+// BRIDGE PROTOCOL
+// ============================================================
+
+class BridgeProtocol
+{
 public:
     static bool handleIncoming(
-        JsonDocument& doc,
-        AEERegistry& reg,
+        JsonDocument& document,
+        AEERegistry& registry,
         ICommandTransport& transport,
-        AEEProtocol& proto,
+        AEEProtocol& protocol,
         DMBridge* parent
     );
 };
 
 
 // ============================================================
-//  PEER MONITOR
+// PEER MONITOR
 // ============================================================
-class BridgePeerMonitor {
+
+class BridgePeerMonitor
+{
 private:
     unsigned long lastActivity = 0;
     bool online = false;
 
 public:
-    void onPacket(unsigned long now) {
+    void reset()
+    {
+        lastActivity = 0;
+        online = false;
+    }
+
+    void onPacket(
+        unsigned long now)
+    {
         lastActivity = now;
-        if (!online) {
+
+        if (!online)
+        {
             online = true;
-            LOG_IF("BRIDGE", "Peer ONLINE");
+
+            LOG_IF(
+                "BRIDGE",
+                "Peer ONLINE"
+            );
         }
     }
 
-    void checkOffline(unsigned long now, unsigned long timeoutMs = 120000) {
-        if (online && (now - lastActivity > timeoutMs)) {
+    void checkOffline(
+        unsigned long now,
+        unsigned long timeoutMs = 120000UL)
+    {
+        if (
+            online &&
+            now - lastActivity > timeoutMs
+        )
+        {
             online = false;
-            LOG_IF("BRIDGE", "Peer OFFLINE");
+
+            LOG_IF(
+                "BRIDGE",
+                "Peer OFFLINE"
+            );
         }
     }
 
-    bool isOnline() const { return online; }
+    bool isOnline() const
+    {
+        return online;
+    }
+
+    unsigned long getLastActivity() const
+    {
+        return lastActivity;
+    }
 };
 
-// ============================================================
-//  ACK ENGINE
-// ============================================================
-class AEEProtocolEngine {
-public:
-    using SendCallback = std::function<void(const String&)>;
 
-    struct AckState {
+// ============================================================
+// AEE PROTOCOL ENGINE
+// ============================================================
+
+class AEEProtocolEngine
+{
+public:
+    using SendCallback =
+        std::function<void(const String&)>;
+
+    // ========================================================
+    // ACK STATE
+    // ========================================================
+
+    struct AckState
+    {
         uint32_t seqCounter = 0;
+
         uint32_t lastSentSeq = 0;
         uint32_t lastAckSeq = 0;
+
         unsigned long lastSendTime = 0;
 
-        bool ackOk() const { return lastAckSeq == lastSentSeq; }
-        bool ackTimeout(unsigned long now, unsigned long timeoutMs) const {
-            return !ackOk() && (now - lastSendTime > timeoutMs);
+        /*
+         * Il payload deve essere conservato dopo l'invio.
+         *
+         * In caso di timeout deve essere ritrasmesso esattamente
+         * lo stesso contenuto e con lo stesso seq.
+         */
+        String pendingPayload;
+
+        void reset()
+        {
+            seqCounter = 0;
+
+            lastSentSeq = 0;
+            lastAckSeq = 0;
+
+            lastSendTime = 0;
+
+            pendingPayload = "";
         }
-        uint32_t nextSeq() { return ++seqCounter; }
+
+        uint32_t nextSeq()
+        {
+            return ++seqCounter;
+        }
+
+        bool hasPendingPayload() const
+        {
+            return pendingPayload.length() > 0;
+        }
+
+        bool ackOk() const
+        {
+            if (!hasPendingPayload())
+                return true;
+
+            return
+                lastAckSeq ==
+                lastSentSeq;
+        }
+
+        bool waitingAck() const
+        {
+            return
+                hasPendingPayload() &&
+                !ackOk();
+        }
+
+        bool ackTimeout(
+            unsigned long now,
+            unsigned long timeoutMs) const
+        {
+            return
+                waitingAck() &&
+                now - lastSendTime >
+                    timeoutMs;
+        }
+
+        void commitAck(
+            uint32_t sequence)
+        {
+            lastAckSeq = sequence;
+
+            if (
+                lastAckSeq ==
+                lastSentSeq
+            )
+            {
+                pendingPayload = "";
+            }
+        }
     };
 
-    
-    static void send(
-        AEERegistry& reg,
+    // ========================================================
+    // NEW SEND
+    // ========================================================
+
+    static bool send(
+        AEERegistry& registry,
         AckState& state,
-        AEEProtocol& proto,
-        SendCallback sendFn)
+        AEEProtocol& protocol,
+        const SendCallback& sendFunction)
     {
-        const uint32_t seq = state.nextSeq();
+        /*
+         * Non generare un secondo pacchetto mentre il precedente
+         * è ancora in attesa di ACK.
+         */
+        if (state.waitingAck())
+            return false;
 
-        String out = proto.serializeChangedJSON(reg, seq);
+        const uint32_t sequence =
+            state.nextSeq();
 
-        if (out.length() == 0)
-            return;
+        String output =
+            protocol.serializeChangedJSON(
+                registry,
+                sequence
+            );
+
+        if (output.length() == 0)
+        {
+            LOG_WF(
+                "BRIDGE::AEE::TX",
+                "Payload AEE vuoto: seq=%lu pending=%u",
+                static_cast<unsigned long>(
+                    sequence
+                ),
+                registry.hasChanges()
+                    ? 1U
+                    : 0U
+            );
+
+            return false;
+        }
 
         LOG_IF(
             "BRIDGE::AEE::TX",
             "Sending AEE update: %s",
-            out.c_str()
+            output.c_str()
         );
 
-        sendFn(out);
+        /*
+         * Memorizza prima di inviare.
+         *
+         * In questo modo, anche se subito dopo cambia il registry,
+         * il resend rimane deterministico.
+         */
+        state.pendingPayload =
+            output;
 
-        state.lastSentSeq = seq;
-        state.lastSendTime = millis();
+        state.lastSentSeq =
+            sequence;
 
-        reg.clearAllChanged();
+        state.lastSendTime =
+            millis();
+
+        sendFunction(
+            state.pendingPayload
+        );
+
+        /*
+         * Il payload è ora posseduto da AckState.
+         * Il registry può quindi essere pulito.
+         */
+        registry.clearAllChanged();
+
+        return true;
     }
+
+    // ========================================================
+    // ACK RECEIVE
+    // ========================================================
 
     static void onPacket(
-        JsonDocument& doc,
+        JsonDocument& document,
         AckState& state)
     {
-        if (doc.containsKey("ack"))
-            state.lastAckSeq = doc["ack"];
+        if (!document.containsKey("ack"))
+            return;
+
+        const uint32_t sequence =
+            document["ack"];
+
+        state.commitAck(
+            sequence
+        );
     }
 
-    static void checkResend(AEERegistry& reg,
-                        AckState& state,
-                        unsigned long now,
-                        AEEProtocol& proto,
-                        SendCallback sendFn)
+    // ========================================================
+    // RESEND
+    // ========================================================
 
+    static bool checkResend(
+        AckState& state,
+        unsigned long now,
+        const SendCallback& sendFunction)
     {
-        const unsigned long RESEND_TIMEOUT = 120;
-        const unsigned long MIN_INTERVAL   = 40;
+        static constexpr unsigned long
+            RESEND_TIMEOUT = 120UL;
 
-        if (state.ackTimeout(now, RESEND_TIMEOUT) &&
-            (now - state.lastSendTime > MIN_INTERVAL))
+        static constexpr unsigned long
+            MIN_INTERVAL = 40UL;
+
+        if (!state.hasPendingPayload())
+            return false;
+
+        if (
+            !state.ackTimeout(
+                now,
+                RESEND_TIMEOUT
+            )
+        )
         {
-            send(reg, state, proto, sendFn);
+            return false;
         }
+
+        if (
+            now - state.lastSendTime <
+            MIN_INTERVAL
+        )
+        {
+            return false;
+        }
+
+        LOG_WF(
+            "BRIDGE::AEE::TX",
+            "ACK timeout seq=%lu -> resend stesso payload",
+            static_cast<unsigned long>(
+                state.lastSentSeq
+            )
+        );
+
+        sendFunction(
+            state.pendingPayload
+        );
+
+        state.lastSendTime =
+            now;
+
+        return true;
     }
 };
 
+
 // ============================================================
-//  STATE MACHINE
+// BRIDGE STATE
 // ============================================================
-enum class BridgeState {
+
+enum class BridgeState
+{
     DISCONNECTED,
     CONNECTING,
     REQUEST_SCHEMA,
@@ -150,855 +376,1967 @@ enum class BridgeState {
     DATA_EXCHANGE
 };
 
-// ============================================================
-//  DMBridge (COMMON + MASTER)
-// ============================================================
-class DMBridge {   
-protected:
-    AEEProtocol aee;   // istanza
-    ICommandTransport* transport = nullptr;
-    AEERegistry* reg = nullptr;
 
-    bool isMaster = true;   // MASTER by default
-    BridgeState state = BridgeState::DISCONNECTED;
+// ============================================================
+// DMBridge
+// ============================================================
+
+class DMBridge
+{
+protected:
+    // ========================================================
+    // SESSION STATE
+    // ========================================================
+
+    struct SessionState
+    {
+        bool helloSent = false;
+        unsigned long helloTime = 0;
+
+        bool schemaRequested = false;
+        bool schemaReceived = false;
+
+        bool initialSnapshotPending = false;
+        bool initialSnapshotSent = false;
+
+        void reset()
+        {
+            helloSent = false;
+            helloTime = 0;
+
+            schemaRequested = false;
+            schemaReceived = false;
+
+            initialSnapshotPending = false;
+            initialSnapshotSent = false;
+        }
+
+        void armInitialSnapshot()
+        {
+            schemaRequested = true;
+
+            initialSnapshotPending = true;
+            initialSnapshotSent = false;
+        }
+
+        void completeInitialSnapshot()
+        {
+            schemaRequested = false;
+
+            initialSnapshotPending = false;
+            initialSnapshotSent = true;
+        }
+
+        void resetSnapshot()
+        {
+            initialSnapshotPending = false;
+            initialSnapshotSent = false;
+        }
+    };
+
+
+    // ========================================================
+    // TIMING STATE
+    // ========================================================
+
+    struct TimingState
+    {
+        unsigned long lastOnline = 0;
+        unsigned long lastPing = 0;
+        unsigned long lastAEEtx = 0;
+        unsigned long lastSchemaRequest = 0;
+        unsigned long lastSchemaTxLog = 0;
+
+        void reset()
+        {
+            lastOnline = 0;
+            lastPing = 0;
+            lastAEEtx = 0;
+            lastSchemaRequest = 0;
+            lastSchemaTxLog = 0;
+        }
+    };
+
+
+    // ========================================================
+    // CORE
+    // ========================================================
+
+    AEEProtocol aee;
+
+    ICommandTransport* transport =
+        nullptr;
+
+    AEERegistry* reg =
+        nullptr;
+
+    bool isMaster =
+        true;
+
+    BridgeState state =
+        BridgeState::DISCONNECTED;
 
     BridgePeerMonitor peer;
+
     AEEProtocolEngine::AckState ack;
 
-    // --- LOG RATE LIMIT ---
-    unsigned long lastRxLog = 0;
-    bool lastPeerOnline = false;
+    SessionState session;
+    TimingState timing;
 
-    bool helloSent = false;
-    unsigned long helloTime = 0;
-    static constexpr unsigned long HELLO_TIMEOUT = 8000;
-    bool schemaRequested = false;
-    bool schemaReceived  = false;
+    bool lastPeerOnline =
+        false;
 
-    IBridgePacer* pacer = nullptr;
+    IBridgePacer* pacer =
+        nullptr;
 
-    // ============================================================
-    //  INTERNAL CLASS: SCHEMA MULTIFRAME ENGINE
-    // ============================================================
-    class SchemaMultiframe {
+    static constexpr unsigned long
+        HELLO_TIMEOUT = 8000UL;
+
+
+    // ========================================================
+    // SCHEMA MULTIFRAME
+    // ========================================================
+
+    class SchemaMultiframe
+    {
     public:
-        DMBridge* parent = nullptr;
-        ICommandTransport* transport = nullptr;
+        // ====================================================
+        // TX STATE
+        // ====================================================
 
-        // TX (MASTER)
-        struct TxState {
+        struct TxState
+        {
             bool active = false;
 
-            // indice del frame corrente
-            int index = 0;
+            size_t index = 0;
 
-            // frame per cui stiamo aspettando ACK (-1 = nessuno)
             int waitingAckFor = -1;
 
-            // timestamp ultimo invio
             unsigned long lastSend = 0;
             unsigned long startTime = 0;
 
-            // vettore dei frame JSON pronti da inviare
             std::vector<String> frames;
 
-            void reset() {
+            void reset()
+            {
                 active = false;
+
                 index = 0;
+
                 waitingAckFor = -1;
+
                 lastSend = 0;
                 startTime = 0;
+
                 frames.clear();
             }
-        } tx;
+        };
 
 
-        // RX (SLAVE)
-        struct RxState {
+        // ====================================================
+        // RX STATE
+        // ====================================================
+
+        struct RxState
+        {
             bool active = false;
+
             uint16_t expected = 0;
             uint16_t received = 0;
 
             char buffer[8192];
+
             uint16_t offset = 0;
 
             unsigned long startTs = 0;
 
-            void reset() {
+            void reset()
+            {
                 active = false;
+
                 expected = 0;
                 received = 0;
-                offset = 0;
-                startTs = 0;
-                buffer[0] = 0;
-            }
-        } rx;
 
-        bool isTxActive() const {
+                offset = 0;
+
+                startTs = 0;
+
+                buffer[0] = '\0';
+            }
+        };
+
+
+        DMBridge* parent =
+            nullptr;
+
+        ICommandTransport* transport =
+            nullptr;
+
+        TxState tx;
+        RxState rx;
+
+
+        // ====================================================
+        // INIT
+        // ====================================================
+
+        void init(
+            DMBridge* bridge,
+            ICommandTransport* commandTransport)
+        {
+            parent =
+                bridge;
+
+            transport =
+                commandTransport;
+        }
+
+
+        // ====================================================
+        // STATUS
+        // ====================================================
+
+        bool isTxActive() const
+        {
             return tx.active;
         }
 
-        bool isRxActive() const {
+        bool isRxActive() const
+        {
             return rx.active;
         }
 
-        void restartTx(const String& fullSchema) {
+
+        // ====================================================
+        // RESET
+        // ====================================================
+
+        void reset()
+        {
             tx.reset();
-            startTx(fullSchema);
+            rx.reset();
         }
 
-        void abortTx() {
-            if (tx.active) {
-                LOG_WF("BRIDGE::SCHEMA", "Abort TX multiframe → reset");
-                tx.reset();
-            }
-        }
+        void abortTx()
+        {
+            if (!tx.active)
+                return;
 
-        // ------------------------------------------------------------
-        // INIT
-        // ------------------------------------------------------------
-        void init(DMBridge* p, ICommandTransport* t) {
-            parent = p;
-            transport = t;
-        }
+            LOG_WF(
+                "BRIDGE::SCHEMA",
+                "Abort TX multiframe -> reset"
+            );
 
-        // ------------------------------------------------------------
-        // MASTER: avvia invio schema multiframe
-        // ------------------------------------------------------------
-        void startTx(const String& fullSchema) {
-            const size_t MAX_CHUNK = 160;
-            const unsigned long now = millis();
-
-            // reset stato TX
             tx.reset();
-            tx.frames.clear();
-            tx.index = 0;
+        }
+
+        void restartTx(
+            const String& fullSchema)
+        {
+            tx.reset();
+
+            startTx(
+                fullSchema
+            );
+        }
+
+
+        // ====================================================
+        // SEND SCHEMA ACK
+        // ====================================================
+
+        void sendAck(
+            int part)
+        {
+            if (!transport)
+                return;
+
+            StaticJsonDocument<64> document;
+
+            document["schema_ack"] =
+                part;
+
+            String output;
+
+            serializeJson(
+                document,
+                output
+            );
+
+            transport->send(
+                output
+            );
+        }
+
+
+        // ====================================================
+        // START TX
+        // ====================================================
+
+        void startTx(
+            const String& fullSchema)
+        {
+            static constexpr size_t
+                MAX_CHUNK = 160;
+
+            const unsigned long now =
+                millis();
+
+            tx.reset();
+
             tx.active = true;
-
-            // Timestamp dell'inizio della TX completa.
             tx.startTime = now;
 
-            size_t total = (fullSchema.length() + MAX_CHUNK - 1) / MAX_CHUNK;
-            tx.frames.reserve(total);   // 🔥 evita realloc
+            const size_t total =
+                (
+                    fullSchema.length() +
+                    MAX_CHUNK -
+                    1
+                ) /
+                MAX_CHUNK;
 
-            for (size_t i = 0; i < total; i++) {
-                size_t start = i * MAX_CHUNK;
-                size_t len   = min(MAX_CHUNK, fullSchema.length() - start);
+            tx.frames.reserve(
+                total
+            );
 
-                // 🔥 buffer statico → zero allocazioni
-                char chunkBuf[MAX_CHUNK + 1];
-                memcpy(chunkBuf, fullSchema.c_str() + start, len);
-                chunkBuf[len] = 0;
+            for (
+                size_t index = 0;
+                index < total;
+                ++index
+            )
+            {
+                const size_t start =
+                    index *
+                    MAX_CHUNK;
 
-                StaticJsonDocument<256> doc;
-                doc["schema_part"] = (int)i;
-                doc["total"]       = (int)total;
-                doc["data"]        = chunkBuf;
+                const size_t remaining =
+                    fullSchema.length() -
+                    start;
 
-                String out;
-                serializeJson(doc, out);
-                tx.frames.push_back(out);
+                const size_t length =
+                    min(
+                        MAX_CHUNK,
+                        remaining
+                    );
+
+                char chunkBuffer[
+                    MAX_CHUNK + 1
+                ];
+
+                memcpy(
+                    chunkBuffer,
+                    fullSchema.c_str() +
+                        start,
+                    length
+                );
+
+                chunkBuffer[length] =
+                    '\0';
+
+                StaticJsonDocument<256>
+                    document;
+
+                document["schema_part"] =
+                    static_cast<int>(
+                        index
+                    );
+
+                document["total"] =
+                    static_cast<int>(
+                        total
+                    );
+
+                document["data"] =
+                    chunkBuffer;
+
+                String output;
+
+                serializeJson(
+                    document,
+                    output
+                );
+
+                tx.frames.push_back(
+                    output
+                );
             }
 
-            LOG_IF("BRIDGE::SCHEMA",
+            LOG_IF(
+                "BRIDGE::SCHEMA",
                 "TX multiframe avviato (%u frames)",
-                tx.frames.size());
+                static_cast<unsigned>(
+                    tx.frames.size()
+                )
+            );
         }
 
-        // ------------------------------------------------------------
-        // MASTER: invio frame + gestione ACK
-        // ------------------------------------------------------------
-        void handleTx(unsigned long now) {
-            if (!parent->isMaster) return;
-            if (!tx.active) return;
 
-            // completato
-            if (tx.index >= tx.frames.size()) {
-                LOG_IF("BRIDGE::SCHEMA", "TX multiframe COMPLETATO");
+        // ====================================================
+        // HANDLE TX
+        // ====================================================
+
+        void handleTx(
+            unsigned long now)
+        {
+            if (!parent ||
+                !transport)
+            {
+                return;
+            }
+
+            if (!parent->isMaster)
+                return;
+
+            if (!tx.active)
+                return;
+
+            // ------------------------------------------------
+            // COMPLETATO
+            // ------------------------------------------------
+
+            if (
+                tx.index >=
+                tx.frames.size()
+            )
+            {
+                LOG_IF(
+                    "BRIDGE::SCHEMA",
+                    "TX multiframe COMPLETATO"
+                );
+
                 tx.active = false;
+                tx.waitingAckFor = -1;
+
                 return;
             }
 
-            // attesa ACK
-            if (tx.waitingAckFor >= 0) {
+            // ------------------------------------------------
+            // ATTESA ACK
+            // ------------------------------------------------
 
-                // 🔥 timeout dinamico
-                unsigned long ackTimeout =
-                    parent->peer.isOnline() ? 400 : 900;
+            if (tx.waitingAckFor >= 0)
+            {
+                const unsigned long
+                    ackTimeout =
+                        parent
+                            ->peer
+                            .isOnline()
+                                ? 400UL
+                                : 900UL;
 
-                if (now - tx.lastSend > ackTimeout) {
-                    transport->send(tx.frames[tx.index]);
-                    tx.lastSend = now;
+                if (
+                    now - tx.lastSend >
+                    ackTimeout
+                )
+                {
+                    transport->send(
+                        tx.frames[
+                            tx.index
+                        ]
+                    );
 
-                    LOG_WF("BRIDGE::SCHEMA",
-                        "ACK timeout frame %d → ritrasmissione",
-                        tx.waitingAckFor);
+                    tx.lastSend =
+                        now;
+
+                    LOG_WF(
+                        "BRIDGE::SCHEMA",
+                        "ACK timeout frame %d -> ritrasmissione",
+                        tx.waitingAckFor
+                    );
                 }
+
                 return;
             }
 
-            // 🔥 pacing dinamico
-            unsigned long interval =
-                parent->peer.isOnline() ? 10 : 25;
+            // ------------------------------------------------
+            // PACING
+            // ------------------------------------------------
 
-            if (now - tx.lastSend < interval)
+            const unsigned long interval =
+                parent
+                    ->peer
+                    .isOnline()
+                        ? 10UL
+                        : 25UL;
+
+            if (
+                now - tx.lastSend <
+                interval
+            )
+            {
                 return;
+            }
 
-            // invia frame corrente
-            String& frame = tx.frames[tx.index];
-            transport->send(frame);
-            tx.lastSend = now;
+            // ------------------------------------------------
+            // SEND CURRENT FRAME
+            // ------------------------------------------------
 
-            // 🔥 niente più fid → usa schema_part
-            StaticJsonDocument<64> doc;
-            deserializeJson(doc, frame);
-            tx.waitingAckFor = doc["schema_part"];
+            String& frame =
+                tx.frames[
+                    tx.index
+                ];
 
-            // 🔥 log rate-limit
-            static unsigned long lastLog = 0;
-            if (now - lastLog > 200) {
-                LOG_IF("BRIDGE::SCHEMA::TX",
+            transport->send(
+                frame
+            );
+
+            tx.lastSend =
+                now;
+
+            StaticJsonDocument<64>
+                document;
+
+            const DeserializationError error =
+                deserializeJson(
+                    document,
+                    frame
+                );
+
+            if (error)
+            {
+                LOG_WF(
+                    "BRIDGE::SCHEMA",
+                    "Errore lettura schema_part TX: %s",
+                    error.c_str()
+                );
+
+                tx.reset();
+
+                return;
+            }
+
+            tx.waitingAckFor =
+                document["schema_part"];
+
+            if (
+                now -
+                    parent
+                        ->timing
+                        .lastSchemaTxLog >
+                200UL
+            )
+            {
+                LOG_IF(
+                    "BRIDGE::SCHEMA::TX",
                     "Frame %u inviato (part=%d)",
-                    tx.index + 1,
-                    tx.waitingAckFor);
-                lastLog = now;
+                    static_cast<unsigned>(
+                        tx.index + 1
+                    ),
+                    tx.waitingAckFor
+                );
+
+                parent
+                    ->timing
+                    .lastSchemaTxLog =
+                        now;
             }
         }
 
-        // ------------------------------------------------------------
-        // SLAVE: ricezione frame + ACK
-        // ------------------------------------------------------------
-        bool handleRx(const JsonDocument& doc, unsigned long now) {
 
-            // ------------------------------------------------------------
-            // ACK schema (SLAVE → MASTER)
-            // ------------------------------------------------------------
-            if (doc.containsKey("schema_ack")) {
-                int ack = doc["schema_ack"];
+        // ====================================================
+        // HANDLE RX
+        // ====================================================
 
-                if (parent->isMaster && tx.waitingAckFor == ack) {
-                    tx.waitingAckFor = -1;
+        bool handleRx(
+            const JsonDocument& document,
+            unsigned long now)
+        {
+            if (!parent ||
+                !transport)
+            {
+                return false;
+            }
+
+            // ------------------------------------------------
+            // SCHEMA ACK
+            // ------------------------------------------------
+
+            if (
+                document.containsKey(
+                    "schema_ack"
+                )
+            )
+            {
+                const int acknowledgedPart =
+                    document["schema_ack"];
+
+                if (
+                    parent->isMaster &&
+                    tx.waitingAckFor ==
+                        acknowledgedPart
+                )
+                {
+                    tx.waitingAckFor =
+                        -1;
+
                     tx.index++;
                 }
+
                 return true;
             }
 
-            // ------------------------------------------------------------
-            // Non è un frame schema
-            // ------------------------------------------------------------
-            if (!doc.containsKey("schema_part"))
-                return false;
+            // ------------------------------------------------
+            // NON È UNO SCHEMA FRAME
+            // ------------------------------------------------
 
-            // ------------------------------------------------------------
-            // MASTER non riceve mai schema_part
-            // ------------------------------------------------------------
+            if (
+                !document.containsKey(
+                    "schema_part"
+                )
+            )
+            {
+                return false;
+            }
+
+            /*
+             * Il Master non deve ricevere schema_part.
+             * Consideriamo comunque il frame gestito.
+             */
             if (parent->isMaster)
                 return true;
 
-            int part  = doc["schema_part"];
-            int total = doc["total"];
-            const char* data = doc["data"];
+            const int part =
+                document["schema_part"];
 
-            // ------------------------------------------------------------
-            // Nuovo frame 0 mentre RX è attivo → IGNORA, NON RESETTA
-            // ------------------------------------------------------------
-            if (part == 0 && rx.active && rx.received > 0) {
-                LOG_WF("BRIDGE::SCHEMA",
-                    "New frame 0 received while RX in progress → ignored");
+            const int total =
+                document["total"];
+
+            const char* data =
+                document["data"];
+
+            if (
+                part < 0 ||
+                total <= 0 ||
+                !data
+            )
+            {
+                LOG_WF(
+                    "BRIDGE::SCHEMA",
+                    "Frame schema non valido"
+                );
+
                 return true;
             }
 
-            // ------------------------------------------------------------
-            // Avvio sessione RX
-            // ------------------------------------------------------------
-            if (!rx.active) {
+            // ------------------------------------------------
+            // FRAME DUPLICATO
+            // ------------------------------------------------
 
-                if (part != 0) {
-                    LOG_WF("BRIDGE::SCHEMA",
-                        "First frame must be 0, got %d → ignoring", part);
+            if (
+                rx.active &&
+                part <
+                    static_cast<int>(
+                        rx.received
+                    )
+            )
+            {
+                sendAck(
+                    part
+                );
+
+                LOG_DF(
+                    "BRIDGE::SCHEMA",
+                    "Duplicate frame %d -> ACK repeated",
+                    part
+                );
+
+                return true;
+            }
+
+            // ------------------------------------------------
+            // AVVIO RX
+            // ------------------------------------------------
+
+            if (!rx.active)
+            {
+                if (part != 0)
+                {
+                    LOG_WF(
+                        "BRIDGE::SCHEMA",
+                        "First frame must be 0, got %d -> ignored",
+                        part
+                    );
+
                     return true;
                 }
 
-                rx.active   = true;
-                rx.expected = total;
+                rx.active = true;
+
+                rx.expected =
+                    static_cast<uint16_t>(
+                        total
+                    );
+
                 rx.received = 0;
-                rx.offset   = 0;
-                rx.startTs  = now;
+                rx.offset = 0;
 
-                LOG_IF("BRIDGE::SCHEMA",
-                    "RX multiframe started (%d parts)", total);
+                rx.startTs = now;
+
+                LOG_IF(
+                    "BRIDGE::SCHEMA",
+                    "RX multiframe started (%d parts)",
+                    total
+                );
             }
 
-            // ------------------------------------------------------------
-            // Frame fuori ordine → IGNORA, NON RESETTA
-            // ------------------------------------------------------------
-            if (part != rx.received) {
-                LOG_WF("BRIDGE::SCHEMA",
-                    "Out-of-order frame: expected %u, got %u → ignored",
-                    rx.received, part);
+            // ------------------------------------------------
+            // TOTAL COERENCE
+            // ------------------------------------------------
+
+            if (
+                total !=
+                static_cast<int>(
+                    rx.expected
+                )
+            )
+            {
+                LOG_WF(
+                    "BRIDGE::SCHEMA",
+                    "Schema total mismatch: expected=%u got=%d",
+                    rx.expected,
+                    total
+                );
+
                 return true;
             }
 
-            // ------------------------------------------------------------
-            // Append chunk (buffer statico, zero allocazioni)
-            // ------------------------------------------------------------
-            size_t len = strlen(data);
+            // ------------------------------------------------
+            // FRAME FUORI ORDINE
+            // ------------------------------------------------
 
-            if (rx.offset + len >= sizeof(rx.buffer)) {
-                LOG_WF("BRIDGE::SCHEMA",
-                    "RX buffer overflow → reset");
+            if (
+                part !=
+                static_cast<int>(
+                    rx.received
+                )
+            )
+            {
+                LOG_WF(
+                    "BRIDGE::SCHEMA",
+                    "Out-of-order frame: expected=%u got=%d -> ignored",
+                    rx.received,
+                    part
+                );
+
+                if (rx.received > 0)
+                {
+                    sendAck(
+                        rx.received - 1
+                    );
+                }
+
+                return true;
+            }
+
+            // ------------------------------------------------
+            // APPEND DATA
+            // ------------------------------------------------
+
+            const size_t length =
+                strlen(
+                    data
+                );
+
+            if (
+                rx.offset + length >=
+                sizeof(rx.buffer)
+            )
+            {
+                LOG_WF(
+                    "BRIDGE::SCHEMA",
+                    "RX buffer overflow -> reset"
+                );
+
                 rx.reset();
+
                 return true;
             }
 
-            memcpy(rx.buffer + rx.offset, data, len);
-            rx.offset += len;
+            memcpy(
+                rx.buffer +
+                    rx.offset,
+                data,
+                length
+            );
+
+            rx.offset +=
+                static_cast<uint16_t>(
+                    length
+                );
 
             rx.received++;
 
-            // ------------------------------------------------------------
-            // ACK frame
-            // ------------------------------------------------------------
-            StaticJsonDocument<64> ack;
-            ack["schema_ack"] = part;
+            sendAck(
+                part
+            );
 
-            String out;
-            serializeJson(ack, out);
-            transport->send(out);
+            // ------------------------------------------------
+            // TIMEOUT
+            // ------------------------------------------------
 
-            // ------------------------------------------------------------
-            // Timeout dinamico
-            // ------------------------------------------------------------
-            unsigned long timeout =
-                parent->peer.isOnline() ? 15000 : 35000;
+            const unsigned long timeout =
+                parent
+                    ->peer
+                    .isOnline()
+                        ? 15000UL
+                        : 35000UL;
 
-            if (now - rx.startTs > timeout) {
-                LOG_WF("BRIDGE::SCHEMA",
-                    "RX multiframe timeout → reset");
+            if (
+                now - rx.startTs >
+                timeout
+            )
+            {
+                LOG_WF(
+                    "BRIDGE::SCHEMA",
+                    "RX multiframe timeout -> reset"
+                );
+
                 rx.reset();
+
                 return true;
             }
 
-            // ------------------------------------------------------------
-            // Completato
-            // ------------------------------------------------------------
-            if (rx.received == rx.expected) {
+            // ------------------------------------------------
+            // COMPLETE
+            // ------------------------------------------------
 
-                LOG_IF("BRIDGE::SCHEMA",
-                    "RX multiframe COMPLETE (len=%u)", rx.offset);
+            if (
+                rx.received ==
+                rx.expected
+            )
+            {
+                rx.buffer[
+                    rx.offset
+                ] = '\0';
 
-                rx.buffer[rx.offset] = 0;
+                LOG_IF(
+                    "BRIDGE::SCHEMA",
+                    "RX multiframe COMPLETE (len=%u)",
+                    rx.offset
+                );
 
-                StaticJsonDocument<8192> doc2;
-                auto err = deserializeJson(doc2, rx.buffer);
+                StaticJsonDocument<8192>
+                    schemaDocument;
 
-                if (err) {
-                    LOG_WF("BRIDGE::SCHEMA",
-                        "Multiframe JSON error: %s", err.c_str());
+                const DeserializationError error =
+                    deserializeJson(
+                        schemaDocument,
+                        rx.buffer
+                    );
+
+                if (error)
+                {
+                    LOG_WF(
+                        "BRIDGE::SCHEMA",
+                        "Multiframe JSON error: %s",
+                        error.c_str()
+                    );
+
                     rx.reset();
+
                     return true;
                 }
 
-                JsonArray arr = doc2["schema"].as<JsonArray>();
-                parent->onSchemaReceived(arr);
-                parent->schemaReceived = true;
-                parent->setState(BridgeState::ALIGNING);
+                JsonArray schemaArray =
+                    schemaDocument[
+                        "schema"
+                    ].as<JsonArray>();
+
+                parent->onSchemaReceived(
+                    schemaArray
+                );
+
+                parent
+                    ->session
+                    .schemaReceived =
+                        true;
+
+                parent->setState(
+                    BridgeState::ALIGNING
+                );
 
                 rx.reset();
             }
 
             return true;
         }
+
+
+        // ====================================================
+        // EXTERNAL RX TIMEOUT CHECK
+        // ====================================================
+
+        void checkRxTimeout(
+            unsigned long now)
+        {
+            if (!rx.active ||
+                !parent)
+            {
+                return;
+            }
+
+            const unsigned long timeout =
+                parent
+                    ->peer
+                    .isOnline()
+                        ? 15000UL
+                        : 35000UL;
+
+            if (
+                now - rx.startTs <=
+                timeout
+            )
+            {
+                return;
+            }
+
+            LOG_WF(
+                "BRIDGE::SCHEMA",
+                "RX multiframe timeout esterno -> reset"
+            );
+
+            rx.reset();
+        }
     };
+
 
     SchemaMultiframe schema;
 
+
 public:
-    void setPacer(IBridgePacer& p)
+    DMBridge() = default;
+
+    virtual ~DMBridge() = default;
+
+    DMBridge(
+        const DMBridge&) = delete;
+
+    DMBridge& operator=(
+        const DMBridge&) = delete;
+
+
+    // ========================================================
+    // PACER
+    // ========================================================
+
+    void setPacer(
+        IBridgePacer& bridgePacer)
     {
-        pacer = &p;
+        pacer =
+            &bridgePacer;
     }
 
-    DMBridge() {}
 
-    virtual ~DMBridge() {}
+    // ========================================================
+    // INIT
+    // ========================================================
 
-    virtual void onAEEVariableChanged(AEEVariableBase* v, unsigned long now) {}
-
-    void init(ICommandTransport* t, AEERegistry& r) {
-        init(t, r, true);   // 🔥 default: MASTER
+    void init(
+        ICommandTransport* commandTransport,
+        AEERegistry& registry)
+    {
+        init(
+            commandTransport,
+            registry,
+            true
+        );
     }
 
-    void init(ICommandTransport* t, AEERegistry& r, bool master) {
-        isMaster = master;
-        transport = t;
-        reg = &r;
+    void init(
+        ICommandTransport* commandTransport,
+        AEERegistry& registry,
+        bool master)
+    {
+        isMaster =
+            master;
 
-        aee = AEEProtocol(master);   // se vuoi re-inizializzarlo qui
-        schema.init(this, transport);
+        transport =
+            commandTransport;
+
+        reg =
+            &registry;
+
+        state =
+            BridgeState::DISCONNECTED;
+
+        peer.reset();
+        ack.reset();
+
+        session.reset();
+        timing.reset();
+
+        schema.reset();
+
+        aee =
+            AEEProtocol(
+                master
+            );
+
+        schema.init(
+            this,
+            transport
+        );
+
+        if (!transport)
+        {
+            LOG_EF(
+                "BRIDGE",
+                "Transport NULL"
+            );
+
+            return;
+        }
 
         transport->begin();
-        setState(BridgeState::CONNECTING);
-        LOG_IF("BRIDGE", "Bridge avviato come %s", isMaster ? "MASTER" : "SLAVE");
+
+        setState(
+            BridgeState::CONNECTING
+        );
+
+        LOG_IF(
+            "BRIDGE",
+            "Bridge avviato come %s",
+            isMaster
+                ? "MASTER"
+                : "SLAVE"
+        );
     }
 
-    AEERegistry* getRegistry() { return reg; }
 
+    // ========================================================
+    // CALLBACK
+    // ========================================================
 
-    virtual void loop(unsigned long now)
+    virtual void onAEEVariableChanged(
+        AEEVariableBase* variable,
+        unsigned long now)
     {
-        if (!transport || !reg)
+        (void)variable;
+        (void)now;
+    }
+
+    std::function<
+        void(
+            AEEVariableBase*,
+            unsigned long
+        )
+    > onFrontendAEEChange;
+
+
+    // ========================================================
+    // LOOP
+    // ========================================================
+
+    virtual void loop(
+        unsigned long now)
+    {
+        if (!transport ||
+            !reg)
+        {
             return;
+        }
 
-        // ============================================================
-        // RX / STATE MACHINE
-        //
-        // DEVONO essere sempre eseguiti, indipendentemente
-        // dall'arbitraggio TX.
-        // ============================================================
-        transport->loop(now);
-        processIncoming(now);
-        runStateMachine(now);
-        handleResend(now);
+        // RX deve essere sempre processato.
+        transport->loop(
+            now
+        );
 
-        // ============================================================
-        // NETWORK ARBITRATION
-        // ============================================================
-        bool acquired = true;
+        processIncoming(
+            now
+        );
+
+        schema.checkRxTimeout(
+            now
+        );
+
+        runStateMachine(
+            now
+        );
+
+        handleResend(
+            now
+        );
+
+        bool acquired =
+            true;
 
         if (pacer)
-            acquired = pacer->acquire(now);
+        {
+            acquired =
+                pacer->acquire(
+                    now
+                );
+        }
 
-        // ============================================================
-        // TX
-        //
-        // Il Bridge trasmette solo se possiede la rete.
-        // ============================================================
-        if (acquired) {
-            schema.handleTx(now);
+        if (acquired)
+        {
+            schema.handleTx(
+                now
+            );
 
-            // ========================================================
-            // RELEASE IMMEDIATO
-            // ========================================================
             if (pacer)
-                pacer->release(now);
+            {
+                pacer->release(
+                    now
+                );
+            }
         }
 
-        // ============================================================
-        // LOG PEER ONLINE/OFFLINE
-        // ============================================================
-        const bool online = peer.isOnline();
+        const bool online =
+            peer.isOnline();
 
-        if (online != lastPeerOnline) {
-            lastPeerOnline = online;
+        if (
+            online !=
+            lastPeerOnline
+        )
+        {
+            lastPeerOnline =
+                online;
         }
     }
 
-    void sendRaw(const String& payload) {
-        if (!transport) return;
 
-        transport->send(payload);
+    // ========================================================
+    // ACCESSORS
+    // ========================================================
+
+    AEERegistry* getRegistry()
+    {
+        return reg;
     }
 
+    BridgePeerMonitor& getPeer()
+    {
+        return peer;
+    }
 
-    BridgePeerMonitor& getPeer() { return peer; }
-    BridgeState getState() const {
+    BridgeState getState() const
+    {
         return state;
     }
 
-    bool isHandshakeActive() const {
-        return state == BridgeState::CONNECTING ||
-            state == BridgeState::REQUEST_SCHEMA ||
-            state == BridgeState::WAIT_SCHEMA ||
-            state == BridgeState::ALIGNING;
+    bool isHandshakeActive() const
+    {
+        return
+            state ==
+                BridgeState::CONNECTING ||
+            state ==
+                BridgeState::REQUEST_SCHEMA ||
+            state ==
+                BridgeState::WAIT_SCHEMA ||
+            state ==
+                BridgeState::ALIGNING;
     }
 
-    bool isReadyForData() const {
-        return state == BridgeState::READY ||
-            state == BridgeState::DATA_EXCHANGE;
+    bool isReadyForData() const
+    {
+        return
+            state ==
+                BridgeState::READY ||
+            state ==
+                BridgeState::DATA_EXCHANGE;
     }
 
-    std::function<void(AEEVariableBase*, unsigned long)> onFrontendAEEChange;
+
+    // ========================================================
+    // RAW SEND
+    // ========================================================
+
+    void sendRaw(
+        const String& payload)
+    {
+        if (!transport)
+            return;
+
+        transport->send(
+            payload
+        );
+    }
+
 
 protected:
+    // ========================================================
+    // DERIVED CALLBACKS
+    // ========================================================
 
-    // ============================================================
-    //  VIRTUAL CALLBACKS (SLAVE OVERRIDES)
-    // ============================================================
-    virtual void onSchemaRequest() {}                 // MASTER risponde
-    virtual void onSchemaReceived(const JsonArray&) {}// SLAVE ricostruisce
-    virtual void onAligned() {}                       // SLAVE allinea
+    virtual void onSchemaRequest()
+    {
+    }
 
-    // ============================================================
-    //  STATE MACHINE (HARD-CODED)
-    // ============================================================
-    void runStateMachine(unsigned long now) {
+    virtual void onSchemaReceived(
+        const JsonArray& schemaArray)
+    {
+        (void)schemaArray;
+    }
 
-        switch (state) {
+    virtual void onAligned()
+    {
+    }
+
+
+    // ========================================================
+    // STATE MACHINE
+    // ========================================================
+
+    void runStateMachine(
+        unsigned long now)
+    {
+        switch (state)
+        {
+            // =================================================
+            // DISCONNECTED
+            // =================================================
+
             case BridgeState::DISCONNECTED:
-                setState(BridgeState::CONNECTING);
+            {
+                setState(
+                    BridgeState::CONNECTING
+                );
+
                 break;
+            }
+
+            // =================================================
+            // CONNECTING
+            // =================================================
 
             case BridgeState::CONNECTING:
-                if (isMaster) {
-                    schemaReceived = false;   // 🔥 reset snapshot
-                    // 🔥 MASTER diventa READY solo dopo richiesta schema
-                    if (schemaRequested && peer.isOnline() && !schema.isTxActive()) {
-                        setState(BridgeState::READY);
-                    }
+            {
+                if (isMaster)
+                {
+                    session.schemaReceived =
+                        false;
 
-                } else {
-                    if (!helloSent) {
-                        sendSchemaRequest();
-                        helloSent = true;
-                        helloTime = now;
-                        setState(BridgeState::WAIT_SCHEMA);
+                    if (
+                        session.schemaRequested &&
+                        peer.isOnline() &&
+                        !schema.isTxActive()
+                    )
+                    {
+                        setState(
+                            BridgeState::READY
+                        );
                     }
                 }
+                else
+                {
+                    if (!session.helloSent)
+                    {
+                        sendSchemaRequest();
+
+                        session.helloSent =
+                            true;
+
+                        session.helloTime =
+                            now;
+
+                        setState(
+                            BridgeState::WAIT_SCHEMA
+                        );
+                    }
+                }
+
                 break;
+            }
+
+            // =================================================
+            // REQUEST SCHEMA
+            // =================================================
 
             case BridgeState::REQUEST_SCHEMA:
-                if (!isMaster) {
+            {
+                if (!isMaster)
+                {
                     sendSchemaRequest();
-                    setState(BridgeState::WAIT_SCHEMA);
+
+                    setState(
+                        BridgeState::WAIT_SCHEMA
+                    );
                 }
+
                 break;
+            }
+
+            // =================================================
+            // WAIT SCHEMA
+            // =================================================
 
             case BridgeState::WAIT_SCHEMA:
-                if (!isMaster) {
-                    if (schemaReceived) {
-                        // schema ricevuto e ricostruito → si può allineare
-                        setState(BridgeState::ALIGNING);
-                    } else if (!schema.isRxActive() && (now - helloTime > HELLO_TIMEOUT)) {
-                        LOG_IF("BRIDGE", "Timeout schema → retry");
-                        helloSent = false;
-                        setState(BridgeState::CONNECTING);
+            {
+                if (!isMaster)
+                {
+                    if (
+                        session.schemaReceived
+                    )
+                    {
+                        setState(
+                            BridgeState::ALIGNING
+                        );
                     }
+                    else if (
+                        !schema.isRxActive() &&
+                        now -
+                            session.helloTime >
+                            HELLO_TIMEOUT
+                    )
+                    {
+                        LOG_IF(
+                            "BRIDGE",
+                            "Timeout schema -> retry"
+                        );
 
+                        session.helloSent =
+                            false;
+
+                        setState(
+                            BridgeState::CONNECTING
+                        );
+                    }
                 }
+
                 break;
+            }
+
+            // =================================================
+            // ALIGNING
+            // =================================================
 
             case BridgeState::ALIGNING:
-                if (!isMaster && !schemaReceived) {   // <--- added !isMaster
-                    // safety: do not align without schema
-                    LOG_WF("BRIDGE", "ALIGNING without schemaReceived → forcing CONNECTING");
-                    setState(BridgeState::CONNECTING);
+            {
+                if (
+                    !isMaster &&
+                    !session.schemaReceived
+                )
+                {
+                    LOG_WF(
+                        "BRIDGE",
+                        "ALIGNING senza schema -> CONNECTING"
+                    );
+
+                    setState(
+                        BridgeState::CONNECTING
+                    );
+
                     break;
                 }
-                onAligned();
-                setState(BridgeState::READY);
-                break;
 
+                onAligned();
+
+                setState(
+                    BridgeState::READY
+                );
+
+                break;
+            }
+
+            // =================================================
+            // READY
+            // =================================================
 
             case BridgeState::READY:
-                if (!isMaster && !schemaReceived) {   // <--- added !isMaster
-                    LOG_WF("BRIDGE", "READY without schemaReceived → blocking DATA_EXCHANGE");
-                    setState(BridgeState::CONNECTING);
+            {
+                if (
+                    !isMaster &&
+                    !session.schemaReceived
+                )
+                {
+                    LOG_WF(
+                        "BRIDGE",
+                        "READY senza schema -> CONNECTING"
+                    );
+
+                    setState(
+                        BridgeState::CONNECTING
+                    );
+
                     break;
                 }
-                setState(BridgeState::DATA_EXCHANGE);
+
+                setState(
+                    BridgeState::DATA_EXCHANGE
+                );
+
                 break;
+            }
 
-            case BridgeState::DATA_EXCHANGE: {
-                static unsigned long lastOnline = 0;
-                static unsigned long lastPing   = 0;
-                static unsigned long lastAEEtx  = 0;
+            // =================================================
+            // DATA EXCHANGE
+            // =================================================
 
-                const unsigned long PING_INTERVAL    = 20000;
-                const unsigned long OFFLINE_TIMEOUT  = PING_INTERVAL * 3;
-                const unsigned long AEE_TX_INTERVAL  = 1000;
+            case BridgeState::DATA_EXCHANGE:
+            {
+                static constexpr unsigned long
+                    PING_INTERVAL = 20000UL;
 
-                // 🔥 MASTER: invia snapshot iniziale SOLO al primo ingresso in DATA_EXCHANGE
-                static bool initialSnapshotSent = false;
-                if (isMaster && schemaRequested && !initialSnapshotSent) {
-                    LOG_IF("MASTER::AEE", "Snapshot iniziale inviato dopo schema COMPLETO");
+                static constexpr unsigned long
+                    AEE_TX_INTERVAL = 1000UL;
 
-                    reg->forceAllChanged(now);
-                    initialSnapshotSent = true;
-                    schemaRequested = false;
+                static constexpr unsigned long
+                    OFFLINE_TIMEOUT =
+                        PING_INTERVAL * 3UL;
+
+                // ---------------------------------------------
+                // INITIAL SNAPSHOT
+                // ---------------------------------------------
+
+                if (
+                    isMaster &&
+                    session.schemaRequested &&
+                    session.initialSnapshotPending &&
+                    !session.initialSnapshotSent &&
+                    !schema.isTxActive()
+                )
+                {
+                    LOG_IF(
+                        "MASTER::AEE",
+                        "Preparazione snapshot iniziale: vars=%u",
+                        static_cast<unsigned>(
+                            reg->size()
+                        )
+                    );
+
+                    reg->forceAllChanged(
+                        now
+                    );
+
+                    if (reg->hasChanges())
+                    {
+                        session
+                            .completeInitialSnapshot();
+
+                        LOG_IF(
+                            "MASTER::AEE",
+                            "Snapshot iniziale preparato"
+                        );
+                    }
+                    else
+                    {
+                        LOG_WF(
+                            "MASTER::AEE",
+                            "Snapshot non preparato: nessuna variabile pending"
+                        );
+                    }
                 }
 
-                // ============================================================
-                // 1) AEE: invio SOLO quando serve
-                // ============================================================
-                const bool hasChanges = reg->hasChanges();
+                // ---------------------------------------------
+                // AEE TX
+                // ---------------------------------------------
 
-                if (hasChanges) {
-                    LOG_DF("BRIDGE::AEE::PENDING",
-                        "AEE pending → hasChanges=1 (now=%lu)", now);
+                if (
+                    reg->hasChanges() &&
+                    now -
+                        timing.lastAEEtx >
+                        AEE_TX_INTERVAL
+                )
+                {
+                    const bool sent =
+                        AEEProtocolEngine::send(
+                            *reg,
+                            ack,
+                            aee,
+                            [&](const String& output)
+                            {
+                                transport->send(
+                                    output
+                                );
+                            }
+                        );
+
+                    if (sent)
+                    {
+                        timing.lastAEEtx =
+                            now;
+                    }
                 }
 
-                if (hasChanges && (now - lastAEEtx > AEE_TX_INTERVAL)) {
-                    AEEProtocolEngine::send(*reg, ack, aee, [&](const String& out){
-                        //LOG_IF("BRIDGE::AEE::PAYLOAD", "%s", out.c_str());
-                        transport->send(out);
-                    });
+                // ---------------------------------------------
+                // PING
+                // ---------------------------------------------
 
-                    lastAEEtx = now;
+                if (
+                    now -
+                        timing.lastPing >
+                        PING_INTERVAL
+                )
+                {
+                    transport->send(
+                        "{\"ping\":1}"
+                    );
+
+                    timing.lastPing =
+                        now;
                 }
 
-                // ============================================================
-                // 2) PING periodico
-                // ============================================================
-                if (now - lastPing > PING_INTERVAL) {
-                    //LOG_IF("BRIDGE::PING::TX",
-                    //    "Sending ping (now=%lu)", now);
-                    transport->send("{\"ping\":1}");
-                    lastPing = now;
+                // ---------------------------------------------
+                // ONLINE / OFFLINE
+                // ---------------------------------------------
+
+                if (peer.isOnline())
+                {
+                    timing.lastOnline =
+                        now;
                 }
+                else if (
+                    now -
+                        timing.lastOnline >
+                        OFFLINE_TIMEOUT
+                )
+                {
+                    if (!isMaster)
+                    {
+                        LOG_IF(
+                            "BRIDGE",
+                            "SLAVE: master offline -> restart handshake"
+                        );
 
-                // ============================================================
-                // 3) Monitor online/offline
-                // ============================================================
-                if (peer.isOnline()) {
-                    lastOnline = now;
-                } else if (now - lastOnline > OFFLINE_TIMEOUT) {
+                        session.schemaReceived =
+                            false;
 
-                    if (!isMaster) {
-                        LOG_IF("BRIDGE",
-                            "SLAVE: master offline → restart handshake");
+                        session.resetSnapshot();
 
-                        schemaReceived = false;
                         schema.rx.reset();
-                        setState(BridgeState::CONNECTING);
+
+                        setState(
+                            BridgeState::CONNECTING
+                        );
+
                         return;
                     }
 
-                    LOG_IF("BRIDGE",
-                        "MASTER: peer offline → restart handshake");
-                    setState(BridgeState::CONNECTING);
+                    LOG_IF(
+                        "BRIDGE",
+                        "MASTER: peer offline -> restart handshake"
+                    );
+
+                    session.schemaRequested =
+                        false;
+
+                    session.resetSnapshot();
+
+                    setState(
+                        BridgeState::CONNECTING
+                    );
                 }
 
                 break;
             }
-
         }
     }
 
-    void setState(BridgeState s) {
-        if (state != s) {
-            //LOG_IF("BRIDGE", "STATE %d → %d", (int)state, (int)s);
-            state = s;
 
-            // 🔥 reset handshake SLAVE quando si torna in CONNECTING
-            if (!isMaster && s == BridgeState::CONNECTING) {
-                helloSent = false;
-                helloTime = 0;
-            }
-        }
-    }
+    // ========================================================
+    // STATE CHANGE
+    // ========================================================
 
-    // ============================================================
-    //  SCHEMA REQUEST (SLAVE)
-    // ============================================================
-    void sendSchemaRequest() {
-        static unsigned long lastSchemaReq = 0;
-        const unsigned long SCHEMA_REQ_MIN_INTERVAL = 3000;
-
-        unsigned long now = millis();
-        if (now - lastSchemaReq < SCHEMA_REQ_MIN_INTERVAL) {
-            return; // evita bombardamento
-        }
-        lastSchemaReq = now;
-
-        StaticJsonDocument<64> doc;
-        doc["request"] = "schema";
-
-        String out;
-        serializeJson(doc, out);
-        transport->send(out);
-
-        LOG_I("BRIDGE", "Richiesta schema inviata");
-    }
-
-    // ============================================================
-    //  PACKET PROCESSING
-    // ============================================================
-    void processIncoming(unsigned long now)
+    void setState(
+        BridgeState newState)
     {
-        String msg;
+        if (state == newState)
+            return;
 
-        while (transport->receive(msg))
+        state =
+            newState;
+
+        if (
+            !isMaster &&
+            newState ==
+                BridgeState::CONNECTING
+        )
         {
-            if (msg.length() < 2)
-                continue;
+            session.helloSent =
+                false;
 
-            peer.onPacket(now);
+            session.helloTime =
+                0;
+        }
+    }
 
-            // ------------------------------------------------------------
-            // FAST PATH: ping (no JSON parsing)
-            // ------------------------------------------------------------
-            if (msg.startsWith("{\"ping\""))
-                continue;
 
-            // ------------------------------------------------------------
-            // FAST PATH: ack (no JSON parsing)
-            // ------------------------------------------------------------
-            if (msg.startsWith("{\"ack\""))
+    // ========================================================
+    // SEND SCHEMA REQUEST
+    // ========================================================
+
+    void sendSchemaRequest()
+    {
+        static constexpr unsigned long
+            SCHEMA_REQUEST_MIN_INTERVAL =
+                3000UL;
+
+        const unsigned long now =
+            millis();
+
+        if (
+            timing.lastSchemaRequest != 0 &&
+            now -
+                timing.lastSchemaRequest <
+                SCHEMA_REQUEST_MIN_INTERVAL
+        )
+        {
+            return;
+        }
+
+        timing.lastSchemaRequest =
+            now;
+
+        StaticJsonDocument<64>
+            document;
+
+        document["request"] =
+            "schema";
+
+        String output;
+
+        serializeJson(
+            document,
+            output
+        );
+
+        transport->send(
+            output
+        );
+
+        LOG_I(
+            "BRIDGE",
+            "Richiesta schema inviata"
+        );
+    }
+
+
+    // ========================================================
+    // PROCESS INCOMING
+    // ========================================================
+
+    void processIncoming(
+        unsigned long now)
+    {
+        String message;
+
+        while (
+            transport->receive(
+                message
+            )
+        )
+        {
+            if (
+                message.length() <
+                2
+            )
             {
-                StaticJsonDocument<64> ackDoc;
-                if (!deserializeJson(ackDoc, msg))
-                    AEEProtocolEngine::onPacket(ackDoc, ack);
                 continue;
             }
 
-            // ------------------------------------------------------------
-            // FAST PATH: schema ACK (no JSON parsing)
-            // ------------------------------------------------------------
-            if (msg.startsWith("{\"schema_ack\""))
+            peer.onPacket(
+                now
+            );
+
+            // ---------------------------------------------
+            // PING
+            // ---------------------------------------------
+
+            if (
+                message.startsWith(
+                    "{\"ping\""
+                )
+            )
             {
-                StaticJsonDocument<64> ackDoc;
-                if (!deserializeJson(ackDoc, msg))
-                    schema.handleRx(ackDoc, now);
                 continue;
             }
 
-            // ------------------------------------------------------------
-            // RICONOSCIMENTO FRAME SCHEMA (schema_part)
-            // ------------------------------------------------------------
-            const bool isSchemaFrame = msg.startsWith("{\"schema_part\"");
+            // ---------------------------------------------
+            // AEE ACK
+            // ---------------------------------------------
 
-            // ------------------------------------------------------------
-            // VALIDAZIONE JSON (solo non-schema)
-            // ------------------------------------------------------------
-            if (!isSchemaFrame)
+            if (
+                message.startsWith(
+                    "{\"ack\""
+                )
+            )
             {
-                if (msg[0] != '{' || msg[msg.length() - 1] != '}')
+                StaticJsonDocument<64>
+                    ackDocument;
+
+                if (
+                    !deserializeJson(
+                        ackDocument,
+                        message
+                    )
+                )
                 {
-                    LOG_WF("BRIDGE::DROP",
-                        "DROP: invalid JSON boundaries: %s",
-                        msg.c_str());
-                    continue;
+                    AEEProtocolEngine::onPacket(
+                        ackDocument,
+                        ack
+                    );
                 }
+
+                continue;
             }
 
-            // ------------------------------------------------------------
-            // FRAME SCHEMA (schema_part)
-            // ------------------------------------------------------------
+            // ---------------------------------------------
+            // SCHEMA ACK
+            // ---------------------------------------------
+
+            if (
+                message.startsWith(
+                    "{\"schema_ack\""
+                )
+            )
+            {
+                StaticJsonDocument<64>
+                    schemaAckDocument;
+
+                if (
+                    !deserializeJson(
+                        schemaAckDocument,
+                        message
+                    )
+                )
+                {
+                    schema.handleRx(
+                        schemaAckDocument,
+                        now
+                    );
+                }
+
+                continue;
+            }
+
+            // ---------------------------------------------
+            // SCHEMA FRAME
+            // ---------------------------------------------
+
+            const bool isSchemaFrame =
+                message.startsWith(
+                    "{\"schema_part\""
+                );
+
             if (isSchemaFrame)
             {
-                StaticJsonDocument<512> schemaDoc;
-                auto err = deserializeJson(schemaDoc, msg);
+                StaticJsonDocument<512>
+                    schemaDocument;
 
-                if (err)
+                const DeserializationError error =
+                    deserializeJson(
+                        schemaDocument,
+                        message
+                    );
+
+                if (error)
                 {
-                    LOG_WF("BRIDGE::SCHEMA",
-                        "deserializeJson FALLITA su frame schema: %s",
-                        err.c_str());
+                    LOG_WF(
+                        "BRIDGE::SCHEMA",
+                        "deserializeJson fallita: %s",
+                        error.c_str()
+                    );
+
                     continue;
                 }
 
-                if (schema.handleRx(schemaDoc, now))
-                    continue;
+                schema.handleRx(
+                    schemaDocument,
+                    now
+                );
 
                 continue;
             }
 
-            // ------------------------------------------------------------
-            // JSON NORMALE (AEE, request schema, ecc.)
-            // ------------------------------------------------------------
-            StaticJsonDocument<2048> doc;
-            auto err = deserializeJson(doc, msg);
+            // ---------------------------------------------
+            // JSON BOUNDARIES
+            // ---------------------------------------------
 
-            if (err)
+            if (
+                message[0] != '{' ||
+                message[
+                    message.length() - 1
+                ] != '}'
+            )
             {
-                LOG_WF("SLAVE::AEE",
-                    "deserializeJson FALLITA: %s",
-                    err.c_str());
+                LOG_WF(
+                    "BRIDGE::DROP",
+                    "JSON non valido: %s",
+                    message.c_str()
+                );
+
                 continue;
             }
 
-            // ------------------------------------------------------------
-            // Schema eventualmente ricevuto
-            // ------------------------------------------------------------
-            if (schema.handleRx(doc, now))
-                continue;
+            // ---------------------------------------------
+            // NORMAL JSON
+            // ---------------------------------------------
 
-            // ------------------------------------------------------------
-            // Richiesta schema
-            // ------------------------------------------------------------
-            if (doc.containsKey("request") &&
-                doc["request"] == "schema")
+            StaticJsonDocument<2048>
+                document;
+
+            const DeserializationError error =
+                deserializeJson(
+                    document,
+                    message
+                );
+
+            if (error)
+            {
+                LOG_WF(
+                    "BRIDGE::AEE",
+                    "deserializeJson fallita: %s",
+                    error.c_str()
+                );
+
+                continue;
+            }
+
+            if (
+                schema.handleRx(
+                    document,
+                    now
+                )
+            )
+            {
+                continue;
+            }
+
+            // ---------------------------------------------
+            // SCHEMA REQUEST
+            // ---------------------------------------------
+
+            if (
+                document.containsKey(
+                    "request"
+                ) &&
+                document["request"] ==
+                    "schema"
+            )
             {
                 if (isMaster)
+                {
                     onSchemaRequest();
+                }
+
                 continue;
             }
 
-            // ------------------------------------------------------------
+            // ---------------------------------------------
             // AEE
-            // ------------------------------------------------------------
+            // ---------------------------------------------
+
             BridgeProtocol::handleIncoming(
-                doc,
+                document,
                 *reg,
                 *transport,
                 aee,
                 this
             );
 
-            // ------------------------------------------------------------
-            // ACK
-            // ------------------------------------------------------------
-            AEEProtocolEngine::onPacket(doc, ack);
+            AEEProtocolEngine::onPacket(
+                document,
+                ack
+            );
         }
     }
 
-    // ============================================================
-    //  RESEND
-    // ============================================================
-    void handleResend(unsigned long now) {
+
+    // ========================================================
+    // HANDLE RESEND
+    // ========================================================
+
+    void handleResend(
+        unsigned long now)
+    {
+        if (!transport)
+            return;
+
         AEEProtocolEngine::checkResend(
-            *reg, ack, now, aee,
-            [&](const String& out){ transport->send(out); }
+            ack,
+            now,
+            [&](const String& output)
+            {
+                transport->send(
+                    output
+                );
+            }
         );
     }
 };
 
+
 // ============================================================
-//  BRIDGE PROTOCOL (AEE + ACK)
+// BRIDGE PROTOCOL IMPLEMENTATION
 // ============================================================
-bool BridgeProtocol::handleIncoming(
-    JsonDocument& doc,
-    AEERegistry& reg,
+
+inline bool BridgeProtocol::handleIncoming(
+    JsonDocument& document,
+    AEERegistry& registry,
     ICommandTransport& transport,
-    AEEProtocol& proto,
-    DMBridge* parent
-) {
-    // Il JSON è già stato deserializzato da processIncoming().
-    // NON effettuare un secondo deserializeJson().
-
-    bool ok = proto.parseJSON(doc, reg);
-
-    if (!ok)
+    AEEProtocol& protocol,
+    DMBridge* parent)
+{
+    if (!parent)
         return false;
 
-    const unsigned long now = millis();
+    const bool parsed =
+        protocol.parseJSON(
+            document,
+            registry
+        );
 
-    reg.forEachChanged([&](AEEVariableBase* v)
+    if (!parsed)
+        return false;
+
+    const unsigned long now =
+        millis();
+
+    registry.forEachChanged(
+        [&](AEEVariableBase* variable)
+        {
+            if (!variable)
+                return;
+
+            parent->onAEEVariableChanged(
+                variable,
+                now
+            );
+
+            if (parent->onFrontendAEEChange)
+            {
+                parent->onFrontendAEEChange(
+                    variable,
+                    now
+                );
+            }
+
+            variable->lastChange = 0;
+        }
+    );
+
+    /*
+     * Gli aggiornamenti ricevuti sono stati consumati
+     * dalle callback applicative.
+     */
+    registry.clearAllChanged();
+
+    if (
+        document.containsKey(
+            "seq"
+        )
+    )
     {
-        parent->onAEEVariableChanged(v, now);
+        const uint32_t sequence =
+            document["seq"];
 
-        if (parent->onFrontendAEEChange)
-            parent->onFrontendAEEChange(v, now);
+        StaticJsonDocument<64>
+            ackDocument;
 
-        v->lastChange = 0;
-    });
+        ackDocument["ack"] =
+            sequence;
 
-    // 🔥 pulizia lista changed
-    reg.clearAllChanged();
+        String output;
 
+        serializeJson(
+            ackDocument,
+            output
+        );
 
-    if (doc.containsKey("seq"))
-    {
-        const uint32_t seq = doc["seq"];
-
-        StaticJsonDocument<64> ack;
-        ack["ack"] = seq;
-
-        String out;
-        serializeJson(ack, out);
-
-        transport.send(out);
+        transport.send(
+            output
+        );
     }
 
     return true;
@@ -1006,117 +2344,179 @@ bool BridgeProtocol::handleIncoming(
 
 
 // ============================================================
-//  MASTER IMPLEMENTATION
+// MASTER BRIDGE
 // ============================================================
-class DMMasterBridge : public DMBridge
-{
-public:
 
-    DMMasterBridge() {}
+class DMMasterBridge
+    : public DMBridge
+{
+private:
+    // ========================================================
+    // SCHEMA CACHE
+    // ========================================================
+
+    struct SchemaCache
+    {
+        String payload;
+
+        unsigned long lastBuild =
+            0;
+
+        void clear()
+        {
+            payload = "";
+            lastBuild = 0;
+        }
+
+        bool expired(
+            unsigned long now,
+            unsigned long timeout) const
+        {
+            return
+                payload.length() == 0 ||
+                now - lastBuild >
+                    timeout;
+        }
+    };
+
+    SchemaCache schemaCache;
+
+
+public:
+    DMMasterBridge() = default;
+
+    ~DMMasterBridge() override =
+        default;
+
 
 protected:
+    // ========================================================
+    // SCHEMA REQUEST
+    // ========================================================
 
     void onSchemaRequest() override
     {
-        static String cachedSchema;
-        static unsigned long lastBuild = 0;
+        static constexpr unsigned long
+            CACHE_TIME = 10000UL;
 
-        static constexpr unsigned long CACHE_TIME = 10000;
-        static constexpr unsigned long TX_TIMEOUT  = 5000;
+        static constexpr unsigned long
+            TX_TIMEOUT = 5000UL;
 
-        const unsigned long now = millis();
+        const unsigned long now =
+            millis();
 
-        schemaRequested = true;
+        /*
+         * Ogni nuova richiesta schema deve riarmare
+         * lo snapshot iniziale per questa istanza.
+         */
+        session.armInitialSnapshot();
 
-        // ============================================================
-        // TX SCHEMA GIÀ ATTIVA
-        // ============================================================
+        // ----------------------------------------------------
+        // SCHEMA TX GIÀ ATTIVA
+        // ----------------------------------------------------
 
         if (schema.tx.active)
         {
             const unsigned long elapsed =
-                static_cast<unsigned long>(
-                    now - schema.tx.startTime
-                );
+                now -
+                schema.tx.startTime;
 
-            // --------------------------------------------------------
-            // TX ancora valida:
-            // non interrompiamo il trasferimento.
-            // --------------------------------------------------------
-
-            if (elapsed < TX_TIMEOUT)
+            if (
+                elapsed <
+                TX_TIMEOUT
+            )
             {
                 LOG_IF(
                     "MASTER::AEE",
-                    "Schema request while TX active "
-                    "(%lu ms) → richiesta ignorata",
+                    "Schema request durante TX attiva (%lu ms) -> ignorata",
                     elapsed
                 );
 
                 return;
             }
 
-            // --------------------------------------------------------
-            // TX bloccata:
-            // reset e ripartenza.
-            // --------------------------------------------------------
-
             LOG_WF(
                 "MASTER::AEE",
-                "Schema TX timeout (%lu ms) "
-                "→ abort & restart",
+                "Schema TX timeout (%lu ms) -> abort",
                 elapsed
             );
 
             schema.abortTx();
         }
 
-        // ============================================================
-        // CACHE SCHEMA
-        // ============================================================
+        // ----------------------------------------------------
+        // REGISTRY VALIDATION
+        // ----------------------------------------------------
 
-        if (
-            cachedSchema.length() == 0 ||
-            static_cast<unsigned long>(
-                now - lastBuild
-            ) > CACHE_TIME
-        )
+        if (!reg)
         {
-            DynamicJsonDocument doc(4096);
-
-            JsonArray arr =
-                doc.createNestedArray("schema");
-
-            aee.ExportSchema(*reg, arr);
-
-            cachedSchema = "";
-
-            serializeJson(
-                doc,
-                cachedSchema
+            LOG_EF(
+                "MASTER::AEE",
+                "Schema request senza registry"
             );
 
-            lastBuild = now;
+            return;
+        }
+
+        // ----------------------------------------------------
+        // CACHE BUILD
+        // ----------------------------------------------------
+
+        if (
+            schemaCache.expired(
+                now,
+                CACHE_TIME
+            )
+        )
+        {
+            DynamicJsonDocument document(
+                4096
+            );
+
+            JsonArray schemaArray =
+                document.createNestedArray(
+                    "schema"
+                );
+
+            aee.ExportSchema(
+                *reg,
+                schemaArray
+            );
+
+            schemaCache.payload =
+                "";
+
+            serializeJson(
+                document,
+                schemaCache.payload
+            );
+
+            schemaCache.lastBuild =
+                now;
 
             LOG_IF(
                 "MASTER::AEE",
                 "Schema ricostruito (%u vars)",
-                reg->size()
+                static_cast<unsigned>(
+                    reg->size()
+                )
             );
         }
         else
         {
             LOG_IF(
                 "MASTER::AEE",
-                "Schema inviato (cached)"
+                "Schema inviato dalla cache"
             );
         }
 
-        // ============================================================
+        // ----------------------------------------------------
         // START TX
-        // ============================================================
+        // ----------------------------------------------------
 
-        schema.startTx(cachedSchema);
+        schema.startTx(
+            schemaCache.payload
+        );
     }
 };
 

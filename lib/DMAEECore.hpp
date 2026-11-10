@@ -47,7 +47,8 @@ enum class AEEVarSourceType {
 // ============================================================
 
     struct AEEVarDef {
-        const char* name;
+        String name;
+
         AEEDirection direction;
         AEEVarSourceType sourceType = AEEVarSourceType::None;
 
@@ -121,7 +122,7 @@ enum class AEEVarSourceType {
     // ------------------------------------------------------------
     AEEVarDef(const JsonObject& o)
     {
-        name = strdup(o["name"] | "");
+        name = o["name"] | "";
 
         const char* t = o["type"] | "bool";
         varType =
@@ -181,14 +182,17 @@ public:
 template<typename T>
 class AEEVariable : public AEEVariableBase {
 private:
-    T value;
+    T value{};
     bool changed = false;
 
 public:
     using Callback = std::function<void(const T&)>;
     Callback onChange;
 
-    AEEVariable(const AEEVarDef& d) : AEEVariableBase(d) {}
+    explicit AEEVariable(const AEEVarDef& d)
+        : AEEVariableBase(d)
+    {
+    }
 
     void set(const T& v, unsigned long now) {
         if (v == value) return;
@@ -215,8 +219,9 @@ public:
     bool hasChanged() override { return changed; }
     void clearChanged() override { changed = false; }
 
-    void toJson(JsonDocument& doc) const override {
-        doc[def.name] = value;
+    void toJson(JsonDocument& doc) const override
+    {
+        doc[def.name.c_str()] = value;
     }
 
     bool fromJson(const JsonVariant& v) override;
@@ -241,9 +246,39 @@ private:
     std::vector<AEEVariableBase*> changedVars;   // 🔥 nuovo
 
 public:
-    void add(AEEVariableBase* v) { vars.push_back(v); }
+    void add(AEEVariableBase* v)
+    {
+        if (!v)
+            return;
 
-    void notifyChanged(AEEVariableBase* v) {
+        for (auto* current : vars)
+        {
+            if (current == v)
+                return;
+        }
+
+        vars.push_back(v);
+    }
+
+    void clear()
+    {
+        // Il registry non possiede le variabili:
+        // elimina soltanto i riferimenti.
+        vars.clear();
+        changedVars.clear();
+    }
+
+    void notifyChanged(AEEVariableBase* v)
+    {
+        if (!v)
+            return;
+
+        for (auto* changed : changedVars)
+        {
+            if (changed == v)
+                return;
+        }
+
         changedVars.push_back(v);
     }
 
@@ -271,7 +306,7 @@ public:
     void forceAllChanged(unsigned long now) {
         for (auto* v : vars) {
             v->forceChanged(now);
-            notifyChanged(v);   // aggiunge alla lista changed
+            //notifyChanged(v);   sembra non serivre xche gia in forceChanged
         }
     }
     
@@ -281,10 +316,14 @@ public:
 
     size_t size() const { return vars.size(); }
 
-    AEEVariableBase* find(const String& name) {
+    AEEVariableBase* find(const String& name)
+    {
         for (auto* v : vars)
-            if (strcmp(name.c_str(), v->def.name) == 0)
+        {
+            if (v && name == v->def.name)
                 return v;
+        }
+
         return nullptr;
     }
 
@@ -292,7 +331,7 @@ public:
     {
         for (auto* v : vars)
         {
-            if (v && strcmp(name.c_str(), v->def.name) == 0)
+            if (v && name == v->def.name)
                 return v;
         }
 
@@ -307,6 +346,20 @@ public:
 class AEEManagement {
 public:
     std::vector<AEEVariableBase*> vars;
+
+    ~AEEManagement()
+    {
+        for (auto* v : vars)
+        {
+            if (!v)
+                continue;
+
+            v->owner = nullptr;
+            delete v;
+        }
+
+        vars.clear();
+    }
 
     AEEManagement(const AEEVarDef* defs, size_t count) {
         vars.reserve(count);
@@ -539,7 +592,7 @@ bool AEEVariable<T>::fromJson(const JsonVariant& v) {
 
     LOG_IF("SLAVE::AEE::APPLY",
            "Applying %s = %s",
-           def.name,
+           def.name.c_str(),
            String(newVal).c_str());
            
     this->set(newVal, millis());
@@ -547,13 +600,31 @@ bool AEEVariable<T>::fromJson(const JsonVariant& v) {
 }
 
 template<>
-inline bool AEEVariable<String>::fromJson(const JsonVariant& v) {
-    if (!v.is<const char*>()) return false;
+inline bool AEEVariable<String>::fromJson(const JsonVariant& v)
+{
+    if (!v.is<const char*>())
+        return false;
 
     const char* incoming = v.as<const char*>();
-    if (strcmp(this->get().c_str(), incoming) == 0) return false;
 
-    set(String(incoming), millis());
+    if (!incoming)
+        return false;
+
+    if (this->get() == incoming)
+        return false;
+
+    LOG_IF(
+        "SLAVE::AEE::APPLY",
+        "Applying %s = %s",
+        def.name.c_str(),
+        incoming
+    );
+
+    set(
+        String(incoming),
+        millis()
+    );
+
     return true;
 }
 
