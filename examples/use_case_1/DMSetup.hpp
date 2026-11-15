@@ -543,12 +543,88 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
 
     { AREA_CUCINA_ESTRATTORE_BIT, 0, "Estrattore Cucina Stato", {false}, {-1,-1} },
     { AREA_BAGNO_ESTRATTORE_BIT,  0, "Estrattore Bagno Stato", {false}, {-1,-1} },
-    { AREA_SECURITY_STATUS,       0, "Stato antifurto", {false}, {-1,-1} },
-    { AREA_SECURITY_STATUS2,       0, "Stato antifurto 2", {false}, {-1,-1} },
-
+    
     { AREA_SETPOINT_TEMP_GIORNO,       0, "Setpoint temperatura zona Giorno", {false}, {-1,-1} },
     { AREA_SETPOINT_TEMP_NOTTE,       0, "Setpoint temperatura zona Notte", {false}, {-1,-1} },
     { AREA_SETPOINT_TEMP_BAGNO,       0, "Setpoint temperatura Bagno", {false}, {-1,-1} },
+
+    // ============================================================
+    // SECURITY SENSOR STATUS
+    // ============================================================
+
+    { AREA_CUCINA_PIR_STATUS,     0, "Security PIR Cucina",        {false}, {-1, -1} },
+    { AREA_CUCINA_DOOR_STATUS,    0, "Security Porta Cucina",      {false}, {-1, -1} },
+    { AREA_CUCINA_SMOKE_STATUS,   0, "Security Fumo Cucina",       {false}, {-1, -1} },
+    { AREA_CUCINA_FLOOD_STATUS,   0, "Security Allagamento Cucina",{false}, {-1, -1} },
+
+    { AREA_INGRESSO_PIR_STATUS,   0, "Security PIR Ingresso",      {false}, {-1, -1} },
+    { AREA_INGRESSO_DOOR_STATUS,  0, "Security Porta Ingresso",    {false}, {-1, -1} },
+
+    { AREA_CAMERA_SMOKE_STATUS,   0, "Security Fumo Camera",       {false}, {-1, -1} },
+    { AREA_CAMERA_PIR_STATUS,     0, "Security PIR Camera",        {false}, {-1, -1} },
+    { AREA_CAMERA_WIN1_STATUS,    0, "Security Finestra Camera",   {false}, {-1, -1} },
+    { AREA_CAMERA_WIN2_STATUS,    0, "Security Vasistas Dx Camera",{false}, {-1, -1} },
+    { AREA_CAMERA_WIN3_STATUS,    0, "Security Vasistas Sx Camera",{false}, {-1, -1} },
+
+    { AREA_BAGNO_FLOOD_STATUS,    0, "Security Allagamento Bagno", {false}, {-1, -1} },
+    { AREA_BAGNO_PIR_STATUS,      0, "Security PIR Bagno",         {false}, {-1, -1} },
+
+    // ============================================================
+    // SECURITY ZONE STATUS
+    // ============================================================
+
+    { AREA_CUCINA_SECURITY_STATUS,  0, "Security zona Cucina",  {false}, {-1, -1} },
+    { AREA_CAMERA_SECURITY_STATUS,  0, "Security zona Camera",  {false}, {-1, -1} },
+    { AREA_BAGNO_SECURITY_STATUS,   0, "Security zona Bagno",   {false}, {-1, -1} },
+    { AREA_INGRESSO_SECURITY_STATUS,0, "Security zona Ingresso",{false}, {-1, -1} },
+
+    // ============================================================
+    // SECURITY SENSOR COMMANDS
+    // ============================================================
+
+    { AREA_CUCINA_PIR_CMD,       0, "Comando PIR Cucina",         {false}, {-1, -1} },
+    { AREA_CUCINA_DOOR_CMD,      0, "Comando Porta Cucina",       {false}, {-1, -1} },
+    { AREA_CUCINA_SMOKE_CMD,     0, "Comando Fumo Cucina",        {false}, {-1, -1} },
+    { AREA_CUCINA_FLOOD_CMD,     0, "Comando Allagamento Cucina", {false}, {-1, -1} },
+
+    { AREA_INGRESSO_PIR_CMD,     0, "Comando PIR Ingresso",       {false}, {-1, -1} },
+    { AREA_INGRESSO_DOOR_CMD,    0, "Comando Porta Ingresso",     {false}, {-1, -1} },
+
+    { AREA_CAMERA_SMOKE_CMD,     0, "Comando Fumo Camera",        {false}, {-1, -1} },
+    { AREA_CAMERA_PIR_CMD,       0, "Comando PIR Camera",         {false}, {-1, -1} },
+    { AREA_CAMERA_WIN1_CMD,      0, "Comando Finestra Camera",    {false}, {-1, -1} },
+    { AREA_CAMERA_WIN2_CMD,      0, "Comando Vasistas Dx Camera", {false}, {-1, -1} },
+    { AREA_CAMERA_WIN3_CMD,      0, "Comando Vasistas Sx Camera", {false}, {-1, -1} },
+
+    { AREA_BAGNO_FLOOD_CMD,      0, "Comando Allagamento Bagno",  {false}, {-1, -1} },
+    { AREA_BAGNO_PIR_CMD,        0, "Comando PIR Bagno",          {false}, {-1, -1} },
+
+    // ============================================================
+    // SECURITY ZONE COMMANDS
+    // ============================================================
+
+    { AREA_CUCINA_SECURITY_CMD,  0, "Comando zona Cucina",  {false}, {-1, -1} },
+    { AREA_CAMERA_SECURITY_CMD,  0, "Comando zona Camera",  {false}, {-1, -1} },
+    { AREA_BAGNO_SECURITY_CMD,   0, "Comando zona Bagno",   {false}, {-1, -1} },
+    { AREA_INGRESSO_SECURITY_CMD,0, "Comando zona Ingresso",{false}, {-1, -1} },
+
+    // ============================================================
+    // SECURITY PANEL
+    // ============================================================
+
+    { AREA_SECURITY_STATUS,      0, "Stato antifurto",         {false}, {-1, -1} },
+    { AREA_SECURITY_STATUS2,     0, "Stato antifurto 2",       {false}, {-1, -1} },
+    { AREA_SECURITY_EVT_AREA,    0, "Evento antifurto",        {false}, {-1, -1} },
+    { AREA_SECURITY_CMD_AREA,    0, "Comando pannello antifurto",{false}, {-1, -1} },
+    { AREA_SECURITY_BIT_AREA,    0, "Comando bit antifurto",   {false}, {-1, -1} },
+
+// ============================================================
+// SECURITY MQTT REMOTE
+// ============================================================
+/*
+{ AREA_MQTT_HANDCONTROL,        0, "Telecomando antifurto",        {false}, {-1, -1} }, 
+{ AREA_MQTT_HANDCONTROL_STATUS, 0, "Stato telecomando antifurto",  {false}, {-1, -1} },
+{ AREA_MQTT_HANDCONTROL_CMD,    0, "Comando telecomando antifurto",{false}, {-1, -1} },*/
 
     // ============================================================
     // INVERTER SOLARE
@@ -787,7 +863,7 @@ DomoManagerConfig makeDomoConfig() {
     cfg.hmi.enabled = true;   // opzionale, è già default
     cfg.hmi.port = 502;        // default
     cfg.hmi.pollingMs = 250;   // default
-    cfg.hmi.maxClients = 1;
+    cfg.hmi.maxClients = 2;
 
     // --- Watchdog ---
     cfg.watchdog = wdConfig;
@@ -967,7 +1043,7 @@ static WiredSensorsManager::WiredSensorConfig WIRED_SENSOR_CONFIG[] = {
     { SensorChannel( -1, RT_DELAY, SensorChannelType::H24) },
     { WiredSensorsManager::MakeReader(AREA_MQTT_HANDCONTROL,
             [](int area) { return DomoManager::instance->getBuffer().getValueFast(area) ==6; }) },
-    SensorCategory::PANIC , AREA_MQTT_HANDCONTROL_CMD, AREA_MQTT_HANDCONTROL_STATUS },
+    SensorCategory::PANIC, AREA_MQTT_HANDCONTROL_CMD, AREA_MQTT_HANDCONTROL_STATUS }
 };
 
 static const FrontendConfig::SecurityZoneConfig SECURITY_ZONE_CONFIG[] =
@@ -1765,7 +1841,7 @@ static const AEEVarDef AEE_VARS[] = {
         -1, -1,
         {},
         nullptr, nullptr, nullptr,
-        AEEVarType::INT, 0.0f },
+        AEEVarType::INT, 0.0f }
         
 };
 

@@ -673,19 +673,28 @@ private:
     static inline FrontendNetwork* network = nullptr;
     
     // ========================================================
-    // AEE / BRIDGE OWNERSHIP
+    // AEE / BRIDGE ORCHESTRATION
     //
-    // Le classi non sono singleton.
-    // Le istanze appartengono al frontend concreto.
+    // Il frontend possiede esclusivamente il coordinatore.
     //
-    // L'ordine è intenzionale:
-    // - AEEEngine viene costruito prima
-    // - BridgeEngine viene costruito dopo
-    // - in distruzione BridgeEngine viene eliminato prima
+    // Ogni AEEBridgeChannel gestisce autonomamente:
+    //
+    // - AEEEngine;
+    // - BridgeEngine;
+    // - registry AEE;
+    // - transport UDP;
+    // - protocollo di rete;
+    // - socket owner;
+    // - sorgente EventManager;
+    // - callback RX;
+    // - pacing;
+    // - diagnostica.
+    //
+    // Il frontend non implementa direttamente la gestione dei
+    // singoli bridge.
     // ========================================================
 
-    AEEEngine aeeEngine;
-    BridgeEngine peerBridgeEngine;
+    AEEBridgeOrchestrator aeeBridgeOrchestrator;
 
     static inline void (*fullCycleCallback)(DomoManager&) = nullptr;
     
@@ -1380,51 +1389,18 @@ private:
             return;
         }
 
-        AEEManagement* aeeManager =
-            instance
-                ->aeeEngine
-                .getManager();
-
-        if (!aeeManager)
-        {
-            LOG_WF(
-                "AEE",
-                "AEEEventCallback senza management"
-            );
-
-            return;
-        }
-
-        std::vector<DMAEE::Update>
-            updates;
-
-        updates.reserve(8);
-
-        if (
-            !DMAEE::
-                BuildUpdatesFromBufferArea(
-                    *aeeManager,
-                    event.area,
-                    event.value,
-                    updates
-                )
-        )
-        {
-            return;
-        }
-
-        if (updates.empty())
-            return;
-
         const unsigned long now =
             Manager
                 ->getTimeManager()
                 .nowMs();
 
-        DMAEE::ApplyUpdates(
-            updates,
-            now
-        );
+        instance
+            ->aeeBridgeOrchestrator
+            .applyBufferEvent(
+                event.area,
+                event.value,
+                now
+            );
     }
 
     static void SecurityAlarmCallback(
@@ -1750,81 +1726,37 @@ private:
     }
 
     // ========================================================
-    // AEE RECEIVE CALLBACK
+    // TASK: AEE BRIDGES
+    //
+    // Esegue tutti i canali AEE/Bridge configurati.
+    //
+    // Il frontend non conosce:
+    // - numero dei bridge;
+    // - stato dei singoli bridge;
+    // - transport;
+    // - protocol ID;
+    // - socket owner;
+    // - pacing.
+    //
+    // Tutta la gestione è delegata ad AEEBridgeOrchestrator.
     // ========================================================
 
-    static void OnAEEVarChanged(
-        AEEVariableBase* variable,
-        unsigned long now)
-    {
-        if (!instance ||
-            !variable)
-        {
-            return;
-        }
-
-        instance
-            ->aeeEngine
-            .applyReceived(
-                variable,
-                now
-            );
-    }
-
-    // ========================================================
-    // COMMUNICATION SERVICE: PEER BRIDGE
-    // ========================================================
-
-    static void Task_Bridge(
+    static void Task_Bridges(
         DomoManager& manager,
         unsigned long now)
     {
         (void)manager;
 
         if (!instance)
+        {
             return;
-
-        const unsigned long startUs =
-            micros();
+        }
 
         instance
-            ->peerBridgeEngine
-            .loop(now);
-
-        const unsigned long elapsedUs =
-            micros() - startUs;
-
-        if (elapsedUs > 100000UL)
-        {
-            LOG_WF(
-                "BRIDGE-TASK",
-                "Bridge loop lento: %lu us",
-                elapsedUs
+            ->aeeBridgeOrchestrator
+            .loop(
+                now
             );
-        }
-
-        static unsigned long lastAliveLog = 0;
-
-        if (
-            lastAliveLog == 0 ||
-            now - lastAliveLog >= 5000UL
-        )
-        {
-            LOG_DF(
-                "BRIDGE-TASK",
-                "Bridge task attivo: now=%lu elapsed=%lu us state=%d",
-                now,
-                elapsedUs,
-                static_cast<int>(
-                    instance
-                        ->peerBridgeEngine
-                        .getBridge()
-                        .getState()
-                )
-            );
-
-            lastAliveLog = now;
-        }
     }
 
     // ========================================================
@@ -1846,7 +1778,12 @@ private:
     }
 
     // ========================================================
-    // OPTIONAL TASK: AEE DUMP
+    // OPTIONAL TASK: PRIMARY AEE DUMP
+    //
+    // Per compatibilità, il dump utilizza il registry del primo
+    // canale configurato.
+    //
+    // In seguito potrà essere esteso per iterare su tutti i canali.
     // ========================================================
 
     static void Task_AEE_Dump(
@@ -1857,27 +1794,39 @@ private:
         (void)now;
 
         if (!instance)
+        {
             return;
+        }
 
-        AEERegistry& registry =
+        AEERegistry* registry =
             instance
-                ->aeeEngine
-                .getRegistry();
+                ->aeeBridgeOrchestrator
+                .getPrimaryRegistry();
 
-        StaticJsonDocument<1024> doc;
+        if (!registry)
+        {
+            return;
+        }
 
-        registry.forEach(
+        StaticJsonDocument<1024>
+            document;
+
+        registry->forEach(
             [&](AEEVariableBase* variable)
             {
                 if (variable)
-                    variable->toJson(doc);
+                {
+                    variable->toJson(
+                        document
+                    );
+                }
             }
         );
 
         String output;
 
         serializeJson(
-            doc,
+            document,
             output
         );
 
@@ -2937,21 +2886,21 @@ private:
     DomoManagerFrontendEngine(
         DomoManager& dm,
         const FrontendConfig& cfg)
-        : FrontendRuntime(dm, cfg),
-        aeeEngine(),
-        peerBridgeEngine()
+        : FrontendRuntime(
+            dm,
+            cfg
+        ),
+        aeeBridgeOrchestrator()
     {
-        peerBridgeEngine.setIdentity(
-            0,
-            "AEE-PEER"
-        );
     }
+
 
     // ========================================================
     // INTROSPECTION
     // ========================================================
     static bool BuildIntrospection()
     {
+
         if (!Manager ||
             !instance)
         {
@@ -2963,17 +2912,17 @@ private:
             return false;
         }
 
-        const FrontendConfig& config =
-            instance->getConfig();
+        AEERegistry* primaryRegistry =
+            instance
+                ->aeeBridgeOrchestrator
+                .getPrimaryRegistry();
 
         const IntrospectionEngine::Result result =
             IntrospectionEngine::Build(
                 introspection,
                 *Manager,
-                config,
-                &instance
-                    ->aeeEngine
-                    .getRegistry()
+                instance->getConfig(),
+                primaryRegistry
             );
 
         if (!result.success)
@@ -2989,7 +2938,8 @@ private:
         LOG_IF(
             "INTROSPECTION",
             "Frontend model ready: "
-            "entities=%u profiles=%u/%u",
+            "entities=%u profiles=%u/%u "
+            "aeeRegistry=%s",
             static_cast<unsigned>(
                 result.entityCount
             ),
@@ -2998,12 +2948,528 @@ private:
             ),
             static_cast<unsigned>(
                 result.deviceCount
-            )
+            ),
+            primaryRegistry
+                ? "PRIMARY"
+                : "NONE"
         );
 
         return true;
     }
     
+    // ============================================================
+    // SETUP AEE BRIDGES
+    //
+    // Inizializzazione bifase:
+    //
+    // 1. copia della configurazione frontend;
+    // 2. inizializzazione dei channel AEE statici;
+    // 3. costruzione Introspection dal primary registry;
+    // 4. inizializzazione dei channel dinamici;
+    // 5. registrazione del task aggregato.
+    //
+    // Se un channel possiede:
+    //
+    //     aee.vars != nullptr
+    //     aee.count > 0
+    //
+    // viene configurato nella fase statica.
+    //
+    // Se un channel non possiede configurazione AEE statica,
+    // viene configurato nella seconda fase utilizzando
+    // DomoIntrospection.
+    // ============================================================
+
+    static bool SetupAEEBridges(
+        const FrontendConfig& cfg)
+    {
+        if (!Manager ||
+            !instance)
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "Setup failed: runtime unavailable"
+            );
+
+            return false;
+        }
+
+        #if HOTSTANDBY_ENABLED
+
+            Manager->enableHotStandby(
+                false
+            );
+
+            LOG_IF(
+                "HOTSTANDBY",
+                "Hot standby support enabled"
+            );
+
+            /*
+            * In Hot Standby i bridge locali non vengono inizializzati.
+            * Introspection viene comunque costruita senza dipendere
+            * da un primary registry locale.
+            */
+            if (!BuildIntrospection())
+            {
+                LOG_EF(
+                    "INTROSPECTION",
+                    "Frontend model initialization failed"
+                );
+
+                return false;
+            }
+
+            return true;
+
+        #else
+
+            // ========================================================
+            // BRIDGE COUNT VALIDATION
+            //
+            // Non viene utilizzato cfg.bridges.valid(), perché quella
+            // validazione appartiene al vecchio modello, nel quale:
+            //
+            // - remotePort doveva essere sempre valorizzata;
+            // - ogni bridge doveva avere configurazione AEE statica.
+            //
+            // Nel modello corrente:
+            //
+            // - IP 0.0.0.0 + remotePort 0 identifica un endpoint dinamico;
+            // - aee.vars/count assenti identificano un channel costruito
+            //   tramite Introspection.
+            // ========================================================
+
+            const size_t bridgeCount =
+                cfg
+                    .bridges
+                    .normalizedCount();
+
+            if (bridgeCount == 0)
+            {
+                LOG_IF(
+                    "AEE-BRIDGE",
+                    "No bridge channels configured"
+                );
+
+                /*
+                * Introspection serve comunque a MQTT/Home Assistant.
+                */
+                return BuildIntrospection();
+            }
+
+            if (
+                bridgeCount >
+                AEEBridgeOrchestrator::MAX_CHANNELS
+            )
+            {
+                LOG_EF(
+                    "AEE-BRIDGE",
+                    "Numero bridge non valido: "
+                    "configured=%u maximum=%u",
+                    static_cast<unsigned>(
+                        bridgeCount
+                    ),
+                    static_cast<unsigned>(
+                        AEEBridgeOrchestrator::MAX_CHANNELS
+                    )
+                );
+
+                return false;
+            }
+
+            AEEBridgeChannel::Config
+                bridgeConfigurations[
+                    AEEBridgeOrchestrator::MAX_CHANNELS
+                ] {};
+
+            bool bridgeTaskEnabled =
+                false;
+
+            uint32_t bridgeTaskIntervalMs =
+                20UL;
+
+            // ========================================================
+            // FRONTEND CONFIGURATION -> RUNTIME CONFIGURATION
+            // ========================================================
+
+            for (
+                size_t index = 0;
+                index < bridgeCount;
+                ++index
+            )
+            {
+                const FrontendConfig::Bridge& source =
+                    cfg
+                        .bridges
+                        .channel[index];
+
+                AEEBridgeChannel::Config& destination =
+                    bridgeConfigurations[index];
+
+                destination.enabled =
+                    source.enabled;
+
+                destination.id =
+                    source.id;
+
+                destination.name =
+                    source.name;
+
+                destination.remoteIp =
+                    source.ip;
+
+                destination.localPort =
+                    source.localPort;
+
+                destination.remotePort =
+                    source.remotePort;
+
+                destination.protocolIntervalMs =
+                    source.protocolIntervalMs;
+
+                destination.protocolTimeoutMs =
+                    source.protocolTimeoutMs;
+
+                destination.taskIntervalMs =
+                    source.taskIntervalMs;
+
+                destination.aee =
+                    source.aee;
+
+                // ========================================================
+                // MODEL DEDUCTION
+                //
+                // Config non contiene ModelSource.
+                //
+                // Il modello viene dedotto automaticamente:
+                //
+                // vars/count presenti:
+                //     AEE statico.
+                //
+                // vars/count assenti:
+                //     Introspection fornita nella seconda fase.
+                // ========================================================
+
+
+                const bool staticAEE =
+                    source.aee.vars != nullptr &&
+                    source.aee.count > 0;
+
+                // ========================================================
+                // CHANNEL CONFIGURATION VALIDATION
+                // ========================================================
+
+                if (!source.enabled)
+                {
+                    continue;
+                }
+
+                if (!source.name ||
+                    source.name[0] == '\0')
+                {
+                    LOG_EF(
+                        "AEE-BRIDGE",
+                        "Channel name non valido: index=%u",
+                        static_cast<unsigned>(
+                            index
+                        )
+                    );
+
+                    return false;
+                }
+
+                if (source.localPort == 0)
+                {
+                    LOG_EF(
+                        "AEE-BRIDGE",
+                        "Local port non valida: "
+                        "index=%u id=%u name=%s",
+                        static_cast<unsigned>(
+                            index
+                        ),
+                        static_cast<unsigned>(
+                            source.id
+                        ),
+                        source.name
+                    );
+
+                    return false;
+                }
+
+                // ========================================================
+                // ENDPOINT MODE
+                //
+                // 0.0.0.0:
+                //     endpoint dinamico appreso dal primo pacchetto.
+                //
+                // Qualsiasi altro IP:
+                //     endpoint statico con remotePort obbligatoria.
+                // ========================================================
+
+                const bool dynamicEndpoint =
+                    source.ip[0] == 0 &&
+                    source.ip[1] == 0 &&
+                    source.ip[2] == 0 &&
+                    source.ip[3] == 0;
+
+                if (
+                    !dynamicEndpoint &&
+                    source.remotePort == 0
+                )
+                {
+                    LOG_EF(
+                        "AEE-BRIDGE",
+                        "Endpoint statico senza remotePort: "
+                        "index=%u id=%u name=%s",
+                        static_cast<unsigned>(
+                            index
+                        ),
+                        static_cast<unsigned>(
+                            source.id
+                        ),
+                        source.name
+                    );
+
+                    return false;
+                }
+
+                LOG_IF(
+                    "AEE-BRIDGE",
+                    "Channel validato: "
+                    "index=%u id=%u name=%s "
+                    "model=%s endpoint=%s "
+                    "localPort=%u remotePort=%u",
+                    static_cast<unsigned>(
+                        index
+                    ),
+                    static_cast<unsigned>(
+                        source.id
+                    ),
+                    source.name,
+                    staticAEE
+                        ? "STATIC"
+                        : "INTROSPECTION",
+                    dynamicEndpoint
+                        ? "DYNAMIC"
+                        : "STATIC",
+                    static_cast<unsigned>(
+                        source.localPort
+                    ),
+                    static_cast<unsigned>(
+                        source.remotePort
+                    )
+                );
+
+                const uint32_t intervalMs =
+                    source.taskIntervalMs > 0
+                        ? source.taskIntervalMs
+                        : 1UL;
+
+                if (
+                    !bridgeTaskEnabled ||
+                    intervalMs <
+                        bridgeTaskIntervalMs
+                )
+                {
+                    bridgeTaskEnabled =
+                        true;
+
+                    bridgeTaskIntervalMs =
+                        intervalMs;
+                }
+            }
+
+            // ========================================================
+            // PHASE 1: STATIC AEE CHANNELS
+            //
+            // Il primary AEE peer viene inizializzato in questa fase.
+            //
+            // Al termine, getPrimaryRegistry() deve essere disponibile
+            // per IntrospectionEngine::Build().
+            // ========================================================
+
+            if (
+                !instance
+                    ->aeeBridgeOrchestrator
+                    .setupStaticChannels(
+                        bridgeConfigurations,
+                        bridgeCount,
+                        *Manager,
+                        Manager->net
+                    )
+            )
+            {
+                LOG_EF(
+                    "AEE-BRIDGE",
+                    "Static channel phase failed"
+                );
+
+                return false;
+            }
+
+            AEERegistry* primaryRegistry =
+                instance
+                    ->aeeBridgeOrchestrator
+                    .getPrimaryRegistry();
+
+            if (!primaryRegistry)
+            {
+                LOG_WF(
+                    "AEE-BRIDGE",
+                    "Primary registry unavailable after static phase"
+                );
+            }
+            else
+            {
+                LOG_IF(
+                    "AEE-BRIDGE",
+                    "Primary registry ready: variables=%u",
+                    static_cast<unsigned>(
+                        primaryRegistry->size()
+                    )
+                );
+            }
+
+            // ========================================================
+            // INTROSPECTION BUILD
+            //
+            // Introspection viene costruita dopo il primary statico,
+            // così può includere anche il relativo registry AEE.
+            // ========================================================
+
+            if (!BuildIntrospection())
+            {
+                LOG_EF(
+                    "INTROSPECTION",
+                    "Frontend model initialization failed"
+                );
+
+                return false;
+            }
+
+            if (introspection.entityCount() == 0)
+            {
+                LOG_EF(
+                    "INTROSPECTION",
+                    "Frontend model is empty"
+                );
+
+                return false;
+            }
+
+            // ========================================================
+            // PHASE 2: INTROSPECTION CHANNELS
+            //
+            // I channel senza configurazione AEE statica vengono
+            // costruiti automaticamente dal modello Introspection.
+            // ========================================================
+
+            if (
+                !instance
+                    ->aeeBridgeOrchestrator
+                    .setupIntrospectionChannels(
+                        bridgeConfigurations,
+                        bridgeCount,
+                        *Manager,
+                        Manager->net,
+                        introspection
+                    )
+            )
+            {
+                LOG_EF(
+                    "AEE-BRIDGE",
+                    "Introspection channel phase failed"
+                );
+
+                return false;
+            }
+
+            // ========================================================
+            // FINAL ORCHESTRATOR VALIDATION
+            // ========================================================
+
+            if (
+                bridgeTaskEnabled &&
+                !instance
+                    ->aeeBridgeOrchestrator
+                    .isInitialized()
+            )
+            {
+                LOG_EF(
+                    "AEE-BRIDGE",
+                    "Orchestrator not initialized after channel setup"
+                );
+
+                return false;
+            }
+
+            // ========================================================
+            // BRIDGE TASK
+            // ========================================================
+
+            if (
+                bridgeTaskEnabled &&
+                !TaskEngine::AddTask(
+                    Task_Bridges,
+                    bridgeTaskIntervalMs,
+                    true
+                )
+            )
+            {
+                LOG_EF(
+                    "AEE-BRIDGE",
+                    "Bridge task registration failed"
+                );
+
+                return false;
+            }
+
+            // ========================================================
+            // FINAL REPORT
+            // ========================================================
+
+            LOG_IF(
+                "AEE-BRIDGE",
+                "Bridge runtime ready: "
+                "configured=%u enabled=%u initialized=%u "
+                "operational=%u task=%u interval=%lu "
+                "introspectionEntities=%u",
+                static_cast<unsigned>(
+                    instance
+                        ->aeeBridgeOrchestrator
+                        .getConfiguredCount()
+                ),
+                static_cast<unsigned>(
+                    instance
+                        ->aeeBridgeOrchestrator
+                        .getEnabledCount()
+                ),
+                static_cast<unsigned>(
+                    instance
+                        ->aeeBridgeOrchestrator
+                        .getInitializedCount()
+                ),
+                instance
+                    ->aeeBridgeOrchestrator
+                    .isOperational()
+                        ? 1U
+                        : 0U,
+                bridgeTaskEnabled
+                    ? 1U
+                    : 0U,
+                static_cast<unsigned long>(
+                    bridgeTaskIntervalMs
+                ),
+                static_cast<unsigned>(
+                    introspection.entityCount()
+                )
+            );
+
+            return true;
+
+        #endif
+    }
 
 protected:
     void onFrontendDiagnostics() override
@@ -3033,6 +3499,12 @@ protected:
         if (config.solarInverters.count > 0)
         {
             SolarEngine::DiagnosticReport();
+        }
+
+        if (aeeBridgeOrchestrator.isConfigured())
+        {
+            aeeBridgeOrchestrator
+                .diagnosticReport();
         }
     }
 
@@ -3069,7 +3541,7 @@ public:
         const FrontendConfig& cfg)
     {
         // ========================================================
-        // RESET STATIC RUNTIME POINTERS / IDS
+        // RESET STATIC RUNTIME
         // ========================================================
 
         Manager =
@@ -3096,6 +3568,9 @@ public:
         mqttEventSource =
             255;
 
+        fullCycleCallback =
+            nullptr;
+
         // ========================================================
         // CORE MANAGER
         // ========================================================
@@ -3108,8 +3583,8 @@ public:
         if (!Manager)
         {
             LOG_EF(
-                "DomoManagerFrontendEngine",
-                "Allocazione DomoManager fallita"
+                "FRONTEND",
+                "DomoManager allocation failed"
             );
 
             return;
@@ -3128,8 +3603,8 @@ public:
         if (!instance)
         {
             LOG_EF(
-                "DomoManagerFrontendEngine",
-                "Allocazione frontend fallita"
+                "FRONTEND",
+                "Frontend allocation failed"
             );
 
             delete Manager;
@@ -3152,44 +3627,26 @@ public:
         if (!network)
         {
             LOG_EF(
-                "DomoManagerFrontendEngine",
-                "Allocazione FrontendNetwork fallita"
+                "FRONTEND",
+                "FrontendNetwork allocation failed"
             );
 
             delete instance;
+
             instance =
                 nullptr;
 
             delete Manager;
+
             Manager =
                 nullptr;
 
             return;
         }
 
-        // ========================================================
-        // AEE ENGINE
-        // ========================================================
-
-        if (
-            !instance
-                ->aeeEngine
-                .setup(
-                    cfg.bridge.aee
-                )
-        )
-        {
-            LOG_EF(
-                "AEE",
-                "Setup AEE fallito"
-            );
-
-            return;
-        }
-
         LOG_I(
-            "DomoManagerFrontendEngine",
-            "DomoManager is starting..."
+            "FRONTEND",
+            "DomoManager is starting"
         );
 
         // ========================================================
@@ -3201,7 +3658,7 @@ public:
         );
 
         // ========================================================
-        // MODBUS TCP -> RTU CLIENT TIMEOUT
+        // MODBUS TCP -> RTU TIMEOUT
         // ========================================================
 
         network
@@ -3215,8 +3672,8 @@ public:
             );
 
         LOG_IF(
-            "DomoManagerFrontendEngine",
-            "Modbus TCP to RTU timeout set %lu mSec.",
+            "FRONTEND",
+            "Modbus TCP to RTU timeout: %lu ms",
             static_cast<unsigned long>(
                 cfg
                     .domoManager
@@ -3231,11 +3688,6 @@ public:
 
         // ========================================================
         // TASK ENGINE
-        //
-        // Registra solamente i task standard:
-        // - Security
-        // - HVAC
-        // - Averages
         // ========================================================
 
         TaskEngine::Setup(
@@ -3243,7 +3695,7 @@ public:
         );
 
         // ========================================================
-        // SOLAR TASK CONFIGURATION
+        // SOLAR TASK PARAMETERS
         // ========================================================
 
         bool solarTaskEnabled =
@@ -3254,11 +3706,9 @@ public:
 
         const uint8_t solarCount =
             cfg.solarInverters.count <
-                FrontendConfig::
-                    MAX_SOLAR_INVERTERS
+                FrontendConfig::MAX_SOLAR_INVERTERS
                 ? cfg.solarInverters.count
-                : FrontendConfig::
-                    MAX_SOLAR_INVERTERS;
+                : FrontendConfig::MAX_SOLAR_INVERTERS;
 
         for (
             uint8_t index = 0;
@@ -3272,29 +3722,24 @@ public:
                     .inverter[index];
 
             if (!solar.enabled)
+            {
                 continue;
+            }
 
             const uint32_t intervalMs =
                 solar.intervalMs > 0
                     ? solar.intervalMs
                     : 1UL;
 
-            if (!solarTaskEnabled)
+            if (
+                !solarTaskEnabled ||
+                intervalMs <
+                    solarTaskIntervalMs
+            )
             {
                 solarTaskEnabled =
                     true;
 
-                solarTaskIntervalMs =
-                    intervalMs;
-
-                continue;
-            }
-
-            if (
-                intervalMs <
-                solarTaskIntervalMs
-            )
-            {
                 solarTaskIntervalMs =
                     intervalMs;
             }
@@ -3309,90 +3754,35 @@ public:
                 Task_Solar,
                 solarTaskIntervalMs,
                 solarTaskEnabled
-            )
-        )
-        {
-            LOG_EF(
-                "TASK-ENGINE",
-                "Registrazione Task_Solar fallita"
-            );
-
-            return;
-        }
-
-        if (
+            ) ||
             !TaskEngine::AddTask(
                 Task_Jobs,
                 cfg.jobs.intervalMs,
                 cfg.jobs.enabled
-            )
-        )
-        {
-            LOG_EF(
-                "TASK-ENGINE",
-                "Registrazione Task_Jobs fallita"
-            );
-
-            return;
-        }
-
-        if (
+            ) ||
             !TaskEngine::AddTask(
                 [](
-                    DomoManager& manager,
+                    DomoManager& taskManager,
                     unsigned long now)
                 {
                     hmiEngine.Sync(
-                        manager,
+                        taskManager,
                         now
                     );
                 },
                 10UL,
                 cfg.domoManager.hmi.enabled
-            )
-        )
-        {
-            LOG_EF(
-                "TASK-ENGINE",
-                "Registrazione task HMI fallita"
-            );
-
-            return;
-        }
-
-        if (
+            ) ||
             !TaskEngine::AddTask(
                 Task_Meteo,
                 cfg.weather.intervalMs,
                 cfg.weather.enabled
-            )
-        )
-        {
-            LOG_EF(
-                "TASK-ENGINE",
-                "Registrazione Task_Meteo fallita"
-            );
-
-            return;
-        }
-
-        if (
+            ) ||
             !TaskEngine::AddTask(
                 Task_PowerSupervisor,
                 cfg.ps.intervalMs,
                 cfg.ps.enabled
-            )
-        )
-        {
-            LOG_EF(
-                "TASK-ENGINE",
-                "Registrazione Task_PowerSupervisor fallita"
-            );
-
-            return;
-        }
-
-        if (
+            ) ||
             !TaskEngine::AddTask(
                 Task_Power,
                 cfg.power.intervalMs,
@@ -3402,7 +3792,7 @@ public:
         {
             LOG_EF(
                 "TASK-ENGINE",
-                "Registrazione Task_Power fallita"
+                "Custom task registration failed"
             );
 
             return;
@@ -3443,87 +3833,66 @@ public:
                     "HMI"
                 );
 
-        const int aeeSource =
+        const int aeeRoutingSource =
             Manager
                 ->getEventManager()
                 .add(
                     AEEEventCallback,
-                    "AEE"
+                    "AEE-ROUTER"
                 );
 
-        const int mqttSource =
-            Manager
-                ->getEventManager()
-                .add(
-                    MQTTEventCallback,
-                    "MQTT"
-                );
+        int mqttSource = -1;
 
-        // ========================================================
-        // EVENT SOURCE VALIDATION
-        // ========================================================
-        if (securitySource < 0 ||
-            securitySource > 254)
+        if (cfg.mqtt.enabled)
         {
-            LOG_EF(
-                "SECURITY",
-                "Event source non valido: %d",
-                securitySource
+            mqttSource =
+                Manager
+                    ->getEventManager()
+                    .add(
+                        MQTTEventCallback,
+                        "MQTT"
+                    );
+        }
+        
+        const auto validSource =
+            [](int source) -> bool
+            {
+                return
+                    source >= 0 &&
+                    source <= 254;
+            };
+
+        const bool mqttSourceValid =
+            !cfg.mqtt.enabled ||
+            validSource(
+                mqttSource
             );
 
-            return;
-        }
-
         if (
-            solarSource < 0 ||
-            solarSource > 254
-        )
-        {
-            LOG_EF(
-                "SOLAR",
-                "Event source non valido: %d",
+            !validSource(
                 solarSource
-            );
-
-            return;
-        }
-
-        if (
-            hmiSource < 0 ||
-            hmiSource > 254
-        )
-        {
-            LOG_EF(
-                "HMI",
-                "Event source non valido: %d",
+            ) ||
+            !validSource(
+                securitySource
+            ) ||
+            !validSource(
                 hmiSource
-            );
-
-            return;
-        }
-
-        if (
-            aeeSource < 0 ||
-            aeeSource > 254
+            ) ||
+            !validSource(
+                aeeRoutingSource
+            ) ||
+            !mqttSourceValid
         )
         {
             LOG_EF(
-                "AEE",
-                "Event source non valido: %d",
-                aeeSource
-            );
-
-            return;
-        }
-
-        if (
-            mqttSource < 0 ||
-            mqttSource > 254
-        )
-        {
-            LOG_EF(
-                "MQTT",
-                "Event source non valido: %d",
+                "FRONTEND",
+                "Event source registration failed: "
+                "solar=%d security=%d hmi=%d "
+                "aee=%d mqtt=%d",
+                solarSource,
+                securitySource,
+                hmiSource,
+                aeeRoutingSource,
                 mqttSource
             );
 
@@ -3533,18 +3902,6 @@ public:
         mqttEventSource =
             static_cast<uint8_t>(
                 mqttSource
-            );
-
-        // ========================================================
-        // AEE RECEIVE CONTEXT
-        // ========================================================
-
-        instance
-            ->aeeEngine
-            .attachReceiveContext(
-                Manager->getBuffer(),
-                Manager->getEventManager(),
-                aeeSource
             );
 
         // ========================================================
@@ -3573,13 +3930,11 @@ public:
                         true
                     );
 
-            if (
-                modbusRTUProtocol < 0
-            )
+            if (modbusRTUProtocol < 0)
             {
                 LOG_EF(
                     "MODBUS",
-                    "Registrazione protocollo Modbus RTU fallita"
+                    "Modbus RTU protocol registration failed"
                 );
 
                 return;
@@ -3594,7 +3949,7 @@ public:
         }
 
         // ========================================================
-        // DOMO MANAGER SETUP
+        // DOMOMANAGER CORE SETUP
         // ========================================================
 
         if (
@@ -3607,7 +3962,7 @@ public:
         )
         {
             LOG_EF(
-                "DomoManagerFrontendEngine",
+                "FRONTEND",
                 "DomoManager setup failed"
             );
 
@@ -3618,10 +3973,6 @@ public:
                 );
             }
         }
-
-        // ========================================================
-        // MODBUS PERFORMANCE REPORTING
-        // ========================================================
 
         Manager
             ->getLogic()
@@ -3637,11 +3988,7 @@ public:
         // RUNTIME STORE
         // ========================================================
 
-        if (
-            !RegisterRuntimeTags(
-                *Manager
-            )
-        )
+        if (!RegisterRuntimeTags(*Manager))
         {
             LOG_EF(
                 "RUNTIME",
@@ -3662,7 +4009,7 @@ public:
                 .enabled
         )
         {
-            const uint8_t hmiSocketDemand =
+            const uint8_t socketDemand =
                 static_cast<uint8_t>(
                     1U +
                     cfg
@@ -3671,7 +4018,7 @@ public:
                         .maxClients
                 );
 
-            const auto hmiProtocolId =
+            const auto protocolId =
                 Manager
                     ->net
                     .registerProtocol(
@@ -3681,65 +4028,56 @@ public:
                             .hmi
                             .pollingMs,
                         60UL,
-                        hmiSocketDemand,
+                        socketDemand,
                         true
                     );
 
-            if (
-                hmiProtocolId < 0
-            )
+            if (protocolId < 0)
             {
                 LOG_EF(
-                    "DomoManagerFrontendEngine",
-                    "HMI protocol registration failed"
+                    "HMI",
+                    "Protocol registration failed"
                 );
-            }
-            else
-            {
-                const SocketManager::OwnerId
-                    hmiSocketOwner =
-                        Manager
-                            ->net
-                            .getProtocol(
-                                hmiProtocolId
-                            )
-                            .socketOwner;
 
-                if (
-                    hmiSocketOwner < 0
-                )
-                {
-                    LOG_EF(
-                        "HMI",
-                        "HMI socket owner non valido"
-                    );
-                }
-                else
-                {
-                    hmiEngine.Setup(
-                        cfg.domoManager.hmi,
-                        Manager->net,
-                        hmiSocketOwner,
-                        hmiProtocolId,
-                        cfg.domoManager.hmi.maxClients,
-                        Manager->getBuffer().size(),
-                        static_cast<uint8_t>(
-                            hmiSource
-                        )
-                    );
-                }
+                return;
             }
+
+            const SocketManager::OwnerId socketOwner =
+                Manager
+                    ->net
+                    .getProtocol(
+                        protocolId
+                    )
+                    .socketOwner;
+
+            if (socketOwner < 0)
+            {
+                LOG_EF(
+                    "HMI",
+                    "Socket owner unavailable"
+                );
+
+                return;
+            }
+
+            hmiEngine.Setup(
+                cfg.domoManager.hmi,
+                Manager->net,
+                socketOwner,
+                protocolId,
+                cfg.domoManager.hmi.maxClients,
+                Manager->getBuffer().size(),
+                static_cast<uint8_t>(
+                    hmiSource
+                )
+            );
         }
 
         // ========================================================
-        // WEB API
+        // WEB API / OWNER / FRONTEND ENGINES
         // ========================================================
 
         SetupWebAPI();
-
-        // ========================================================
-        // OWNER MODE CALLBACK
-        // ========================================================
 
         Manager
             ->getOwner()
@@ -3747,16 +4085,17 @@ public:
                 FrontendOwnerMode::OnChanged
             );
 
-        // ========================================================
-        // FRONTEND ENGINES
-        // ========================================================
-
-        if (!InitEngines(
+        if (
+            !InitEngines(
                 *Manager,
-                static_cast<uint8_t>(securitySource)))
+                static_cast<uint8_t>(
+                    securitySource
+                )
+            )
+        )
         {
             LOG_EF(
-                "DomoManagerFrontendEngine",
+                "FRONTEND",
                 "Frontend engines initialization failed"
             );
 
@@ -3769,26 +4108,22 @@ public:
 
         const uint8_t configuredSolarCount =
             cfg.solarInverters.count <
-                FrontendConfig::
-                    MAX_SOLAR_INVERTERS
+                FrontendConfig::MAX_SOLAR_INVERTERS
                 ? cfg.solarInverters.count
-                : FrontendConfig::
-                    MAX_SOLAR_INVERTERS;
+                : FrontendConfig::MAX_SOLAR_INVERTERS;
 
-        if (
-            configuredSolarCount > 0
-        )
+        if (configuredSolarCount > 0)
         {
-            bool anySolarEnabled =
+            bool anyEnabled =
                 false;
 
-            uint8_t solarSocketDemand =
+            uint8_t socketDemand =
                 0;
 
             uint32_t minimumIntervalMs =
                 1000UL;
 
-            uint32_t maximumQueryTimeoutMs =
+            uint32_t maximumTimeoutMs =
                 3000UL;
 
             for (
@@ -3803,62 +4138,57 @@ public:
                         .inverter[index];
 
                 if (!solar.enabled)
+                {
                     continue;
+                }
 
-                const uint32_t currentIntervalMs =
+                const uint32_t intervalMs =
                     solar.intervalMs > 0
                         ? solar.intervalMs
                         : 1UL;
 
-                const uint32_t currentTimeoutMs =
+                const uint32_t timeoutMs =
                     solar.queryTimeoutMs > 0
                         ? solar.queryTimeoutMs
                         : 3000UL;
 
-                if (!anySolarEnabled)
+                if (!anyEnabled)
                 {
-                    anySolarEnabled =
+                    anyEnabled =
                         true;
 
                     minimumIntervalMs =
-                        currentIntervalMs;
+                        intervalMs;
 
-                    maximumQueryTimeoutMs =
-                        currentTimeoutMs;
+                    maximumTimeoutMs =
+                        timeoutMs;
                 }
                 else
                 {
-                    if (
-                        currentIntervalMs <
-                        minimumIntervalMs
-                    )
-                    {
-                        minimumIntervalMs =
-                            currentIntervalMs;
-                    }
+                    minimumIntervalMs =
+                        min(
+                            minimumIntervalMs,
+                            intervalMs
+                        );
 
-                    if (
-                        currentTimeoutMs >
-                        maximumQueryTimeoutMs
-                    )
-                    {
-                        maximumQueryTimeoutMs =
-                            currentTimeoutMs;
-                    }
+                    maximumTimeoutMs =
+                        max(
+                            maximumTimeoutMs,
+                            timeoutMs
+                        );
                 }
 
                 if (
                     solar.transport ==
                     FrontendConfig::Solar::
-                        TransportType::
-                            TCP_CLIENT
+                        TransportType::TCP_CLIENT
                 )
                 {
-                    ++solarSocketDemand;
+                    ++socketDemand;
                 }
             }
 
-            if (anySolarEnabled)
+            if (anyEnabled)
             {
                 solarProtocolId =
                     Manager
@@ -3866,110 +4196,62 @@ public:
                         .registerProtocol(
                             "Solar",
                             minimumIntervalMs,
-                            maximumQueryTimeoutMs,
-                            solarSocketDemand,
+                            maximumTimeoutMs,
+                            socketDemand,
                             true
                         );
 
-                if (
-                    solarProtocolId < 0
-                )
+                if (solarProtocolId < 0)
                 {
                     LOG_EF(
                         "SOLAR",
                         "Protocol registration failed"
                     );
+
+                    return;
                 }
-                else
-                {
-                    LOG_IF(
-                        "SOLAR",
-                        "Protocol registered: "
-                        "id=%d inverters=%u sockets=%u "
-                        "interval=%lu timeout=%lu",
-                        static_cast<int>(
-                            solarProtocolId
-                        ),
-                        static_cast<unsigned>(
-                            configuredSolarCount
-                        ),
-                        static_cast<unsigned>(
-                            solarSocketDemand
-                        ),
-                        static_cast<unsigned long>(
-                            minimumIntervalMs
-                        ),
-                        static_cast<unsigned long>(
-                            maximumQueryTimeoutMs
-                        )
+
+                SolarEngine::
+                    SetSnapshotChangedCallback(
+                        OnSolarSnapshot
                     );
 
-                    SolarEngine::
-                        SetSnapshotChangedCallback(
-                            OnSolarSnapshot
-                        );
-
-                    SolarEngine::
-                        SetFrameReceivedCallback(
-                            OnSolarFrame
-                        );
-
-                    SolarEngine::
-                        SetCommandStateCallback(
-                            OnSolarCommandState
-                        );
-
-                    SolarEngine::Setup(
-                        *Manager,
-                        Manager->net,
-                        *network,
-                        cfg.solarInverters,
-                        solarProtocolId,
-                        static_cast<uint8_t>(
-                            solarSource
-                        )
+                SolarEngine::
+                    SetFrameReceivedCallback(
+                        OnSolarFrame
                     );
-                }
-            }
-            else
-            {
-                LOG_IF(
-                    "SOLAR",
-                    "All configured inverters are disabled"
+
+                SolarEngine::
+                    SetCommandStateCallback(
+                        OnSolarCommandState
+                    );
+
+                SolarEngine::Setup(
+                    *Manager,
+                    Manager->net,
+                    *network,
+                    cfg.solarInverters,
+                    solarProtocolId,
+                    static_cast<uint8_t>(
+                        solarSource
+                    )
                 );
             }
         }
-        else
+
+        // ========================================================
+        // AEE BRIDGES + INTROSPECTION
+        // ========================================================
+
+        if (!SetupAEEBridges(cfg))
         {
-            LOG_IF(
-                "SOLAR",
-                "No solar inverters configured"
+            LOG_EF(
+                "FRONTEND",
+                "AEE bridge initialization failed"
             );
+
+            return;
         }
-
-        // ========================================================
-        // AEE STATUS
-        // ========================================================
-
-        LOG_IF(
-            "AEE",
-            "AEE initialized with %u variables",
-            static_cast<unsigned>(
-                instance
-                    ->aeeEngine
-                    .getRegistry()
-                    .size()
-            )
-        );
-
-        // ========================================================
-        // INTROSPECTION
-        //
-        // Deve precedere SetupHAOrchestrator perché HA riceve
-        // il puntatore a introspection.
-        // ========================================================
-
-        BuildIntrospection();
 
         // ========================================================
         // MQTT
@@ -3977,7 +4259,7 @@ public:
 
         if (cfg.mqtt.enabled)
         {
-            uint8_t mqttSocketDemand =
+            uint8_t socketDemand =
                 0;
 
             if (
@@ -3987,9 +4269,13 @@ public:
             {
                 const size_t mqttConfigCount =
                     cfg.mqtt.clientCount <
-                        MQTTEngine::MAX_CLIENTS
+                        static_cast<size_t>(
+                            MQTTEngine::MAX_CLIENTS
+                        )
                         ? cfg.mqtt.clientCount
-                        : MQTTEngine::MAX_CLIENTS;
+                        : static_cast<size_t>(
+                            MQTTEngine::MAX_CLIENTS
+                        );
 
                 for (
                     size_t index = 0;
@@ -4004,7 +4290,7 @@ public:
                             .enabled
                     )
                     {
-                        ++mqttSocketDemand;
+                        ++socketDemand;
                     }
                 }
             }
@@ -4016,16 +4302,17 @@ public:
             {
                 LOG_EF(
                     "MQTT",
-                    "MQTT enabled without configured clients"
+                    "MQTT enabled without clients"
                 );
+
+                return;
             }
-            else if (
-                mqttSocketDemand == 0
-            )
+
+            if (socketDemand == 0)
             {
                 LOG_WF(
                     "MQTT",
-                    "MQTT enabled but all clients are disabled"
+                    "All MQTT clients are disabled"
                 );
             }
             else
@@ -4037,43 +4324,19 @@ public:
                             "MQTT",
                             50UL,
                             50UL,
-                            mqttSocketDemand,
+                            socketDemand,
                             true
                         );
 
-                if (
-                    mqttProtocolId < 0
-                )
+                if (mqttProtocolId < 0)
                 {
                     LOG_EF(
                         "MQTT",
-                        "Registrazione protocollo MQTT fallita"
+                        "Protocol registration failed"
                     );
 
                     return;
                 }
-
-                LOG_IF(
-                    "MQTT",
-                    "Protocol registered: "
-                    "id=%d configured=%u sockets=%u",
-                    static_cast<int>(
-                        mqttProtocolId
-                    ),
-                    static_cast<unsigned>(
-                        cfg.mqtt.clientCount
-                    ),
-                    static_cast<unsigned>(
-                        mqttSocketDemand
-                    )
-                );
-
-                // ====================================================
-                // MQTT ENGINE SETUP
-                //
-                // Setup azzera le callback frontend, quindi i setter
-                // devono essere chiamati successivamente.
-                // ====================================================
 
                 MQTTEngine::Setup(
                     *Manager,
@@ -4084,10 +4347,6 @@ public:
                     mqttProtocolId,
                     mqttEventSource
                 );
-
-                // ====================================================
-                // MQTT CALLBACKS
-                // ====================================================
 
                 MQTTEngine::
                     setInboundMessageReceivedCallback(
@@ -4104,23 +4363,16 @@ public:
                         OnMQTTRoutedEvent
                     );
 
-                // ====================================================
-                // HOME ASSISTANT
-                // ====================================================
-
-                const bool homeAssistantConfigured =
+                if (
                     FindHAClientConfig() !=
-                        nullptr;
-
-                if (homeAssistantConfigured)
+                    nullptr
+                )
                 {
-                    if (
-                        !SetupHAOrchestrator()
-                    )
+                    if (!SetupHAOrchestrator())
                     {
                         LOG_EF(
                             "HA_ORCHESTRATOR",
-                            "Setup Home Assistant fallito"
+                            "Setup failed"
                         );
 
                         return;
@@ -4137,16 +4389,7 @@ public:
                         setServiceLoopCallback(
                             nullptr
                         );
-
-                    LOG_IF(
-                        "HA_ORCHESTRATOR",
-                        "Client Home Assistant non configurato"
-                    );
                 }
-
-                // ====================================================
-                // MQTT TASK REGISTRATION
-                // ====================================================
 
                 if (
                     !TaskEngine::AddTask(
@@ -4158,25 +4401,11 @@ public:
                 {
                     LOG_EF(
                         "MQTT",
-                        "Registrazione Task_MQTT fallita"
+                        "Task registration failed"
                     );
 
                     return;
                 }
-
-                LOG_IF(
-                    "MQTT",
-                    "Task MQTT registrato: "
-                    "interval=50 ms clients=%u mappings=%u",
-                    static_cast<unsigned>(
-                        MQTTEngine::
-                            getClientCount()
-                    ),
-                    static_cast<unsigned>(
-                        MQTTEngine::
-                            getMappingCount()
-                    )
-                );
             }
         }
         else
@@ -4188,250 +4417,54 @@ public:
         }
 
         // ========================================================
-        // HOT STANDBY / BRIDGE
-        // ========================================================
-
-        #if HOTSTANDBY_ENABLED
-
-            Manager
-                ->enableHotStandby(
-                    false
-                );
-
-            LOG_IF(
-                "HOTSTANDBY",
-                "Hot standby support enabled"
-            );
-
-        #else
-
-            if (cfg.bridge.enabled)
-            {
-                const DMNetworkManager::ProtocolId
-                    bridgeProtocolId =
-                        Manager
-                            ->net
-                            .registerProtocol(
-                                "Bridge",
-                                50UL,
-                                300UL,
-                                1,
-                                true
-                            );
-
-                if (
-                    bridgeProtocolId < 0
-                )
-                {
-                    LOG_EF(
-                        "BRIDGE",
-                        "Registrazione protocollo Bridge fallita"
-                    );
-
-                    return;
-                }
-
-                const SocketManager::OwnerId
-                    bridgeSocketOwner =
-                        Manager
-                            ->net
-                            .getProtocol(
-                                bridgeProtocolId
-                            )
-                            .socketOwner;
-
-                if (
-                    bridgeSocketOwner < 0
-                )
-                {
-                    LOG_EF(
-                        "BRIDGE",
-                        "Socket owner Bridge non valido"
-                    );
-
-                    return;
-                }
-
-                static UdpAdapter bridgeTransport(
-                    cfg.bridge.ip,
-                    cfg.bridge.localPort,
-                    cfg.bridge.remotePort
-                );
-
-                bridgeTransport.setSocketContext(
-                    Manager->net,
-                    bridgeSocketOwner
-                );
-
-                instance
-                    ->peerBridgeEngine
-                    .setReceiveCallback(
-                        OnAEEVarChanged
-                    );
-
-                instance
-                    ->peerBridgeEngine
-                    .init(
-                        bridgeTransport,
-                        instance
-                            ->aeeEngine
-                            .getRegistry(),
-                        true
-                    );
-
-                if (
-                    !instance
-                        ->peerBridgeEngine
-                        .setupPacer(
-                            Manager->net,
-                            bridgeProtocolId
-                        )
-                )
-                {
-                    LOG_EF(
-                        "BRIDGE",
-                        "Setup pacer Bridge peer fallito"
-                    );
-
-                    return;
-                }
-
-                // ====================================================
-                // BRIDGE TASK REGISTRATION
-                //
-                // Il Bridge viene eseguito direttamente dal
-                // TaskEngineOrchestrator.
-                // ====================================================
-
-                if (
-                    !TaskEngine::AddTask(
-                        Task_Bridge,
-                        20UL,
-                        true
-                    )
-                )
-                {
-                    LOG_EF(
-                        "BRIDGE",
-                        "Registrazione Task_Bridge fallita"
-                    );
-
-                    return;
-                }
-
-                LOG_IF(
-                    "BRIDGE",
-                    "Peer Bridge pronto: "
-                    "protocol=%d localPort=%u remotePort=%u",
-                    static_cast<int>(
-                        bridgeProtocolId
-                    ),
-                    static_cast<unsigned>(
-                        cfg.bridge.localPort
-                    ),
-                    static_cast<unsigned>(
-                        cfg.bridge.remotePort
-                    )
-                );
-            }
-            else
-            {
-                LOG_IF(
-                    "BRIDGE",
-                    "Peer Bridge disabled"
-                );
-            }
-
-        #endif
-
-        // ========================================================
         // FULL CYCLE CALLBACK
         // ========================================================
 
         SetFullCycleCallback(
-            [](
-                DomoManager& domoManager)
+            [](DomoManager& cycleManager)
             {
-                static constexpr
-                    unsigned long OLDER =
-                        5000UL;
-
                 if (!instance)
+                {
                     return;
-
-                AEEManagement* aeeManager =
-                    instance
-                        ->aeeEngine
-                        .getManager();
-
-                if (!aeeManager)
-                    return;
-
-                Buffer& buffer =
-                    domoManager
-                        .getBuffer();
-
-                std::vector<DMAEE::Update>
-                    updates;
-
-                updates.reserve(
-                    16
-                );
+                }
 
                 const unsigned long now =
-                    domoManager
+                    cycleManager
                         .getTimeManager()
                         .nowMs();
 
-                if (
-                    DMAEE::
-                        BuildUpdatesFromPolledSources(
-                            *aeeManager,
-                            buffer,
-                            updates
-                        )
-                )
-                {
-                    DMAEE::ApplyUpdates(
-                        updates,
+                instance
+                    ->aeeBridgeOrchestrator
+                .updateFromPolledSources(
+                        cycleManager,
                         now
                     );
-                }
 
-                buffer.ResetAll(
-                    now,
-                    OLDER
-                );
+                cycleManager
+                    .getBuffer()
+                    .ResetAll(
+                        now,
+                        5000UL
+                    );
             }
         );
 
         // ========================================================
-        // TASK ENGINE FINAL REPORT
+        // FINALIZATION
         // ========================================================
 
         LOG_IF(
             "TASK-ENGINE",
-            "Setup completato: tasks=%u maxPerCycle=%u",
+            "Setup completed: tasks=%u maxPerCycle=%u",
             static_cast<unsigned>(
-                TaskEngine::
-                    getTaskCount()
+                TaskEngine::getTaskCount()
             ),
             static_cast<unsigned>(
-                TaskEngine::
-                    getMaxTasksPerCycle()
+                TaskEngine::getMaxTasksPerCycle()
             )
         );
 
-        // ========================================================
-        // WATCHDOG
-        // ========================================================
-
-        Manager
-            ->enableWatchdog();
-
-        // ========================================================
-        // STARTUP REPORT
-        // ========================================================
+        Manager->enableWatchdog();
 
         LOG_IF(
             "DOMO MANAGER",

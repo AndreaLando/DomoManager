@@ -372,22 +372,297 @@ struct FrontendConfig {
         IPAddress subnet;
     } net;
 
-    // -----------------------------
-    // 2) CONFIG Bridge
-    // -----------------------------
-    struct Bridge {
-        bool enabled = false;
-        
-        IPAddress ip;
-        uint16_t localPort = 0;
-        uint16_t remotePort = 0;
+    // ============================================================================
+    // 2) BRIDGE CONFIGURATION
+    //
+    // Configurazione dei canali AEE/Bridge disponibili nel frontend.
+    //
+    // Ogni canale Bridge possiede una configurazione completamente indipendente:
+    //
+    // - identità;
+    // - indirizzo del peer remoto;
+    // - porta UDP locale;
+    // - porta UDP remota;
+    // - pacing del protocollo;
+    // - intervallo del task aggregato;
+    // - elenco delle variabili AEE.
+    //
+    // La configurazione non possiede gli array AEEVarDef.
+    // I puntatori AEE::vars devono quindi riferirsi ad array persistenti,
+    // normalmente statici o globali.
+    //
+    // Il numero massimo dei canali è fissato per evitare:
+    //
+    // - allocazioni dinamiche;
+    // - riallocazioni runtime;
+    // - invalidazione dei riferimenti;
+    // - spostamento degli AEEBridgeChannel;
+    // - invalidazione delle callback che catturano this.
+    // ============================================================================
 
-        struct AEE {
-            const AEEVarDef* vars = nullptr;
-            size_t count = 0;
+    struct Bridge
+    {
+        // ========================================================================
+        // ENABLE
+        // ========================================================================
+
+        bool enabled =
+            false;
+
+        // ========================================================================
+        // IDENTITY
+        //
+        // id deve essere univoco tra tutti i bridge configurati.
+        //
+        // name viene utilizzato per:
+        //
+        // - identificazione del BridgeEngine;
+        // - registrazione del protocollo DMNetworkManager;
+        // - registrazione della sorgente EventManager;
+        // - messaggi diagnostici.
+        // ========================================================================
+
+        uint8_t id =
+            0;
+
+        const char* name =
+            nullptr;
+
+        // ========================================================================
+        // REMOTE PEER
+        // ========================================================================
+
+        IPAddress ip;
+
+        // ========================================================================
+        // UDP PORTS
+        //
+        // localPort deve essere differente per ciascun bridge attivo.
+        //
+        // Due UdpAdapter appartenenti allo stesso frontend non devono tentare
+        // di aprire la stessa porta locale.
+        // ========================================================================
+
+        uint16_t localPort =
+            0;
+
+        uint16_t remotePort =
+            0;
+
+        // ========================================================================
+        // NETWORK PROTOCOL
+        //
+        // protocolIntervalMs:
+        //   intervallo dichiarato al DMNetworkManager.
+        //
+        // protocolTimeoutMs:
+        //   durata massima dichiarata per il protocollo.
+        // ========================================================================
+
+        uint32_t protocolIntervalMs =
+            50UL;
+
+        uint32_t protocolTimeoutMs =
+            300UL;
+
+        // ========================================================================
+        // TASK INTERVAL
+        //
+        // Intervallo richiesto dal bridge.
+        //
+        // Il frontend registra un solo Task_Bridges usando il minimo intervallo
+        // dei bridge abilitati.
+        // ========================================================================
+
+        uint32_t taskIntervalMs =
+            20UL;
+
+        // ========================================================================
+        // AEE CONFIGURATION
+        //
+        // Ogni bridge riceve un insieme AEEVarDef indipendente.
+        //
+        // AEEBridgeChannel costruisce per ciascun canale:
+        //
+        // - AEEEngine;
+        // - AEEManagement;
+        // - AEERegistry.
+        //
+        // Gli array indicati da vars devono rimanere validi per tutta la durata
+        // del frontend.
+        // ========================================================================
+
+        struct AEE
+        {
+            const AEEVarDef* vars =
+                nullptr;
+
+            size_t count =
+                0;
+
+            bool valid() const
+            {
+                return
+                    vars != nullptr &&
+                    count > 0;
+            }
         } aee;
 
-    } bridge;
+        // ========================================================================
+        // VALIDATION
+        // ========================================================================
+
+        bool valid() const
+        {
+            if (!enabled)
+            {
+                return true;
+            }
+
+            return
+                name != nullptr &&
+                name[0] != '\0' &&
+                localPort > 0 &&
+                remotePort > 0 &&
+                aee.valid();
+        }
+    };
+
+    // ============================================================================
+    // BRIDGE COLLECTION
+    // ============================================================================
+
+    static constexpr size_t
+        MAX_BRIDGES =
+            2U;
+
+    struct Bridges
+    {
+        // Numero di elementi configurati nell'array channel.
+        //
+        // Il valore viene limitato a MAX_BRIDGES dal frontend.
+        size_t count =
+            0;
+
+        // Configurazioni dei canali.
+        //
+        // Convenzione iniziale:
+        //
+        //   channel[0] = AEE-PEER principale;
+        //   channel[1] = AEE-KNOB.
+        Bridge channel[
+            MAX_BRIDGES
+        ] {};
+
+        // ========================================================================
+        // NORMALIZED COUNT
+        // ========================================================================
+
+        size_t normalizedCount() const
+        {
+            return
+                count < MAX_BRIDGES
+                    ? count
+                    : MAX_BRIDGES;
+        }
+
+        // ========================================================================
+        // ENABLED COUNT
+        // ========================================================================
+
+        size_t enabledCount() const
+        {
+            const size_t validCount =
+                normalizedCount();
+
+            size_t result =
+                0;
+
+            for (
+                size_t index = 0;
+                index < validCount;
+                ++index
+            )
+            {
+                if (channel[index].enabled)
+                {
+                    ++result;
+                }
+            }
+
+            return
+                result;
+        }
+
+        // ========================================================================
+        // VALIDATION
+        //
+        // Verifica:
+        //
+        // - validità dei singoli bridge;
+        // - unicità degli ID;
+        // - unicità delle porte UDP locali dei bridge abilitati.
+        // ========================================================================
+
+        bool valid() const
+        {
+            const size_t validCount =
+                normalizedCount();
+
+            for (
+                size_t index = 0;
+                index < validCount;
+                ++index
+            )
+            {
+                const Bridge& current =
+                    channel[index];
+
+                if (!current.valid())
+                {
+                    return false;
+                }
+
+                if (!current.enabled)
+                {
+                    continue;
+                }
+
+                for (
+                    size_t previous = 0;
+                    previous < index;
+                    ++previous
+                )
+                {
+                    const Bridge& existing =
+                        channel[previous];
+
+                    if (!existing.enabled)
+                    {
+                        continue;
+                    }
+
+                    if (
+                        current.id ==
+                        existing.id
+                    )
+                    {
+                        return false;
+                    }
+
+                    if (
+                        current.localPort ==
+                        existing.localPort
+                    )
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+    } bridges;
 
     // -----------------------------
     // 4) CONFIG MQTT (nuovo)

@@ -21,6 +21,7 @@
 #include <functional>
 #include <String>
 
+#include "DMEthernet.hpp"
 #include "DMNetwork.hpp"
 
 #define LOG_LEVEL LogLevel::INFO

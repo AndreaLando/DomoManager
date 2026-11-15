@@ -1,5 +1,5 @@
-#ifndef DMAdapterUDP_HPP
-#define DMAdapterUDP_HPP
+#ifndef DMADAPTERUDP_HPP
+#define DMADAPTERUDP_HPP
 
 #pragma once
 
@@ -9,94 +9,462 @@
 
    Nome:            Andrea Lando
    Contatto:        mail@domo-manager.it
-  
-   Versione modulo: 1.0.0
-   Ultima modifica: 2026‑03‑24
+
+   Versione modulo: 1.1.0
+   Ultima modifica: 2026-11-08
+
    Note:
-                    • Nessuna
+                    - Backend UDP astratto tramite DMEthernetUDP.
+                    - Compatibile con EthernetUDP e WiFiUDP.
+                    - Mantiene DMNetworkManager e SocketManager.
+                    - Mantiene endpoint statico e dinamico.
 
    ============================================================================ */
 
 #include <Arduino.h>
+#include <IPAddress.h>
+#include <String.h>
+#include <cstdint>
 #include <functional>
-#include <String>
 
+#include "DMEthernet.hpp"
+#include "DMNetwork.hpp"
 #include "DMTransport.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
 
-class UdpAdapter : public TransportBase
+class UdpAdapter final :
+    public TransportBase
 {
 private:
+    // ========================================================
+    // CONSTANTS
+    // ========================================================
+
+    static constexpr size_t MAX_PACKET_SIZE =
+        1500U;
+
+    static constexpr int UDP_RESOURCE_ID =
+        0;
 
     // ========================================================
-    // UDP
+    // UDP BACKEND
+    //
+    // DMEthernetUDP viene selezionato da DMEthernet.hpp:
+    //
+    // Ethernet -> EthernetUDP
+    // Wi-Fi    -> WiFiUDP
     // ========================================================
 
-    EthernetUDP udp;
+    DMEthernetUDP udp;
+
+    // ========================================================
+    // CONFIGURED ENDPOINT
+    //
+    // configuredRemoteIP == 0.0.0.0:
+    //     endpoint remoto dinamico.
+    //
+    // configuredRemoteIP != 0.0.0.0:
+    //     endpoint remoto statico.
+    // ========================================================
+
+    IPAddress configuredRemoteIP;
+
+    uint16_t configuredRemotePort =
+        0;
+
+    // ========================================================
+    // ACTIVE ENDPOINT
+    // ========================================================
 
     IPAddress remoteIP;
 
-    uint16_t remotePort;
+    uint16_t remotePort =
+        0;
 
-    uint16_t localPort;
+    uint16_t localPort =
+        0;
 
+    bool dynamicRemote =
+        false;
+
+    bool remoteLearned =
+        false;
 
     // ========================================================
-    // SOCKET MANAGER
+    // SOCKET CONTEXT
     // ========================================================
 
-    DMNetworkManager* networkManager = nullptr;
+    DMNetworkManager* networkManager =
+        nullptr;
 
-    SocketManager::OwnerId socketOwner = -1;
+    SocketManager::OwnerId socketOwner =
+        -1;
 
-    bool socketAcquired = false;
+    int socketSlot =
+        -1;
 
-    bool started = false;
+    bool socketAcquired =
+        false;
 
+    bool started =
+        false;
+
+private:
+    // ========================================================
+    // ADDRESS UTILITIES
+    // ========================================================
+
+    static bool isNullAddress(
+        const IPAddress& address)
+    {
+        return
+            address[0] == 0 &&
+            address[1] == 0 &&
+            address[2] == 0 &&
+            address[3] == 0;
+    }
+
+    static bool sameAddress(
+        const IPAddress& first,
+        const IPAddress& second)
+    {
+        return
+            first[0] == second[0] &&
+            first[1] == second[1] &&
+            first[2] == second[2] &&
+            first[3] == second[3];
+    }
+
+    static bool sameEndpoint(
+        const IPAddress& firstIP,
+        uint16_t firstPort,
+        const IPAddress& secondIP,
+        uint16_t secondPort)
+    {
+        return
+            sameAddress(
+                firstIP,
+                secondIP
+            ) &&
+            firstPort == secondPort;
+    }
+
+    // ========================================================
+    // ACTIVE ENDPOINT MANAGEMENT
+    // ========================================================
+
+    void clearRemoteEndpoint()
+    {
+        if (!dynamicRemote)
+        {
+            remoteIP =
+                configuredRemoteIP;
+
+            remotePort =
+                configuredRemotePort;
+
+            remoteLearned =
+                !isNullAddress(remoteIP) &&
+                remotePort != 0;
+
+            return;
+        }
+
+        remoteIP =
+            IPAddress(
+                0,
+                0,
+                0,
+                0
+            );
+
+        remotePort =
+            0;
+
+        remoteLearned =
+            false;
+    }
+
+    bool acceptRemoteEndpoint(
+        const IPAddress& senderIP,
+        uint16_t senderPort)
+    {
+        if (
+            isNullAddress(senderIP) ||
+            senderPort == 0
+        )
+        {
+            return false;
+        }
+
+        // ----------------------------------------------------
+        // STATIC ENDPOINT
+        // ----------------------------------------------------
+
+        if (!dynamicRemote)
+        {
+            return
+                sameEndpoint(
+                    senderIP,
+                    senderPort,
+                    remoteIP,
+                    remotePort
+                );
+        }
+
+        // ----------------------------------------------------
+        // DYNAMIC ENDPOINT: FIRST PACKET
+        // ----------------------------------------------------
+
+        if (!remoteLearned)
+        {
+            remoteIP =
+                senderIP;
+
+            remotePort =
+                senderPort;
+
+            remoteLearned =
+                true;
+
+            LOG_IF(
+                "UDP",
+                "Dynamic endpoint learned: %s:%u",
+                remoteIP
+                    .toString()
+                    .c_str(),
+                static_cast<unsigned>(
+                    remotePort
+                )
+            );
+
+            return true;
+        }
+
+        // ----------------------------------------------------
+        // DYNAMIC ENDPOINT: LOCKED PEER
+        // ----------------------------------------------------
+
+        return
+            sameEndpoint(
+                senderIP,
+                senderPort,
+                remoteIP,
+                remotePort
+            );
+    }
+
+    // ========================================================
+    // PACKET CLEANUP
+    // ========================================================
+
+    void discardCurrentPacket()
+    {
+        uint8_t dump[64] {};
+
+        while (
+            udp.available() >
+            0
+        )
+        {
+            const int availableBytes =
+                udp.available();
+
+            const size_t readLength =
+                static_cast<size_t>(
+                    availableBytes
+                ) <
+                sizeof(dump)
+                    ? static_cast<size_t>(
+                          availableBytes
+                      )
+                    : sizeof(dump);
+
+            const int readBytes =
+                udp.read(
+                    dump,
+                    readLength
+                );
+
+            if (readBytes <= 0)
+            {
+                break;
+            }
+        }
+
+        udp.flush();
+    }
+
+    // ========================================================
+    // SOCKET ACQUISITION
+    // ========================================================
+
+    bool acquireSocket()
+    {
+        if (socketAcquired)
+        {
+            return true;
+        }
+
+        if (
+            !networkManager ||
+            socketOwner < 0
+        )
+        {
+            return false;
+        }
+
+        socketSlot =
+            networkManager
+                ->sockets()
+                .acquire(
+                    socketOwner,
+                    UDP_RESOURCE_ID,
+                    SocketManager::
+                        SocketKind::UDP
+                );
+
+        if (socketSlot < 0)
+        {
+            LOG_WF(
+                "UdpAdapter",
+                "UDP socket unavailable: owner=%d",
+                socketOwner
+            );
+
+            return false;
+        }
+
+        socketAcquired =
+            true;
+
+        LOG_DF(
+            "UdpAdapter",
+            "UDP socket reserved: slot=%d owner=%d",
+            socketSlot,
+            socketOwner
+        );
+
+        return true;
+    }
+
+    void releaseSocket()
+    {
+        if (!socketAcquired)
+        {
+            socketSlot =
+                -1;
+
+            return;
+        }
+
+        if (
+            networkManager &&
+            socketOwner >= 0
+        )
+        {
+            networkManager
+                ->sockets()
+                .release(
+                    socketOwner,
+                    UDP_RESOURCE_ID,
+                    SocketManager::
+                        SocketKind::UDP
+                );
+        }
+
+        socketAcquired =
+            false;
+
+        socketSlot =
+            -1;
+    }
 
 public:
-
     // ========================================================
-    // CONSTRUCTOR
+    // CONSTRUCTION
     // ========================================================
 
     UdpAdapter(
         const IPAddress& ip,
-        uint16_t rPort,
-        uint16_t lPort)
-        : remoteIP(ip),
-          remotePort(rPort),
-          localPort(lPort),
-          networkManager(nullptr),
-          socketOwner(-1),
-          socketAcquired(false),
-          started(false)
+        uint16_t listenPort,
+        uint16_t targetPort)
+        : configuredRemoteIP(
+              ip
+          ),
+          configuredRemotePort(
+              targetPort
+          ),
+          remoteIP(
+              ip
+          ),
+          remotePort(
+              targetPort
+          ),
+          localPort(
+              listenPort
+          ),
+          dynamicRemote(
+              isNullAddress(
+                  ip
+              )
+          ),
+          remoteLearned(
+              !isNullAddress(ip) &&
+              targetPort != 0
+          )
     {
+        clearRemoteEndpoint();
     }
 
+    ~UdpAdapter() override
+    {
+        stop();
+    }
+
+    UdpAdapter(
+        const UdpAdapter&) =
+            delete;
+
+    UdpAdapter& operator=(
+        const UdpAdapter&) =
+            delete;
 
     // ========================================================
     // SOCKET CONTEXT
-    //
-    // Deve essere chiamato DOPO registerProtocol("Bridge")
-    // e PRIMA di BridgeEngine::init().
     // ========================================================
 
     void setSocketContext(
         DMNetworkManager& manager,
         SocketManager::OwnerId owner)
     {
-        networkManager = &manager;
+        stop();
 
-        socketOwner = owner;
+        networkManager =
+            &manager;
 
-        socketAcquired = false;
+        socketOwner =
+            owner;
 
-        started = false;
+        socketSlot =
+            -1;
+
+        socketAcquired =
+            false;
+
+        started =
+            false;
+
+        online =
+            false;
+
+        lastRx =
+            0;
+
+        clearRemoteEndpoint();
     }
-
 
     // ========================================================
     // BEGIN
@@ -104,9 +472,10 @@ public:
 
     bool begin() override
     {
-        // ----------------------------------------------------
-        // Validazione SocketManager
-        // ----------------------------------------------------
+        if (started)
+        {
+            return true;
+        }
 
         if (!networkManager)
         {
@@ -122,119 +491,141 @@ public:
         {
             LOG_EF(
                 "UdpAdapter",
-                "Bridge socket owner unavailable"
+                "Socket owner unavailable"
             );
 
             return false;
         }
 
-
-        // ----------------------------------------------------
-        // Già avviato
-        // ----------------------------------------------------
-
-        if (started)
+        if (localPort == 0)
         {
-            return true;
-        }
-
-
-        // ----------------------------------------------------
-        // Acquire SocketManager
-        // ----------------------------------------------------
-
-        if (!socketAcquired)
-        {
-            const int slot =
-                networkManager->sockets().acquire(
-                    socketOwner,
-                    0,
-                    SocketManager::SocketKind::UDP
-                );
-
-            if (slot < 0)
-            {
-                LOG_WF(
-                    "UdpAdapter",
-                    "UDP socket unavailable"
-                );
-
-                return false;
-            }
-
-            socketAcquired = true;
-
-            LOG_DF(
+            LOG_EF(
                 "UdpAdapter",
-                "UDP socket reserved: slot=%d owner=%d",
-                slot,
-                socketOwner
+                "Invalid local UDP port"
             );
+
+            return false;
         }
 
+        if (
+            !dynamicRemote &&
+            (
+                isNullAddress(
+                    configuredRemoteIP
+                ) ||
+                configuredRemotePort == 0
+            )
+        )
+        {
+            LOG_EF(
+                "UdpAdapter",
+                "Invalid static remote endpoint"
+            );
 
-        // ----------------------------------------------------
-        // UDP begin
-        // ----------------------------------------------------
+            return false;
+        }
 
-        LOG_IF(
-            "UdpAdapter",
-            "Opening UDP socket localPort=%u remote=%s:%u",
-            localPort,
-            remoteIP.toString().c_str(),
-            remotePort
-        );
-
-
-        const bool ok =
-            udp.begin(localPort);
-
-
-        if (!ok)
+        if (!DMEthernet::linkUp())
         {
             LOG_WF(
                 "UdpAdapter",
-                "UDP socket OPEN FAILED"
+                "Network link unavailable: backend=%s",
+                DMEthernet::backendName()
             );
-
-            // ------------------------------------------------
-            // Release reservation
-            // ------------------------------------------------
-
-            networkManager->sockets().release(
-                socketOwner,
-                0,
-                SocketManager::SocketKind::UDP
-            );
-
-            socketAcquired = false;
-
-            started = false;
 
             return false;
         }
 
+        if (!acquireSocket())
+        {
+            return false;
+        }
 
-        started = true;
+        if (dynamicRemote)
+        {
+            LOG_IF(
+                "UdpAdapter",
+                "Opening dynamic UDP socket: "
+                "backend=%s localPort=%u remote=auto",
+                DMEthernet::backendName(),
+                static_cast<unsigned>(
+                    localPort
+                )
+            );
+        }
+        else
+        {
+            LOG_IF(
+                "UdpAdapter",
+                "Opening static UDP socket: "
+                "backend=%s localPort=%u remote=%s:%u",
+                DMEthernet::backendName(),
+                static_cast<unsigned>(
+                    localPort
+                ),
+                configuredRemoteIP
+                    .toString()
+                    .c_str(),
+                static_cast<unsigned>(
+                    configuredRemotePort
+                )
+            );
+        }
 
+        const bool opened =
+            udp.begin(
+                localPort
+            );
 
-        LOG_DF(
+        if (!opened)
+        {
+            LOG_WF(
+                "UdpAdapter",
+                "UDP socket open failed: "
+                "backend=%s localPort=%u",
+                DMEthernet::backendName(),
+                static_cast<unsigned>(
+                    localPort
+                )
+            );
+
+            releaseSocket();
+
+            started =
+                false;
+
+            online =
+                false;
+
+            return false;
+        }
+
+        started =
+            true;
+
+        online =
+            false;
+
+        lastRx =
+            0;
+
+        LOG_IF(
             "UdpAdapter",
-            "UDP socket OPEN"
+            "UDP socket opened: backend=%s local=%s:%u",
+            DMEthernet::backendName(),
+            DMEthernet::localIP()
+                .toString()
+                .c_str(),
+            static_cast<unsigned>(
+                localPort
+            )
         );
-
-
-        networkManager->sockets().dump();
-
 
         return true;
     }
 
-
     // ========================================================
     // STOP
-    //
-    // NON BLOCKING
     // ========================================================
 
     void stop()
@@ -243,39 +634,99 @@ public:
         {
             udp.stop();
 
-            started = false;
+            started =
+                false;
 
             LOG_IF(
                 "UdpAdapter",
-                "UDP socket CLOSED"
+                "UDP socket closed: localPort=%u",
+                static_cast<unsigned>(
+                    localPort
+                )
             );
         }
 
+        releaseSocket();
 
-        if (socketAcquired &&
-            networkManager &&
-            socketOwner >= 0)
+        online =
+            false;
+
+        lastRx =
+            0;
+
+        if (dynamicRemote)
         {
-            networkManager->sockets().release(
-                socketOwner,
-                0,
-                SocketManager::SocketKind::UDP
-            );
-
-            socketAcquired = false;
+            clearRemoteEndpoint();
         }
     }
 
-
     // ========================================================
-    // PACKET SIZE
+    // STATUS / CONFIGURATION
     // ========================================================
 
     size_t maxPacketSize() const override
     {
-        return 1500;
+        return
+            MAX_PACKET_SIZE;
     }
 
+    bool isStarted() const
+    {
+        return
+            started;
+    }
+
+    bool isDynamicEndpoint() const
+    {
+        return
+            dynamicRemote;
+    }
+
+    bool hasRemoteEndpoint() const
+    {
+        return
+            remoteLearned &&
+            !isNullAddress(
+                remoteIP
+            ) &&
+            remotePort != 0;
+    }
+
+    const IPAddress& getConfiguredRemoteIP() const
+    {
+        return
+            configuredRemoteIP;
+    }
+
+    uint16_t getConfiguredRemotePort() const
+    {
+        return
+            configuredRemotePort;
+    }
+
+    const IPAddress& getRemoteIP() const
+    {
+        return
+            remoteIP;
+    }
+
+    uint16_t getRemotePort() const
+    {
+        return
+            remotePort;
+    }
+
+    uint16_t getLocalPort() const
+    {
+        return
+            localPort;
+    }
+
+    int getSocketSlot() const
+    {
+        return
+            socketSlot;
+    }
 
     // ========================================================
     // SEND
@@ -285,40 +736,107 @@ public:
         const String& payload) override
     {
         if (!started)
-            return false;
-
-        if (!payload.length())
-            return false;
-
-
-        LOG_DF(
-            "SLAVE::UDP::TX",
-            "TX → %s:%u : %s",
-            remoteIP.toString().c_str(),
-            remotePort,
-            payload.c_str()
-        );
-
-
-        if (udp.beginPacket(
-                remoteIP,
-                remotePort) != 1)
         {
             return false;
         }
 
+        if (
+            payload.length() == 0 ||
+            !hasRemoteEndpoint()
+        )
+        {
+            return false;
+        }
 
-        udp.write(
-            (const uint8_t*)
-                payload.c_str(),
-            payload.length()
-        );
+        if (!DMEthernet::linkUp())
+        {
+            LOG_WF(
+                "UDP",
+                "TX denied: network link unavailable"
+            );
 
+            return false;
+        }
 
-        return
-            udp.endPacket() == 1;
+        if (
+            udp.beginPacket(
+                remoteIP,
+                remotePort
+            ) != 1
+        )
+        {
+            LOG_WF(
+                "UDP",
+                "beginPacket failed: %s:%u",
+                remoteIP
+                    .toString()
+                    .c_str(),
+                static_cast<unsigned>(
+                    remotePort
+                )
+            );
+
+            return false;
+        }
+
+        const size_t expected =
+            payload.length();
+
+        const size_t written =
+            udp.write(
+                reinterpret_cast<
+                    const uint8_t*
+                >(
+                    payload.c_str()
+                ),
+                expected
+            );
+
+        if (written != expected)
+        {
+            LOG_WF(
+                "UDP",
+                "Partial UDP write: written=%u expected=%u",
+                static_cast<unsigned>(
+                    written
+                ),
+                static_cast<unsigned>(
+                    expected
+                )
+            );
+
+            /*
+             * Chiude comunque il datagramma per lasciare il
+             * backend UDP in uno stato definito.
+             */
+            (void)udp.endPacket();
+
+            return false;
+        }
+
+        const bool sent =
+            udp.endPacket() ==
+            1;
+
+        if (sent)
+        {
+            LOG_DF(
+                "UDP::TX",
+                "TX -> %s:%u bytes=%u",
+                remoteIP
+                    .toString()
+                    .c_str(),
+                static_cast<unsigned>(
+                    remotePort
+                ),
+                static_cast<unsigned>(
+                    expected
+                )
+            );
+        }
+
+        return sent;
     }
-
 
     // ========================================================
     // REQUEST
@@ -326,137 +844,175 @@ public:
 
     bool request(
         const String& payload,
-        ResponseCallback cb,
-        unsigned long timeoutMs = 3000) override
+        ResponseCallback callback,
+        unsigned long requestTimeoutMs =
+            3000UL) override
     {
+        /*
+         * Il bridge usa send()/receive().
+         * Il pattern request/callback non è implementato qui.
+         */
         (void)payload;
-        (void)cb;
-        (void)timeoutMs;
+        (void)callback;
+        (void)requestTimeoutMs;
 
-        // UDP non supporta request/response
         return false;
     }
 
-
 protected:
-
     // ========================================================
     // RECEIVE
     // ========================================================
 
     bool rawReceive(
-        String& out) override
+        String& output) override
     {
-        out = "";
-
+        output =
+            "";
 
         if (!started)
+        {
             return false;
-
+        }
 
         const int packetSize =
             udp.parsePacket();
 
-
         if (packetSize <= 0)
-            return false;
-
-
-        // ----------------------------------------------------
-        // Verifica IP/porta
-        // ----------------------------------------------------
-
-        IPAddress sender =
-            udp.remoteIP();
-
-        uint16_t port =
-            udp.remotePort();
-
-
-        if (sender != remoteIP ||
-            port != remotePort)
         {
-            LOG_WF(
-                "UDP",
-                "Packet from unauthorized sender %s:%u",
-                sender.toString().c_str(),
-                port
-            );
-
-            udp.flush();
-
             return false;
         }
 
+        const IPAddress senderIP =
+            udp.remoteIP();
 
-        // ----------------------------------------------------
-        // Protezione dimensione
-        // ----------------------------------------------------
+        const uint16_t senderPort =
+            udp.remotePort();
+
+        if (
+            !acceptRemoteEndpoint(
+                senderIP,
+                senderPort
+            )
+        )
+        {
+            LOG_WF(
+                "UDP",
+                "Packet from unauthorized sender: "
+                "%s:%u expected=%s:%u dynamic=%u",
+                senderIP
+                    .toString()
+                    .c_str(),
+                static_cast<unsigned>(
+                    senderPort
+                ),
+                remoteIP
+                    .toString()
+                    .c_str(),
+                static_cast<unsigned>(
+                    remotePort
+                ),
+                dynamicRemote
+                    ? 1U
+                    : 0U
+            );
+
+            discardCurrentPacket();
+
+            return false;
+        }
 
         const size_t limit =
             maxPacketSize();
 
-
-        if (packetSize > limit)
+        if (
+            static_cast<size_t>(
+                packetSize
+            ) >
+            limit
+        )
         {
-            char dump[64];
-
-            udp.read(
-                dump,
-                sizeof(dump)
-            );
-
-
             LOG_WF(
                 "UDP",
-                "Packet too large (%d > %u), discarded",
+                "Packet too large: received=%d maximum=%u",
                 packetSize,
-                limit
+                static_cast<unsigned>(
+                    limit
+                )
             );
 
+            discardCurrentPacket();
 
             return false;
         }
 
+        static char buffer[
+            MAX_PACKET_SIZE +
+            1U
+        ] {};
 
-        // ----------------------------------------------------
-        // Static buffer
-        // ----------------------------------------------------
-
-        static char buf[1600];
-
-
-        const int len =
+        const int received =
             udp.read(
-                buf,
+                reinterpret_cast<uint8_t*>(
+                    buffer
+                ),
                 limit
             );
 
+        if (received <= 0)
+        {
+            discardCurrentPacket();
 
-        if (len <= 0)
             return false;
+        }
 
+        buffer[
+            static_cast<size_t>(
+                received
+            )
+        ] = '\0';
 
-        buf[len] = '\0';
+        if (
+            !output.reserve(
+                static_cast<size_t>(
+                    received
+                ) +
+                1U
+            )
+        )
+        {
+            LOG_WF(
+                "UDP",
+                "Unable to allocate RX string: bytes=%d",
+                received
+            );
 
+            discardCurrentPacket();
 
-        out.reserve(len);
+            return false;
+        }
 
-        out = buf;
+        output =
+            buffer;
 
+        discardCurrentPacket();
 
         LOG_DF(
-            "SLAVE::UDP::RX",
-            "RX ← %s:%u : %s",
-            sender.toString().c_str(),
-            port,
-            out.c_str()
+            "UDP::RX",
+            "RX <- %s:%u bytes=%u",
+            senderIP
+                .toString()
+                .c_str(),
+            static_cast<unsigned>(
+                senderPort
+            ),
+            static_cast<unsigned>(
+                received
+            )
         );
-
 
         return true;
     }
-
 
     // ========================================================
     // RAW LOOP
@@ -465,12 +1021,46 @@ protected:
     void rawLoop(
         unsigned long now) override
     {
-        (void)now;
+        if (!started)
+        {
+            return;
+        }
 
-        // UDP non richiede loop
+        if (!DMEthernet::linkUp())
+        {
+            online =
+                false;
+
+            return;
+        }
+
+        if (
+            dynamicRemote &&
+            remoteLearned &&
+            online &&
+            lastRx != 0 &&
+            static_cast<unsigned long>(
+                now -
+                lastRx
+            ) >
+            timeoutMs
+        )
+        {
+            LOG_IF(
+                "UDP",
+                "Dynamic endpoint released after timeout: "
+                "%s:%u",
+                remoteIP
+                    .toString()
+                    .c_str(),
+                static_cast<unsigned>(
+                    remotePort
+                )
+            );
+
+            clearRemoteEndpoint();
+        }
     }
 };
-
-
 
 #endif

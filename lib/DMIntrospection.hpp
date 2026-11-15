@@ -528,6 +528,54 @@ public:
             return
                 ioType == IOType::VIRTUAL;
         }
+
+        // --------------------------------------------------------------------
+        // PUBLIC BUFFER ENTITY
+        //
+        // Restituisce true quando l'entity rappresenta una normale area
+        // Buffer pubblicabile dai frontend.
+        //
+        // Non applica policy specifiche di:
+        //
+        // - Home Assistant;
+        // - MQTT;
+        // - AEE;
+        // - Knob.
+        // --------------------------------------------------------------------
+
+        bool isPublicBufferEntity() const
+        {
+            return
+                area >= 0 &&
+                origin != EntityOrigin::RUNTIME &&
+                !implementationOnly;
+        }
+
+        // --------------------------------------------------------------------
+        // READABLE BUFFER ENTITY
+        //
+        // Vista frontend-neutral di una entity Buffer leggibile.
+        // --------------------------------------------------------------------
+
+        bool isReadableBufferEntity() const
+        {
+            return
+                isPublicBufferEntity() &&
+                readable;
+        }
+
+        // --------------------------------------------------------------------
+        // WRITABLE BUFFER ENTITY
+        //
+        // Vista frontend-neutral di una entity Buffer comandabile.
+        // --------------------------------------------------------------------
+
+        bool isWritableBufferEntity() const
+        {
+            return
+                isPublicBufferEntity() &&
+                writable;
+        }
     };
 
     // ========================================================================

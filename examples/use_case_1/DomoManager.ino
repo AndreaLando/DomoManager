@@ -82,30 +82,47 @@ static FrontendConfig mainConfig = [](){
 
     // --- NETWORK ---
     c.net.mac     = {0x90, 0xA2, 0xDA, 0x0E, 0x94, 0xB5};
-    c.net.ip      = IPAddress(192, 168, 12, 202);
+    c.net.ip      = IPAddress(192, 168, 12, 202); 
     c.net.gateway = IPAddress(192, 168, 12, 1);
     c.net.subnet  = IPAddress(255, 255, 255, 0);
 
-    // --- BRIDGE ---
-    c.bridge.enabled    = true;
-    c.bridge.ip         = IPAddress(192,168,12,201); //Indirizzo del PEER
-    c.bridge.localPort  = 8888;
-    c.bridge.remotePort = 8888;
-    c.bridge.aee.vars  = AEE_VARS;
-    c.bridge.aee.count = sizeof(AEE_VARS) / sizeof(AEEVarDef);
+    // --- BRIDGES ---
+    c.bridges.count = 2;
+
+    auto& peer = c.bridges.channel[0];
+    peer.enabled = true;
+    peer.id = 0;
+    peer.name = "AEE-PEER";
+    peer.ip = IPAddress(192, 168, 12, 201);
+    peer.localPort = 8888;
+    peer.remotePort = 8888;
+    peer.aee.vars = AEE_VARS;
+    peer.aee.count = sizeof(AEE_VARS) / sizeof(AEE_VARS[0]);
+
+    
+    auto& knob = c.bridges.channel[1];
+    knob.enabled = true;
+    knob.id = 1;
+    knob.name = "AEE-KNOB";
+    knob.ip = IPAddress(0, 0, 0, 0);    //Discover automatico
+    knob.localPort = 8889;
+    knob.remotePort = 0;                //Discover automatico
+    knob.aee.vars = nullptr;
+    knob.aee.count = 0; 
+
     
     // ============================================================================
     // CONFIG MQTT NEL FRONTEND
     // ============================================================================
 
-    c.mqtt.enabled = true;
+    c.mqtt.enabled = false;
     c.mqtt.clients = MQTT_CLIENTS;
     c.mqtt.clientCount =
         sizeof(MQTT_CLIENTS) /
         sizeof(MQTT_CLIENTS[0]);
     
     // --- HVAC ---
-    c.hvac.enabled    = false;
+    c.hvac.enabled    = true;
     c.hvac.intervalMs = 10000;
     c.hvac.zones = HVAC_ZONES;
     c.hvac.zoneCount = sizeof(HVAC_ZONES) / sizeof(HVAC_ZONES[0]);;
@@ -214,7 +231,7 @@ static FrontendConfig mainConfig = [](){
     auto& solar0 =
         c.solarInverters.inverter[0];
 
-    solar0.enabled        = true;
+    solar0.enabled        = false;
     solar0.reportOnChange = false;
     solar0.autoDiscovery  = true;
     solar0.intervalMs     = 5; // Loop veloce: protocollo non bloccante

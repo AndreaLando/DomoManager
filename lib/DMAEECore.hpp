@@ -302,11 +302,32 @@ public:
         changedVars.clear();
     }
 
-    // 🔥 nuova API: usata da DMBridge per snapshot iniziale
-    void forceAllChanged(unsigned long now) {
-        for (auto* v : vars) {
-            v->forceChanged(now);
-            //notifyChanged(v);   sembra non serivre xche gia in forceChanged
+    // ============================================================
+    // FORCE ALL CHANGED
+    //
+    // forceChanged() notifica autonomamente il registry tramite:
+    //
+    //     owner->notifyChanged(this)
+    //
+    // Non deve quindi essere chiamata nuovamente notifyChanged().
+    // ============================================================
+
+    void forceAllChanged(
+        unsigned long now)
+    {
+        for (
+            AEEVariableBase* variable :
+            vars
+        )
+        {
+            if (!variable)
+            {
+                continue;
+            }
+
+            variable->forceChanged(
+                now
+            );
         }
     }
     
@@ -343,48 +364,845 @@ public:
 //  MANAGEMENT
 // ============================================================
 
-class AEEManagement {
+// ============================================================
+// MANAGEMENT
+// ============================================================
+
+class AEEManagement
+{
 public:
-    std::vector<AEEVariableBase*> vars;
+
+    // ========================================================
+    // VALIDATION RESULT
+    // ========================================================
+
+    struct ValidationResult
+    {
+        bool valid =
+            false;
+
+        size_t index =
+            0;
+
+        const char* reason =
+            nullptr;
+    };
+
+private:
+
+    bool _valid =
+        false;
+
+    // ========================================================
+    // ENUM VALIDATION
+    // ========================================================
+
+    static bool isValidDirection(
+        AEEDirection direction)
+    {
+        switch (direction)
+        {
+            case AEEDirection::FrontendToModule:
+            case AEEDirection::ModuleToFrontend:
+            case AEEDirection::Bidirectional:
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    static bool isValidSourceType(
+        AEEVarSourceType sourceType)
+    {
+        switch (sourceType)
+        {
+            case AEEVarSourceType::None:
+            case AEEVarSourceType::BufferArea:
+            case AEEVarSourceType::GenericSensor:
+            case AEEVarSourceType::Function:
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    static bool isValidVariableType(
+        AEEVarType variableType)
+    {
+        switch (variableType)
+        {
+            case AEEVarType::BOOL:
+            case AEEVarType::INT:
+            case AEEVarType::FLOAT:
+            case AEEVarType::STRING:
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    // ========================================================
+    // SINGLE DEFINITION VALIDATION
+    // ========================================================
+
+    static const char* validateDefinition(
+        const AEEVarDef& definition)
+    {
+        // ----------------------------------------------------
+        // NAME
+        // ----------------------------------------------------
+
+        if (definition.name.length() == 0)
+        {
+            return
+                "variable name is empty";
+        }
+
+        // ----------------------------------------------------
+        // ENUMS
+        // ----------------------------------------------------
+
+        if (!isValidDirection(
+                definition.direction))
+        {
+            return
+                "invalid direction";
+        }
+
+        if (!isValidSourceType(
+                definition.sourceType))
+        {
+            return
+                "invalid source type";
+        }
+
+        if (!isValidVariableType(
+                definition.varType))
+        {
+            return
+                "invalid variable type";
+        }
+
+        // ----------------------------------------------------
+        // NUMERIC PARAMETERS
+        // ----------------------------------------------------
+
+        if (!isfinite(
+                definition.minDelta))
+        {
+            return
+                "minDelta is not finite";
+        }
+
+        if (definition.minDelta < 0.0f)
+        {
+            return
+                "minDelta is negative";
+        }
+
+        if (!isfinite(
+                definition.scale))
+        {
+            return
+                "scale is not finite";
+        }
+
+        if (definition.scale == 0.0f)
+        {
+            return
+                "scale is zero";
+        }
+
+        if (
+            definition.bitIndex < -1 ||
+            definition.bitIndex > 31
+        )
+        {
+            return
+                "bitIndex outside -1..31";
+        }
+
+        // ----------------------------------------------------
+        // SOURCE-SPECIFIC VALIDATION
+        // ----------------------------------------------------
+
+        switch (definition.sourceType)
+        {
+            // =================================================
+            // NONE
+            //
+            // Ammesso normalmente per valori ricevuti dal peer:
+            // ModuleToFrontend o Bidirectional.
+            // =================================================
+
+            case AEEVarSourceType::None:
+            {
+                /*
+                * SourceType::None è valido per:
+                *
+                * - variabili di sistema prive di sorgente locale;
+                * - definizioni importate da uno schema remoto;
+                * - variabili FrontendToModule ricevute dal peer;
+                * - variabili ModuleToFrontend prodotte dal peer;
+                * - variabili Bidirectional gestite dal protocollo.
+                *
+                * La direzione non determina, da sola, la validità della
+                * sorgente None. Il significato dipende dal ruolo locale
+                * master/slave e dall'origine statica o remota dello schema.
+                */
+
+                if (
+                    definition.fnFloat ||
+                    definition.fnInt ||
+                    definition.fnBool
+                )
+                {
+                    return
+                        "None source has function callback";
+                }
+
+                if (definition.bufferArea != -1)
+                {
+                    return
+                        "None source has buffer area";
+                }
+
+                if (definition.bitIndex != -1)
+                {
+                    return
+                        "None source has bit index";
+                }
+
+                break;
+            }
+
+            // =================================================
+            // BUFFER AREA
+            // =================================================
+
+            case AEEVarSourceType::BufferArea:
+            {
+                if (definition.bufferArea < 0)
+                {
+                    return
+                        "BufferArea source has invalid area";
+                }
+
+                if (
+                    definition.fnFloat ||
+                    definition.fnInt ||
+                    definition.fnBool
+                )
+                {
+                    return
+                        "BufferArea source has function callback";
+                }
+
+                if (
+                    definition.bitIndex >= 0 &&
+                    definition.varType !=
+                        AEEVarType::BOOL
+                )
+                {
+                    return
+                        "bit-indexed BufferArea must be BOOL";
+                }
+
+                if (
+                    definition.direction ==
+                        AEEDirection::ModuleToFrontend
+                )
+                {
+                    return
+                        "ModuleToFrontend variable cannot use local BufferArea";
+                }
+
+                break;
+            }
+
+            // =================================================
+            // GENERIC SENSOR
+            // =================================================
+
+            case AEEVarSourceType::GenericSensor:
+            {
+                if (
+                    definition.fnFloat ||
+                    definition.fnInt ||
+                    definition.fnBool
+                )
+                {
+                    return
+                        "GenericSensor source has function callback";
+                }
+
+                if (
+                    definition.direction ==
+                        AEEDirection::ModuleToFrontend
+                )
+                {
+                    return
+                        "ModuleToFrontend variable cannot use local GenericSensor";
+                }
+
+                if (
+                    definition.varType ==
+                        AEEVarType::STRING
+                )
+                {
+                    return
+                        "GenericSensor STRING is unsupported";
+                }
+
+                break;
+            }
+
+            // =================================================
+            // FUNCTION
+            // =================================================
+
+            case AEEVarSourceType::Function:
+            {
+                if (
+                    definition.direction ==
+                        AEEDirection::ModuleToFrontend
+                )
+                {
+                    return
+                        "ModuleToFrontend variable cannot use local Function";
+                }
+
+                const unsigned callbackCount =
+                    (
+                        definition.fnFloat
+                            ? 1U
+                            : 0U
+                    ) +
+                    (
+                        definition.fnInt
+                            ? 1U
+                            : 0U
+                    ) +
+                    (
+                        definition.fnBool
+                            ? 1U
+                            : 0U
+                    );
+
+                if (callbackCount == 0)
+                {
+                    return
+                        "Function source has no callback";
+                }
+
+                if (callbackCount > 1)
+                {
+                    return
+                        "Function source has multiple callbacks";
+                }
+
+                switch (definition.varType)
+                {
+                    case AEEVarType::FLOAT:
+                    {
+                        if (!definition.fnFloat)
+                        {
+                            return
+                                "FLOAT Function requires fnFloat";
+                        }
+
+                        break;
+                    }
+
+                    case AEEVarType::INT:
+                    {
+                        if (!definition.fnInt)
+                        {
+                            return
+                                "INT Function requires fnInt";
+                        }
+
+                        break;
+                    }
+
+                    case AEEVarType::BOOL:
+                    {
+                        if (!definition.fnBool)
+                        {
+                            return
+                                "BOOL Function requires fnBool";
+                        }
+
+                        break;
+                    }
+
+                    case AEEVarType::STRING:
+                    {
+                        return
+                            "STRING Function is unsupported";
+                    }
+
+                    default:
+                    {
+                        return
+                            "invalid Function variable type";
+                    }
+                }
+
+                break;
+            }
+
+            default:
+            {
+                return
+                    "invalid source type";
+            }
+        }
+
+        return
+            nullptr;
+    }
+
+public:
+
+    std::vector<AEEVariableBase*>
+        vars;
+
+    // ========================================================
+    // COPY / MOVE POLICY
+    // ========================================================
+
+    AEEManagement(
+        const AEEManagement&) =
+            delete;
+
+    AEEManagement& operator=(
+        const AEEManagement&) =
+            delete;
+
+    AEEManagement(
+        AEEManagement&&) =
+            delete;
+
+    AEEManagement& operator=(
+        AEEManagement&&) =
+            delete;
+
+    // ========================================================
+    // COMPLETE DEFINITIONS VALIDATION
+    // ========================================================
+
+    static ValidationResult ValidateDefinitions(
+        const AEEVarDef* definitions,
+        size_t count)
+    {
+        ValidationResult result;
+
+        if (!definitions)
+        {
+            result.reason =
+                "definitions pointer is null";
+
+            return result;
+        }
+
+        if (count == 0)
+        {
+            result.reason =
+                "definition count is zero";
+
+            return result;
+        }
+
+        for (
+            size_t index = 0;
+            index < count;
+            ++index
+        )
+        {
+            const AEEVarDef& definition =
+                definitions[index];
+
+            const char* validationError =
+                validateDefinition(
+                    definition
+                );
+
+            if (validationError)
+            {
+                result.index =
+                    index;
+
+                result.reason =
+                    validationError;
+
+                return result;
+            }
+
+            // ------------------------------------------------
+            // DUPLICATE NAME
+            // ------------------------------------------------
+
+            for (
+                size_t previousIndex = 0;
+                previousIndex < index;
+                ++previousIndex
+            )
+            {
+                if (
+                    definitions[
+                        previousIndex
+                    ].name ==
+                    definition.name
+                )
+                {
+                    result.index =
+                        index;
+
+                    result.reason =
+                        "duplicate variable name";
+
+                    return result;
+                }
+            }
+        }
+
+        result.valid =
+            true;
+
+        result.reason =
+            nullptr;
+
+        return result;
+    }
+
+    // ========================================================
+    // VALIDATION LOG
+    // ========================================================
+
+    static bool ValidateAndLog(
+        const AEEVarDef* definitions,
+        size_t count,
+        const char* context = nullptr)
+    {
+        const ValidationResult result =
+            ValidateDefinitions(
+                definitions,
+                count
+            );
+
+        if (result.valid)
+        {
+            LOG_IF(
+                "AEE::VALIDATION",
+                "Definitions valid: "
+                "context=%s count=%u",
+                context
+                    ? context
+                    : "AEE",
+                static_cast<unsigned>(
+                    count
+                )
+            );
+
+            return true;
+        }
+
+        const char* variableName =
+            "<unavailable>";
+
+        if (
+            definitions &&
+            result.index < count
+        )
+        {
+            variableName =
+                definitions[
+                    result.index
+                ].name.c_str();
+        }
+
+        LOG_EF(
+            "AEE::VALIDATION",
+            "Definition invalid: "
+            "context=%s index=%u name=%s "
+            "reason=%s count=%u",
+            context
+                ? context
+                : "AEE",
+            static_cast<unsigned>(
+                result.index
+            ),
+            variableName,
+            result.reason
+                ? result.reason
+                : "unknown",
+            static_cast<unsigned>(
+                count
+            )
+        );
+
+        return false;
+    }
+
+    // ========================================================
+    // CONSTRUCTOR
+    // ========================================================
+
+    AEEManagement(
+        const AEEVarDef* definitions,
+        size_t count)
+    {
+        _valid =
+            false;
+
+        if (
+            !ValidateAndLog(
+                definitions,
+                count,
+                "AEEManagement"
+            )
+        )
+        {
+            return;
+        }
+
+        vars.reserve(
+            count
+        );
+
+        for (
+            size_t index = 0;
+            index < count;
+            ++index
+        )
+        {
+            const AEEVarDef& definition =
+                definitions[index];
+
+            AEEVariableBase* variable =
+                nullptr;
+
+            switch (definition.varType)
+            {
+                case AEEVarType::BOOL:
+                {
+                    variable =
+                        new AEEVariable<bool>(
+                            definition
+                        );
+
+                    break;
+                }
+
+                case AEEVarType::INT:
+                {
+                    variable =
+                        new AEEVariable<int>(
+                            definition
+                        );
+
+                    break;
+                }
+
+                case AEEVarType::FLOAT:
+                {
+                    variable =
+                        new AEEVariable<float>(
+                            definition
+                        );
+
+                    break;
+                }
+
+                case AEEVarType::STRING:
+                {
+                    variable =
+                        new AEEVariable<String>(
+                            definition
+                        );
+
+                    break;
+                }
+
+                default:
+                {
+                    LOG_EF(
+                        "AEE::MANAGEMENT",
+                        "Unsupported variable type: "
+                        "index=%u name=%s",
+                        static_cast<unsigned>(
+                            index
+                        ),
+                        definition.name.c_str()
+                    );
+
+                    clear();
+
+                    return;
+                }
+            }
+
+            if (!variable)
+            {
+                LOG_EF(
+                    "AEE::MANAGEMENT",
+                    "Variable allocation failed: "
+                    "index=%u name=%s",
+                    static_cast<unsigned>(
+                        index
+                    ),
+                    definition.name.c_str()
+                );
+
+                clear();
+
+                return;
+            }
+
+            vars.push_back(
+                variable
+            );
+        }
+
+        _valid =
+            vars.size() == count;
+
+        if (!_valid)
+        {
+            LOG_EF(
+                "AEE::MANAGEMENT",
+                "Variable count mismatch: "
+                "expected=%u created=%u",
+                static_cast<unsigned>(
+                    count
+                ),
+                static_cast<unsigned>(
+                    vars.size()
+                )
+            );
+
+            clear();
+
+            return;
+        }
+
+        LOG_IF(
+            "AEE::MANAGEMENT",
+            "Management initialized: vars=%u",
+            static_cast<unsigned>(
+                vars.size()
+            )
+        );
+    }
+
+    // ========================================================
+    // DESTRUCTOR
+    // ========================================================
 
     ~AEEManagement()
     {
-        for (auto* v : vars)
-        {
-            if (!v)
-                continue;
+        clear();
+    }
 
-            v->owner = nullptr;
-            delete v;
+    // ========================================================
+    // CLEAR
+    // ========================================================
+
+    void clear()
+    {
+        for (
+            AEEVariableBase* variable :
+            vars
+        )
+        {
+            if (!variable)
+            {
+                continue;
+            }
+
+            variable->owner =
+                nullptr;
+
+            delete variable;
         }
 
         vars.clear();
+
+        _valid =
+            false;
     }
 
-    AEEManagement(const AEEVarDef* defs, size_t count) {
-        vars.reserve(count);
-        for (size_t i = 0; i < count; i++) {
-            const auto& d = defs[i];
-            AEEVariableBase* v = nullptr;
+    // ========================================================
+    // STATE
+    // ========================================================
 
-            switch (d.varType) {
-                case AEEVarType::BOOL:  v = new AEEVariable<bool>(d); break;
-                case AEEVarType::INT:   v = new AEEVariable<int>(d); break;
-                case AEEVarType::FLOAT: v = new AEEVariable<float>(d); break;
-                case AEEVarType::STRING:v = new AEEVariable<String>(d); break;
+    bool isValid() const
+    {
+        return
+            _valid;
+    }
+
+    size_t size() const
+    {
+        return
+            vars.size();
+    }
+
+    // ========================================================
+    // REGISTER ALL
+    // ========================================================
+
+    bool registerAll(
+        AEERegistry& registry)
+    {
+        if (!_valid)
+        {
+            LOG_EF(
+                "AEE::MANAGEMENT",
+                "Registration rejected: "
+                "management invalid"
+            );
+
+            return false;
+        }
+
+        for (
+            AEEVariableBase* variable :
+            vars
+        )
+        {
+            if (!variable)
+            {
+                LOG_EF(
+                    "AEE::MANAGEMENT",
+                    "Registration failed: null variable"
+                );
+
+                return false;
             }
 
-            vars.push_back(v);
-        }
-    }
+            variable->owner =
+                &registry;
 
-    void registerAll(AEERegistry& reg) {
-        for (auto* v : vars) {
-            v->owner = &reg;   // 🔥 nuovo
-            reg.add(v);
+            registry.add(
+                variable
+            );
         }
-    }
 
+        LOG_IF(
+            "AEE::MANAGEMENT",
+            "Variables registered: count=%u",
+            static_cast<unsigned>(
+                vars.size()
+            )
+        );
+
+        return true;
+    }
 };
 
 // ============================================================
@@ -400,32 +1218,253 @@ public:
     AEEProtocol() = default;              // 🔥 default ctor
     AEEProtocol(bool master) : isMaster(master) {}
 
-    String serializeChangedJSON(AEERegistry& reg, uint32_t seq) {
-        DynamicJsonDocument doc(1024);
+    // ============================================================
+    // SERIALIZE CHANGED JSON
+    //
+    // La capacità viene stimata in funzione delle variabili
+    // effettivamente trasmissibili.
+    //
+    // La funzione restituisce String vuota in caso di:
+    //
+    // - nessuna variabile trasmissibile;
+    // - overflow ArduinoJson;
+    // - serializzazione fallita.
+    //
+    // Quando viene restituita String vuota, AEEProtocolEngine non
+    // deve cancellare le variabili changed.
+    // ============================================================
 
-        reg.forEachChanged([&](AEEVariableBase* v) {
-            const AEEDirection dir = v->def.direction;
+    String serializeChangedJSON(
+        AEERegistry& registry,
+        uint32_t sequence)
+    {
+        size_t eligibleCount =
+            0;
 
-            const bool shouldSend =
-                (isMaster &&
-                 (dir == AEEDirection::FrontendToModule ||
-                  dir == AEEDirection::Bidirectional)) ||
-                (!isMaster &&
-                 (dir == AEEDirection::ModuleToFrontend ||
-                  dir == AEEDirection::Bidirectional));
+        size_t estimatedCapacity =
+            JSON_OBJECT_SIZE(
+                1
+            ) +
+            64;
 
-            if (shouldSend)
-                v->toJson(doc);
-        });
+        // ========================================================
+        // CAPACITY ESTIMATION
+        // ========================================================
 
-        if (doc.size() == 0)
-            return "";
+        registry.forEachChanged(
+            [this,
+            &eligibleCount,
+            &estimatedCapacity](
+                AEEVariableBase* variable)
+            {
+                if (!variable)
+                {
+                    return;
+                }
 
-        doc["seq"] = seq;
+                const AEEDirection direction =
+                    variable->def.direction;
 
-        String out;
-        serializeJson(doc, out);
-        return out;
+                const bool shouldSend =
+                    (
+                        isMaster &&
+                        (
+                            direction ==
+                                AEEDirection::FrontendToModule ||
+                            direction ==
+                                AEEDirection::Bidirectional
+                        )
+                    ) ||
+                    (
+                        !isMaster &&
+                        (
+                            direction ==
+                                AEEDirection::ModuleToFrontend ||
+                            direction ==
+                                AEEDirection::Bidirectional
+                        )
+                    );
+
+                if (!shouldSend)
+                {
+                    return;
+                }
+
+                ++eligibleCount;
+
+                estimatedCapacity +=
+                    variable->def.name.length() +
+                    48;
+            }
+        );
+
+        if (eligibleCount == 0)
+        {
+            return
+                String();
+        }
+
+        estimatedCapacity +=
+            JSON_OBJECT_SIZE(
+                eligibleCount + 1
+            );
+
+        static constexpr size_t
+            MAX_AEE_DOCUMENT_CAPACITY =
+                8192;
+
+        if (
+            estimatedCapacity >
+            MAX_AEE_DOCUMENT_CAPACITY
+        )
+        {
+            LOG_EF(
+                "BRIDGE::AEE::TX",
+                "Payload AEE stimato troppo grande: "
+                "eligible=%u capacity=%u maximum=%u",
+                static_cast<unsigned>(
+                    eligibleCount
+                ),
+                static_cast<unsigned>(
+                    estimatedCapacity
+                ),
+                static_cast<unsigned>(
+                    MAX_AEE_DOCUMENT_CAPACITY
+                )
+            );
+
+            return
+                String();
+        }
+
+        // ========================================================
+        // DOCUMENT BUILD
+        // ========================================================
+
+        DynamicJsonDocument document(
+            estimatedCapacity
+        );
+
+        registry.forEachChanged(
+            [this,
+            &document](
+                AEEVariableBase* variable)
+            {
+                if (!variable)
+                {
+                    return;
+                }
+
+                const AEEDirection direction =
+                    variable->def.direction;
+
+                const bool shouldSend =
+                    (
+                        isMaster &&
+                        (
+                            direction ==
+                                AEEDirection::FrontendToModule ||
+                            direction ==
+                                AEEDirection::Bidirectional
+                        )
+                    ) ||
+                    (
+                        !isMaster &&
+                        (
+                            direction ==
+                                AEEDirection::ModuleToFrontend ||
+                            direction ==
+                                AEEDirection::Bidirectional
+                        )
+                    );
+
+                if (!shouldSend)
+                {
+                    return;
+                }
+
+                variable->toJson(
+                    document
+                );
+            }
+        );
+
+        document["seq"] =
+            sequence;
+
+        if (document.overflowed())
+        {
+            LOG_EF(
+                "BRIDGE::AEE::TX",
+                "Overflow serializzazione AEE: "
+                "eligible=%u capacity=%u",
+                static_cast<unsigned>(
+                    eligibleCount
+                ),
+                static_cast<unsigned>(
+                    estimatedCapacity
+                )
+            );
+
+            return
+                String();
+        }
+
+        // ========================================================
+        // SERIALIZATION
+        // ========================================================
+
+        String output;
+
+        const size_t requiredLength =
+            measureJson(
+                document
+            );
+
+        if (
+            !output.reserve(
+                requiredLength + 1
+            )
+        )
+        {
+            LOG_EF(
+                "BRIDGE::AEE::TX",
+                "Allocazione payload AEE fallita: bytes=%u",
+                static_cast<unsigned>(
+                    requiredLength + 1
+                )
+            );
+
+            return
+                String();
+        }
+
+        const size_t serializedLength =
+            serializeJson(
+                document,
+                output
+            );
+
+        if (
+            serializedLength == 0 ||
+            output.length() == 0
+        )
+        {
+            LOG_EF(
+                "BRIDGE::AEE::TX",
+                "Serializzazione AEE fallita: "
+                "eligible=%u",
+                static_cast<unsigned>(
+                    eligibleCount
+                )
+            );
+
+            return
+                String();
+        }
+
+        return
+            output;
     }
     
     bool parseJSON(JsonDocument& doc, AEERegistry& reg)
@@ -530,51 +1569,246 @@ public:
     }
 
     // ============================================================
-    //  COSTRUZIONE COMPLETA DELLA AEE DA UNO SCHEMA JSON (SLAVE)
+    // BUILD MANAGEMENT FROM SCHEMA
+    //
+    // Costruisce un AEEManagement da uno schema completo.
+    //
+    // La capacità deve essere coerente con il limite massimo dello
+    // schema ricostruito dal Bridge multiframe.
     // ============================================================
-    AEEManagement* BuildManagementFromSchema(const String& json, AEERegistry& reg)
+
+    AEEManagement* BuildManagementFromSchema(
+        const String& json,
+        AEERegistry& registry)
     {
-        StaticJsonDocument<2048> doc;
-        if (deserializeJson(doc, json))
+        if (json.length() == 0)
+        {
+            LOG_EF(
+                "AEE::SCHEMA",
+                "Schema vuoto"
+            );
+
             return nullptr;
+        }
 
-        if (!doc.containsKey("schema"))
+        static constexpr size_t
+            MAX_SCHEMA_DOCUMENT_CAPACITY =
+                8192;
+
+        if (
+            json.length() >=
+            MAX_SCHEMA_DOCUMENT_CAPACITY
+        )
+        {
+            LOG_EF(
+                "AEE::SCHEMA",
+                "Schema troppo grande: "
+                "bytes=%u maximum=%u",
+                static_cast<unsigned>(
+                    json.length()
+                ),
+                static_cast<unsigned>(
+                    MAX_SCHEMA_DOCUMENT_CAPACITY - 1
+                )
+            );
+
             return nullptr;
+        }
 
-        JsonArray arr = doc["schema"].as<JsonArray>();
+        DynamicJsonDocument document(
+            MAX_SCHEMA_DOCUMENT_CAPACITY
+        );
 
-        size_t count = 0;
-        AEEVarDef* defs = ImportSchema(arr, count);
+        const DeserializationError error =
+            deserializeJson(
+                document,
+                json
+            );
 
-        AEEManagement* mgr = new AEEManagement(defs, count);
-        mgr->registerAll(reg);
+        if (error)
+        {
+            LOG_EF(
+                "AEE::SCHEMA",
+                "Deserializzazione schema fallita: %s",
+                error.c_str()
+            );
 
-        delete[] defs;
-        return mgr;
+            return nullptr;
+        }
+
+        if (document.overflowed())
+        {
+            LOG_EF(
+                "AEE::SCHEMA",
+                "Overflow documento schema"
+            );
+
+            return nullptr;
+        }
+
+        if (
+            !document.containsKey(
+                "schema"
+            )
+        )
+        {
+            LOG_EF(
+                "AEE::SCHEMA",
+                "Campo schema assente"
+            );
+
+            return nullptr;
+        }
+
+        JsonArray array =
+            document[
+                "schema"
+            ].as<JsonArray>();
+
+        if (array.isNull() ||
+            array.size() == 0)
+        {
+            LOG_EF(
+                "AEE::SCHEMA",
+                "Array schema vuoto o non valido"
+            );
+
+            return nullptr;
+        }
+
+        size_t definitionCount =
+            0;
+
+        AEEVarDef* definitions =
+            ImportSchema(
+                array,
+                definitionCount
+            );
+
+        if (!definitions ||
+            definitionCount == 0)
+        {
+            delete[] definitions;
+
+            LOG_EF(
+                "AEE::SCHEMA",
+                "Import definizioni fallito"
+            );
+
+            return nullptr;
+        }
+
+        AEEManagement* management =
+            new AEEManagement(
+                definitions,
+                definitionCount
+            );
+
+        delete[] definitions;
+
+        definitions =
+            nullptr;
+
+        if (!management)
+        {
+            LOG_EF(
+                "AEE::SCHEMA",
+                "Allocazione AEEManagement fallita"
+            );
+
+            return nullptr;
+        }
+
+        management->registerAll(
+            registry
+        );
+
+        LOG_IF(
+            "AEE::SCHEMA",
+            "Management costruito: vars=%u",
+            static_cast<unsigned>(
+                registry.size()
+            )
+        );
+
+        return
+            management;
     }
 
 };
 
-
-    
-
 // ============================================================
-//  HELPER CAST
+// HELPER CAST
 // ============================================================
 
 template<typename T>
-AEEVariable<T>* as(AEEVariableBase* v) {
-    if constexpr (std::is_same<T,bool>::value)
-        return (v->def.varType == AEEVarType::BOOL) ? static_cast<AEEVariable<bool>*>(v) : nullptr;
+AEEVariable<T>* as(
+    AEEVariableBase* variable)
+{
+    if (!variable)
+    {
+        return nullptr;
+    }
 
-    if constexpr (std::is_same<T,int>::value)
-        return (v->def.varType == AEEVarType::INT) ? static_cast<AEEVariable<int>*>(v) : nullptr;
+    if constexpr (
+        std::is_same<T, bool>::value
+    )
+    {
+        return
+            variable->def.varType ==
+                AEEVarType::BOOL
+                    ? static_cast<
+                          AEEVariable<bool>*
+                      >(
+                          variable
+                      )
+                    : nullptr;
+    }
 
-    if constexpr (std::is_same<T,float>::value)
-        return (v->def.varType == AEEVarType::FLOAT) ? static_cast<AEEVariable<float>*>(v) : nullptr;
+    if constexpr (
+        std::is_same<T, int>::value
+    )
+    {
+        return
+            variable->def.varType ==
+                AEEVarType::INT
+                    ? static_cast<
+                          AEEVariable<int>*
+                      >(
+                          variable
+                      )
+                    : nullptr;
+    }
 
-    if constexpr (std::is_same<T,String>::value)
-        return (v->def.varType == AEEVarType::STRING) ? static_cast<AEEVariable<String>*>(v) : nullptr;
+    if constexpr (
+        std::is_same<T, float>::value
+    )
+    {
+        return
+            variable->def.varType ==
+                AEEVarType::FLOAT
+                    ? static_cast<
+                          AEEVariable<float>*
+                      >(
+                          variable
+                      )
+                    : nullptr;
+    }
+
+    if constexpr (
+        std::is_same<T, String>::value
+    )
+    {
+        return
+            variable->def.varType ==
+                AEEVarType::STRING
+                    ? static_cast<
+                          AEEVariable<String>*
+                      >(
+                          variable
+                      )
+                    : nullptr;
+    }
 
     return nullptr;
 }
@@ -629,8 +1863,13 @@ inline bool AEEVariable<String>::fromJson(const JsonVariant& v)
 }
 
 template<>
-inline void AEEVariable<String>::toJson(JsonDocument& doc) const {
-    doc[def.name] = value;
+inline void AEEVariable<String>::toJson(
+    JsonDocument& document) const
+{
+    document[
+        def.name.c_str()
+    ] =
+        value;
 }
 
 #endif

@@ -30,6 +30,7 @@
 #include "DMPlatformNetwork.hpp"
 #include "DMPlatformModbus.hpp"
 #include "DMOnline.hpp"
+#include "DMAdapterUDP.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
@@ -800,35 +801,597 @@ public:
 class AEEEngine
 {
 public:
+
+    // ============================================================
+    // RECEIVE CONTEXT
+    // ============================================================
+
     struct ReceiveContext
     {
-        Buffer* buffer = nullptr;
-        EventManager* events = nullptr;
-        int aeeSource = -1;
+        Buffer* buffer =
+            nullptr;
+
+        EventManager* events =
+            nullptr;
+
+        int aeeSource =
+            -1;
+
+        bool isValid() const
+        {
+            return
+                buffer != nullptr &&
+                events != nullptr &&
+                aeeSource >= 0 &&
+                aeeSource <= 254;
+        }
     };
 
 private:
+
+    // ============================================================
+    // STATE
+    // ============================================================
+
     AEERegistry registry;
-    AEEManagement* manager = nullptr;
+
+    AEEManagement* manager =
+        nullptr;
 
     ReceiveContext receiveContext;
 
+    // ============================================================
+    // DYNAMIC INTROSPECTION MODEL
+    //
+    // Utilizzato esclusivamente dal channel Knob.
+    //
+    // AEEVarDef possiede internamente il nome mediante String.
+    // Non è quindi necessario mantenere uno storage separato
+    // dei nomi.
+    // ============================================================
+
+    std::vector<AEEVarDef>
+        dynamicDefinitions;
+
+    // ============================================================
+    // DIRECTION HELPERS
+    // ============================================================
+
+    static bool canReceiveFromPeer(
+        AEEDirection direction)
+    {
+        return
+            direction ==
+                AEEDirection::ModuleToFrontend ||
+            direction ==
+                AEEDirection::Bidirectional;
+    }
+
+    // ============================================================
+    // INTROSPECTION ENTITY TYPE
+    // ============================================================
+
+    static bool resolveVariableType(
+        const DomoIntrospection::Entity& entity,
+        AEEVarType& variableType)
+    {
+        switch (entity.kind)
+        {
+            case DomoIntrospection::EntityKind::BINARY_SENSOR:
+            case DomoIntrospection::EntityKind::SWITCH:
+            case DomoIntrospection::EntityKind::LIGHT:
+            case DomoIntrospection::EntityKind::COVER:
+            case DomoIntrospection::EntityKind::BUTTON:
+            {
+                variableType =
+                    AEEVarType::BOOL;
+
+                return true;
+            }
+
+            case DomoIntrospection::EntityKind::SENSOR:
+            case DomoIntrospection::EntityKind::NUMBER:
+            {
+                variableType =
+                    AEEVarType::FLOAT;
+
+                return true;
+            }
+
+            case DomoIntrospection::EntityKind::TEXT:
+            case DomoIntrospection::EntityKind::CLIMATE:
+            case DomoIntrospection::EntityKind::STATUS:
+            case DomoIntrospection::EntityKind::UNKNOWN:
+            default:
+            {
+                return false;
+            }
+        }
+    }
+
+    // ============================================================
+    // INTROSPECTION ENTITY DIRECTION
+    // ============================================================
+
+    static AEEDirection resolveDirection(
+        const DomoIntrospection::Entity& entity)
+    {
+        if (
+            entity.readable &&
+            entity.writable
+        )
+        {
+            return
+                AEEDirection::Bidirectional;
+        }
+
+        if (entity.readable)
+        {
+            /*
+             * DomoManager master -> peer slave.
+             */
+            return
+                AEEDirection::FrontendToModule;
+        }
+
+        /*
+         * Peer slave -> DomoManager master.
+         */
+        return
+            AEEDirection::ModuleToFrontend;
+    }
+
+    // ============================================================
+    // INTROSPECTION VARIABLE NAME
+    // ============================================================
+
+    static String buildVariableName(
+        int area)
+    {
+        String variableName;
+
+        variableName.reserve(
+            20
+        );
+
+        variableName =
+            "area_";
+
+        variableName +=
+            String(
+                area
+            );
+
+        return
+            variableName;
+    }
+
+    // ============================================================
+    // INTROSPECTION SCALE
+    // ============================================================
+
+    static float resolveScale(
+        float configuredScale)
+    {
+        if (
+            !isfinite(
+                configuredScale
+            ) ||
+            configuredScale == 0.0f
+        )
+        {
+            return
+                1.0f;
+        }
+
+        return
+            configuredScale;
+    }
+
+    // ============================================================
+    // MANAGEMENT CREATION
+    // ============================================================
+
+    bool createManagement(
+        const AEEVarDef* definitions,
+        size_t definitionCount,
+        const char* context)
+    {
+        if (
+            !definitions ||
+            definitionCount == 0
+        )
+        {
+            LOG_EF(
+                "AEE",
+                "Creazione management rifiutata: "
+                "context=%s definitions=%p count=%u",
+                context
+                    ? context
+                    : "UNKNOWN",
+                static_cast<const void*>(
+                    definitions
+                ),
+                static_cast<unsigned>(
+                    definitionCount
+                )
+            );
+
+            return false;
+        }
+
+        // ========================================================
+        // VALIDATE DEFINITIONS
+        // ========================================================
+
+        if (
+            !AEEManagement::ValidateAndLog(
+                definitions,
+                definitionCount,
+                context
+            )
+        )
+        {
+            LOG_EF(
+                "AEE",
+                "Definizioni AEE non valide: context=%s",
+                context
+                    ? context
+                    : "UNKNOWN"
+            );
+
+            return false;
+        }
+
+        // ========================================================
+        // CREATE MANAGEMENT
+        // ========================================================
+
+        manager =
+            new AEEManagement(
+                definitions,
+                definitionCount
+            );
+
+        if (!manager)
+        {
+            LOG_EF(
+                "AEE",
+                "Allocazione AEEManagement fallita: "
+                "context=%s count=%u",
+                context
+                    ? context
+                    : "UNKNOWN",
+                static_cast<unsigned>(
+                    definitionCount
+                )
+            );
+
+            return false;
+        }
+
+        // ========================================================
+        // MANAGEMENT STATE
+        // ========================================================
+
+        if (!manager->isValid())
+        {
+            LOG_EF(
+                "AEE",
+                "AEEManagement costruito ma non valido: "
+                "context=%s",
+                context
+                    ? context
+                    : "UNKNOWN"
+            );
+
+            delete manager;
+
+            manager =
+                nullptr;
+
+            return false;
+        }
+
+        if (
+            manager->size() !=
+            definitionCount
+        )
+        {
+            LOG_EF(
+                "AEE",
+                "Conteggio management non coerente: "
+                "context=%s definitions=%u variables=%u",
+                context
+                    ? context
+                    : "UNKNOWN",
+                static_cast<unsigned>(
+                    definitionCount
+                ),
+                static_cast<unsigned>(
+                    manager->size()
+                )
+            );
+
+            delete manager;
+
+            manager =
+                nullptr;
+
+            return false;
+        }
+
+        // ========================================================
+        // REGISTER VARIABLES
+        // ========================================================
+
+        if (
+            !manager->registerAll(
+                registry
+            )
+        )
+        {
+            LOG_EF(
+                "AEE",
+                "Registrazione variabili fallita: "
+                "context=%s",
+                context
+                    ? context
+                    : "UNKNOWN"
+            );
+
+            registry.clear();
+
+            delete manager;
+
+            manager =
+                nullptr;
+
+            return false;
+        }
+
+        // ========================================================
+        // REGISTRY CONSISTENCY
+        // ========================================================
+
+        if (
+            registry.size() !=
+            definitionCount
+        )
+        {
+            LOG_EF(
+                "AEE",
+                "Conteggio registry non coerente: "
+                "context=%s definitions=%u registry=%u",
+                context
+                    ? context
+                    : "UNKNOWN",
+                static_cast<unsigned>(
+                    definitionCount
+                ),
+                static_cast<unsigned>(
+                    registry.size()
+                )
+            );
+
+            registry.clear();
+
+            delete manager;
+
+            manager =
+                nullptr;
+
+            return false;
+        }
+
+        LOG_IF(
+            "AEE",
+            "Management inizializzato: "
+            "context=%s definitions=%u variables=%u",
+            context
+                ? context
+                : "UNKNOWN",
+            static_cast<unsigned>(
+                definitionCount
+            ),
+            static_cast<unsigned>(
+                registry.size()
+            )
+        );
+
+        return true;
+    }
+
+    // ============================================================
+    // BUILD INTROSPECTION DEFINITIONS
+    // ============================================================
+
+    bool buildIntrospectionDefinitions(
+        const DomoIntrospection& introspection)
+    {
+        const size_t maximumDefinitions =
+            introspection.entityCount();
+
+        if (maximumDefinitions == 0)
+        {
+            LOG_EF(
+                "AEE",
+                "Introspection priva di entity"
+            );
+
+            return false;
+        }
+
+        dynamicDefinitions.reserve(
+            maximumDefinitions
+        );
+
+        introspection.forEachEntity(
+            [this](
+                const DomoIntrospection::Entity& entity)
+            {
+                // =================================================
+                // PUBLIC BUFFER ENTITY
+                // =================================================
+
+                if (!entity.isPublicBufferEntity())
+                {
+                    return;
+                }
+
+                if (
+                    !entity.readable &&
+                    !entity.writable
+                )
+                {
+                    return;
+                }
+
+                if (entity.area < 0)
+                {
+                    LOG_WF(
+                        "AEE",
+                        "Entity Introspection ignorata: "
+                        "area non valida=%d",
+                        entity.area
+                    );
+
+                    return;
+                }
+
+                // =================================================
+                // VARIABLE TYPE
+                // =================================================
+
+                AEEVarType variableType;
+
+                if (
+                    !resolveVariableType(
+                        entity,
+                        variableType
+                    )
+                )
+                {
+                    return;
+                }
+
+                // =================================================
+                // DIRECTION
+                // =================================================
+
+                const AEEDirection direction =
+                    resolveDirection(
+                        entity
+                    );
+
+                // =================================================
+                // NAME
+                // =================================================
+
+                const String variableName =
+                    buildVariableName(
+                        entity.area
+                    );
+
+                // =================================================
+                // SCALE
+                // =================================================
+
+                const float scale =
+                    resolveScale(
+                        entity.scale
+                    );
+
+                // =================================================
+                // SENSOR CONFIGURATION
+                // =================================================
+
+                const GenericSensorConfig sensorConfig =
+                {
+                    GenericSensorConfig::Type::BUFFER,
+                    entity.area,
+                    1.0f
+                };
+
+                // =================================================
+                // DEFINITION
+                //
+                // AEEVarDef copia variableName nella propria String.
+                // Il puntatore c_str() viene usato soltanto durante
+                // il costruttore.
+                // =================================================
+
+                dynamicDefinitions.emplace_back(
+                    variableName.c_str(),
+                    direction,
+                    AEEVarSourceType::BufferArea,
+                    entity.area,
+                    -1,
+                    sensorConfig,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    variableType,
+                    0.0f,
+                    scale
+                );
+            }
+        );
+
+        if (dynamicDefinitions.empty())
+        {
+            LOG_EF(
+                "AEE",
+                "Introspection non contiene "
+                "entity Buffer esportabili"
+            );
+
+            return false;
+        }
+
+        return true;
+    }
+
 public:
-    AEEEngine() = default;
+
+    // ============================================================
+    // CONSTRUCTOR
+    // ============================================================
+
+    AEEEngine() =
+        default;
+
+    // ============================================================
+    // DESTRUCTOR
+    // ============================================================
 
     ~AEEEngine()
     {
         clear();
     }
 
-    AEEEngine(const AEEEngine&) = delete;
-    AEEEngine& operator=(const AEEEngine&) = delete;
+    // ============================================================
+    // COPY / MOVE POLICY
+    // ============================================================
 
-    AEEEngine(AEEEngine&&) = delete;
-    AEEEngine& operator=(AEEEngine&&) = delete;
+    AEEEngine(
+        const AEEEngine&) =
+            delete;
+
+    AEEEngine& operator=(
+        const AEEEngine&) =
+            delete;
+
+    AEEEngine(
+        AEEEngine&&) =
+            delete;
+
+    AEEEngine& operator=(
+        AEEEngine&&) =
+            delete;
 
     // ============================================================
-    // SETUP
+    // SETUP STATIC CONFIGURATION
     // ============================================================
 
     bool setup(
@@ -836,39 +1399,97 @@ public:
     {
         clear();
 
-        if (!cfg.vars || cfg.count == 0)
+        if (
+            !cfg.vars ||
+            cfg.count == 0
+        )
         {
             LOG_EF(
                 "AEE",
-                "Configurazione AEE non valida"
+                "Configurazione AEE statica non valida: "
+                "vars=%p count=%u",
+                static_cast<const void*>(
+                    cfg.vars
+                ),
+                static_cast<unsigned>(
+                    cfg.count
+                )
             );
 
             return false;
         }
 
-        manager =
-            new AEEManagement(
+        if (
+            !createManagement(
                 cfg.vars,
-                cfg.count
-            );
-
-        if (!manager)
+                cfg.count,
+                "STATIC"
+            )
+        )
         {
-            LOG_EF(
-                "AEE",
-                "Allocazione AEEManagement fallita"
-            );
+            clear();
 
             return false;
         }
-
-        manager->registerAll(
-            registry
-        );
 
         LOG_IF(
             "AEE",
-            "AEE inizializzata con %u variabili",
+            "AEE statica inizializzata: "
+            "definitions=%u variables=%u",
+            static_cast<unsigned>(
+                cfg.count
+            ),
+            static_cast<unsigned>(
+                registry.size()
+            )
+        );
+
+        return true;
+    }
+
+    // ============================================================
+    // SETUP FROM INTROSPECTION
+    // ============================================================
+
+    bool setup(
+        const DomoIntrospection& introspection)
+    {
+        clear();
+
+        if (
+            !buildIntrospectionDefinitions(
+                introspection
+            )
+        )
+        {
+            clear();
+
+            return false;
+        }
+
+        if (
+            !createManagement(
+                dynamicDefinitions.data(),
+                dynamicDefinitions.size(),
+                "INTROSPECTION"
+            )
+        )
+        {
+            clear();
+
+            return false;
+        }
+
+        LOG_IF(
+            "AEE",
+            "AEE Introspection inizializzata: "
+            "entities=%u definitions=%u variables=%u",
+            static_cast<unsigned>(
+                introspection.entityCount()
+            ),
+            static_cast<unsigned>(
+                dynamicDefinitions.size()
+            ),
             static_cast<unsigned>(
                 registry.size()
             )
@@ -884,59 +1505,121 @@ public:
     void clear()
     {
         /*
-         * Prima si eliminano dal registry i riferimenti non
-         * proprietari, poi si distruggono le variabili possedute
-         * da AEEManagement.
+         * Il registry conserva riferimenti non proprietari.
+         * Deve essere svuotato prima di distruggere manager.
          */
         registry.clear();
 
+        /*
+         * AEEManagement possiede le AEEVariableBase.
+         */
         delete manager;
-        manager = nullptr;
 
+        manager =
+            nullptr;
+
+        /*
+         * Le definizioni dinamiche possiedono autonomamente
+         * i nomi tramite String.
+         */
+        dynamicDefinitions.clear();
+
+        /*
+         * Elimina eventuali puntatori runtime precedenti.
+         */
         receiveContext =
             ReceiveContext{};
     }
 
     // ============================================================
-    // ACCESSORS
+    // REGISTRY ACCESSORS
     // ============================================================
 
     AEERegistry& getRegistry()
     {
-        return registry;
+        return
+            registry;
     }
 
     const AEERegistry& getRegistry() const
     {
-        return registry;
+        return
+            registry;
     }
+
+    // ============================================================
+    // MANAGEMENT ACCESSORS
+    // ============================================================
 
     AEEManagement* getManager()
     {
-        return manager;
+        return
+            manager;
     }
 
     const AEEManagement* getManager() const
     {
-        return manager;
+        return
+            manager;
     }
+
+    // ============================================================
+    // DYNAMIC DEFINITIONS ACCESSORS
+    // ============================================================
+
+    const std::vector<AEEVarDef>&
+        getDynamicDefinitions() const
+    {
+        return
+            dynamicDefinitions;
+    }
+
+    size_t getDynamicDefinitionCount() const
+    {
+        return
+            dynamicDefinitions.size();
+    }
+
+    // ============================================================
+    // READY STATE
+    // ============================================================
 
     bool isReady() const
     {
         return
             manager != nullptr &&
-            registry.size() > 0;
+            manager->isValid() &&
+            manager->size() > 0 &&
+            registry.size() ==
+                manager->size();
     }
 
     // ============================================================
-    // CONTEXT RICEZIONE
+    // RECEIVE CONTEXT
     // ============================================================
 
-    void attachReceiveContext(
+    bool attachReceiveContext(
         Buffer& buffer,
         EventManager& events,
         int aeeSource)
     {
+        receiveContext =
+            ReceiveContext{};
+
+        if (
+            aeeSource < 0 ||
+            aeeSource > 254
+        )
+        {
+            LOG_EF(
+                "AEE::RX",
+                "Sorgente EventManager AEE non valida: %d",
+                aeeSource
+            );
+
+            return false;
+        }
+
         receiveContext.buffer =
             &buffer;
 
@@ -945,10 +1628,30 @@ public:
 
         receiveContext.aeeSource =
             aeeSource;
+
+        LOG_IF(
+            "AEE::RX",
+            "Contesto ricezione inizializzato: source=%d",
+            aeeSource
+        );
+
+        return true;
+    }
+
+    bool hasReceiveContext() const
+    {
+        return
+            receiveContext.isValid();
+    }
+
+    const ReceiveContext& getReceiveContext() const
+    {
+        return
+            receiveContext;
     }
 
     // ============================================================
-    // RICEZIONE AEE DAL PEER
+    // RECEIVE FROM PEER
     // ============================================================
 
     void applyReceived(
@@ -956,10 +1659,26 @@ public:
         unsigned long now)
     {
         if (!variable)
-            return;
+        {
+            LOG_WF(
+                "AEE::RX",
+                "Variabile ricevuta nulla"
+            );
 
-        if (!receiveContext.buffer ||
-            !receiveContext.events)
+            return;
+        }
+
+        if (!isReady())
+        {
+            LOG_WF(
+                "AEE::RX",
+                "AEEEngine non pronto"
+            );
+
+            return;
+        }
+
+        if (!receiveContext.isValid())
         {
             LOG_WF(
                 "AEE::RX",
@@ -973,37 +1692,64 @@ public:
             variable->def.direction;
 
         if (
-            direction !=
-                AEEDirection::ModuleToFrontend &&
-            direction !=
-                AEEDirection::Bidirectional
+            !canReceiveFromPeer(
+                direction
+            )
         )
         {
             return;
         }
 
-        if (
-            variable->def.sourceType ==
-            AEEVarSourceType::BufferArea
-        )
+        switch (variable->def.sourceType)
         {
-            applyBufferArea(
-                variable,
-                now
-            );
+            case AEEVarSourceType::BufferArea:
+            {
+                applyBufferArea(
+                    variable,
+                    now
+                );
 
-            return;
+                return;
+            }
+
+            case AEEVarSourceType::None:
+            case AEEVarSourceType::Function:
+            {
+                onAEEVarChanged(
+                    variable,
+                    now
+                );
+
+                return;
+            }
+
+            case AEEVarSourceType::GenericSensor:
+            default:
+            {
+                LOG_WF(
+                    "AEE::RX",
+                    "Sorgente ricevuta non supportata: "
+                    "name=%s source=%u",
+                    variable
+                        ->def
+                        .name
+                        .c_str(),
+                    static_cast<unsigned>(
+                        variable
+                            ->def
+                            .sourceType
+                    )
+                );
+
+                return;
+            }
         }
-
-        onAEEVarChanged(
-            variable,
-            now
-        );
     }
 
 private:
+
     // ============================================================
-    // AEE BUFFER AREA -> BUFFER + EVENT MANAGER
+    // APPLY BUFFER AREA
     // ============================================================
 
     void applyBufferArea(
@@ -1012,8 +1758,10 @@ private:
     {
         (void)now;
 
-        if (!variable ||
-            !receiveContext.buffer)
+        if (
+            !variable ||
+            !receiveContext.isValid()
+        )
         {
             return;
         }
@@ -1031,27 +1779,60 @@ private:
         {
             LOG_WF(
                 "AEE::RX",
-                "Area non valida per '%s': %d",
-                variable->def.name.c_str(),
-                area
+                "Area non valida per '%s': "
+                "area=%d bufferSize=%d",
+                variable
+                    ->def
+                    .name
+                    .c_str(),
+                area,
+                buffer.size()
             );
 
             return;
         }
 
-        long value = 0;
+        long value =
+            0;
 
-        // --------------------------------------------------------
+        bool supported =
+            false;
+
+        // ========================================================
         // BOOL
-        // --------------------------------------------------------
+        // ========================================================
 
-        if (auto* boolVariable =
-                as<bool>(variable))
+        if (
+            auto* booleanVariable =
+                as<bool>(
+                    variable
+                )
+        )
         {
             if (
                 variable->def.bitIndex >= 0
             )
             {
+                if (
+                    variable->def.bitIndex >
+                    31
+                )
+                {
+                    LOG_WF(
+                        "AEE::RX",
+                        "Bit index non valido per '%s': %d",
+                        variable
+                            ->def
+                            .name
+                            .c_str(),
+                        variable
+                            ->def
+                            .bitIndex
+                    );
+
+                    return;
+                }
+
                 value =
                     buffer.getValueFast(
                         area
@@ -1060,36 +1841,49 @@ private:
                 bitWrite(
                     value,
                     variable->def.bitIndex,
-                    boolVariable->get()
+                    booleanVariable->get()
                 );
             }
             else
             {
                 value =
-                    boolVariable->get()
+                    booleanVariable->get()
                         ? 1L
                         : 0L;
             }
+
+            supported =
+                true;
         }
 
-        // --------------------------------------------------------
+        // ========================================================
         // INT
-        // --------------------------------------------------------
+        // ========================================================
 
         else if (
-            auto* intVariable =
-                as<int>(variable)
+            auto* integerVariable =
+                as<int>(
+                    variable
+                )
         )
         {
             if (
-                variable->def.scale ==
-                0.0f
+                !isfinite(
+                    variable->def.scale
+                ) ||
+                variable->def.scale == 0.0f
             )
             {
                 LOG_WF(
                     "AEE::RX",
-                    "Scala nulla per '%s'",
-                    variable->def.name.c_str()
+                    "Scala non valida per '%s': %.6f",
+                    variable
+                        ->def
+                        .name
+                        .c_str(),
+                    variable
+                        ->def
+                        .scale
                 );
 
                 return;
@@ -1097,29 +1891,62 @@ private:
 
             value =
                 static_cast<long>(
-                    intVariable->get() /
+                    static_cast<float>(
+                        integerVariable->get()
+                    ) /
                     variable->def.scale
                 );
+
+            supported =
+                true;
         }
 
-        // --------------------------------------------------------
+        // ========================================================
         // FLOAT
-        // --------------------------------------------------------
+        // ========================================================
 
         else if (
             auto* floatVariable =
-                as<float>(variable)
+                as<float>(
+                    variable
+                )
         )
         {
             if (
-                variable->def.scale ==
-                0.0f
+                !isfinite(
+                    variable->def.scale
+                ) ||
+                variable->def.scale == 0.0f
             )
             {
                 LOG_WF(
                     "AEE::RX",
-                    "Scala nulla per '%s'",
-                    variable->def.name.c_str()
+                    "Scala non valida per '%s': %.6f",
+                    variable
+                        ->def
+                        .name
+                        .c_str(),
+                    variable
+                        ->def
+                        .scale
+                );
+
+                return;
+            }
+
+            const float scaledValue =
+                floatVariable->get() /
+                variable->def.scale;
+
+            if (!isfinite(scaledValue))
+            {
+                LOG_WF(
+                    "AEE::RX",
+                    "Valore scalato non finito per '%s'",
+                    variable
+                        ->def
+                        .name
+                        .c_str()
                 );
 
                 return;
@@ -1127,29 +1954,39 @@ private:
 
             value =
                 static_cast<long>(
-                    floatVariable->get() /
-                    variable->def.scale
+                    scaledValue
                 );
+
+            supported =
+                true;
         }
 
-        // --------------------------------------------------------
+        // ========================================================
         // UNSUPPORTED
-        // --------------------------------------------------------
+        // ========================================================
 
-        else
+        if (!supported)
         {
             LOG_WF(
                 "AEE::RX",
-                "Tipo non supportato per '%s'",
-                variable->def.name.c_str()
+                "Tipo non supportato per '%s': type=%u",
+                variable
+                    ->def
+                    .name
+                    .c_str(),
+                static_cast<unsigned>(
+                    variable
+                        ->def
+                        .varType
+                )
             );
 
             return;
         }
 
-        // --------------------------------------------------------
+        // ========================================================
         // BUFFER EVENT
-        // --------------------------------------------------------
+        // ========================================================
 
         if (!DomoManager::instance)
         {
@@ -1171,15 +2008,22 @@ private:
 
         LOG_DF(
             "AEE::RX",
-            "AEE '%s' -> Buffer area=%d value=%ld",
-            variable->def.name.c_str(),
+            "AEE '%s' -> Buffer "
+            "area=%d value=%ld source=%u",
+            variable
+                ->def
+                .name
+                .c_str(),
             area,
-            value
+            value,
+            static_cast<unsigned>(
+                receiveContext.aeeSource
+            )
         );
     }
 
     // ============================================================
-    // POST PROCESSOR AEE
+    // POST PROCESSOR
     // ============================================================
 
     void onAEEVarChanged(
@@ -1189,117 +2033,293 @@ private:
         (void)now;
 
         if (!variable)
-            return;
-
-        // ========================================================
-        // NONE / MESSAGGI DI SISTEMA
-        // ========================================================
-
-        if (
-            variable->def.sourceType ==
-            AEEVarSourceType::None
-        )
         {
-            // ----------------------------------------------------
-            // EPOCH
-            // ----------------------------------------------------
+            return;
+        }
 
-            if (
-                variable->def.name ==
-                "epoch"
-            )
+        switch (variable->def.sourceType)
+        {
+            // ====================================================
+            // NONE / SYSTEM MESSAGES
+            // ====================================================
+
+            case AEEVarSourceType::None:
             {
-                auto* epochVariable =
-                    as<int>(variable);
-
-                if (!epochVariable)
-                {
-                    LOG_WF(
-                        "AEE",
-                        "epoch ricevuto con tipo non valido"
-                    );
-
-                    return;
-                }
-
-                const int epoch =
-                    epochVariable->get();
-
-                LOG_IF(
-                    "AEE",
-                    "Epoch ricevuto dal PEER: %d -> applico al RTC",
-                    epoch
+                processSystemVariable(
+                    variable
                 );
-
-                if (DomoManager::instance)
-                {
-                    DomoManager::instance
-                        ->getTimeManager()
-                        .getRTC()
-                        .applyEpoch(
-                            epoch
-                        );
-                }
-
-                variable->clearChanged();
 
                 return;
             }
 
+            // ====================================================
+            // FUNCTION
+            // ====================================================
+
+            case AEEVarSourceType::Function:
+            {
+                /*
+                 * Punto di estensione per future funzioni AEE
+                 * ricevibili dal peer.
+                 */
+                return;
+            }
+
+            default:
+            {
+                return;
+            }
+        }
+    }
+
+    // ============================================================
+    // SYSTEM VARIABLE PROCESSOR
+    // ============================================================
+
+    void processSystemVariable(
+        AEEVariableBase* variable)
+    {
+        if (!variable)
+        {
             return;
         }
 
         // ========================================================
-        // FUNCTION
+        // EPOCH
         // ========================================================
 
         if (
-            variable->def.sourceType ==
-            AEEVarSourceType::Function
+            variable->def.name ==
+            "epoch"
         )
         {
-            /*
-             * Punto di estensione per future funzioni AEE
-             * ricevibili dal peer.
-             */
+            processEpoch(
+                variable
+            );
+
             return;
         }
+
+        LOG_DF(
+            "AEE::RX",
+            "Variabile di sistema senza handler: %s",
+            variable
+                ->def
+                .name
+                .c_str()
+        );
+    }
+
+    // ============================================================
+    // EPOCH PROCESSOR
+    // ============================================================
+
+    void processEpoch(
+        AEEVariableBase* variable)
+    {
+        auto* epochVariable =
+            as<int>(
+                variable
+            );
+
+        if (!epochVariable)
+        {
+            LOG_WF(
+                "AEE",
+                "epoch ricevuto con tipo non valido"
+            );
+
+            return;
+        }
+
+        const int epoch =
+            epochVariable->get();
+
+        if (epoch <= 0)
+        {
+            LOG_WF(
+                "AEE",
+                "Epoch ricevuto non valido: %d",
+                epoch
+            );
+
+            variable->clearChanged();
+
+            return;
+        }
+
+        if (!DomoManager::instance)
+        {
+            LOG_WF(
+                "AEE",
+                "Epoch non applicato: "
+                "DomoManager non disponibile"
+            );
+
+            return;
+        }
+
+        LOG_IF(
+            "AEE",
+            "Epoch ricevuto dal PEER: "
+            "%d -> applicazione RTC",
+            epoch
+        );
+
+        DomoManager::instance
+            ->getTimeManager()
+            .getRTC()
+            .applyEpoch(
+                epoch
+            );
+
+        variable->clearChanged();
     }
 };
 
+// ============================================================
+// BRIDGE ENGINE
+//
+// Wrapper runtime non statico di DMMasterBridge.
+//
+// Ogni istanza BridgeEngine possiede:
+//
+// - una propria identità;
+// - un proprio DMMasterBridge;
+// - un proprio pacer;
+// - una propria callback di ricezione;
+// - un proprio stato di inizializzazione.
+//
+// La classe non possiede:
+//
+// - il transport ICommandTransport;
+// - il registry AEE;
+// - il DMNetworkManager.
+//
+// Queste dipendenze devono rimanere valide per tutta la durata
+// operativa del BridgeEngine.
+//
+// La classe è progettata per consentire più bridge paralleli.
+// Ogni BridgeEngine può quindi essere associato a:
+//
+// - un transport differente;
+// - un registry AEE differente;
+// - un protocollo di rete differente;
+// - una callback di ricezione differente.
+//
+// Nessuno stato runtime è statico.
+// ============================================================
+
 class BridgeEngine
 {
+public:
+
+    // ========================================================
+    // RECEIVE CALLBACK TYPE
+    //
+    // std::function consente al composition root di registrare:
+    //
+    // - funzioni statiche;
+    // - lambda senza cattura;
+    // - lambda che catturano l'istanza AEEBridgeChannel;
+    // - callable object.
+    //
+    // Questo elimina la necessità di utilizzare manualmente un
+    // puntatore void* come contesto.
+    // ========================================================
+
+    using ReceiveCallback =
+        std::function<
+            void(
+                AEEVariableBase* variable,
+                unsigned long now
+            )
+        >;
+
 private:
-    // ============================================================
-    // PACER
-    // ============================================================
+
+    // ========================================================
+    // PACER IMPLEMENTATION
+    //
+    // Adapter tra IBridgePacer e DMNetworkManager.
+    //
+    // Ogni BridgeEngine crea un pacer associato al proprio
+    // protocolId.
+    //
+    // In presenza di due bridge:
+    //
+    // - Bridge 0 possiede Pacer 0 e ProtocolId 0;
+    // - Bridge 1 possiede Pacer 1 e ProtocolId 1.
+    //
+    // Non viene condiviso alcuno stato di pacing.
+    // ========================================================
 
     class DomoBridgePacer
         : public IBridgePacer
     {
     private:
+
+        // ----------------------------------------------------
+        // NETWORK REFERENCE
+        //
+        // DMNetworkManager è posseduto dal DomoManager.
+        // Il pacer conserva solamente un riferimento.
+        // ----------------------------------------------------
+
         DMNetworkManager& network;
 
+        // ----------------------------------------------------
+        // PROTOCOL ID
+        //
+        // Identifica il protocollo registrato specificamente
+        // per questa istanza BridgeEngine.
+        // ----------------------------------------------------
+
         DMNetworkManager::ProtocolId
-            protocolId;
+            protocolId =
+                -1;
 
     public:
+
+        // ====================================================
+        // CONSTRUCTOR
+        // ====================================================
+
         DomoBridgePacer(
             DMNetworkManager& networkRef,
             DMNetworkManager::ProtocolId id)
-            : network(networkRef),
-              protocolId(id)
+            : network(
+                networkRef
+              ),
+              protocolId(
+                id
+              )
         {
         }
+
+        // ====================================================
+        // ACQUIRE
+        //
+        // Richiede al DMNetworkManager il diritto di eseguire
+        // una transazione per il protocollo associato.
+        // ====================================================
 
         bool acquire(
             unsigned long now) override
         {
-            return network.tryAcquire(
-                protocolId,
-                now
-            );
+            return
+                network.tryAcquire(
+                    protocolId,
+                    now
+                );
         }
+
+        // ====================================================
+        // RELEASE
+        //
+        // Rilascia il protocollo dopo il completamento della
+        // transazione Bridge.
+        // ====================================================
 
         void release(
             unsigned long now) override
@@ -1309,64 +2329,193 @@ private:
                 now
             );
         }
+
+        // ====================================================
+        // ACCESSOR
+        // ====================================================
+
+        DMNetworkManager::ProtocolId
+        getProtocolId() const
+        {
+            return
+                protocolId;
+        }
     };
 
 private:
-    uint8_t id = 0;
+
+    // ========================================================
+    // IDENTITY
+    //
+    // L'identità serve esclusivamente per:
+    //
+    // - diagnostica;
+    // - log;
+    // - distinzione tra più istanze.
+    //
+    // Non viene utilizzata per individuare il registry AEE.
+    // Il registry viene passato direttamente a init().
+    // ========================================================
+
+    uint8_t id =
+        0;
 
     String name =
         "BRIDGE";
 
+    // ========================================================
+    // BRIDGE CORE
+    //
+    // Ogni BridgeEngine possiede un proprio DMMasterBridge.
+    //
+    // Di conseguenza ogni istanza possiede separatamente:
+    //
+    // - stato del protocollo;
+    // - callback;
+    // - transport associato;
+    // - registry associato;
+    // - stato master/slave;
+    // - pacer associato.
+    // ========================================================
+
     DMMasterBridge bridge;
+
+    // ========================================================
+    // PACER OWNERSHIP
+    //
+    // Il pacer viene allocato durante setupPacer().
+    //
+    // BridgeEngine ne possiede completamente la durata.
+    // ========================================================
 
     DomoBridgePacer* pacer =
         nullptr;
 
+    // ========================================================
+    // RUNTIME STATE
+    // ========================================================
+
+    bool initialized =
+        false;
+
+    bool pacerConfigured =
+        false;
+
+    // ========================================================
+    // RESET PACER
+    //
+    // Rimuove il pacer corrente.
+    //
+    // Deve essere utilizzato prima di configurare un nuovo
+    // protocollo sulla stessa istanza BridgeEngine.
+    // ========================================================
+
+    void releasePacer()
+    {
+        delete pacer;
+
+        pacer =
+            nullptr;
+
+        pacerConfigured =
+            false;
+    }
+
 public:
+
+    // ========================================================
+    // DEFAULT CONSTRUCTOR
+    // ========================================================
+
     BridgeEngine() = default;
+
+    // ========================================================
+    // IDENTITY CONSTRUCTOR
+    // ========================================================
 
     BridgeEngine(
         uint8_t bridgeId,
         const char* bridgeName)
-        : id(bridgeId),
+        : id(
+            bridgeId
+          ),
           name(
-              bridgeName
-                  ? bridgeName
-                  : "BRIDGE"
+            bridgeName &&
+            bridgeName[0] != '\0'
+                ? bridgeName
+                : "BRIDGE"
           )
     {
     }
 
+    // ========================================================
+    // DESTRUCTOR
+    //
+    // Il pacer deve essere eliminato prima della distruzione
+    // automatica del DMMasterBridge.
+    //
+    // La callback viene azzerata preventivamente per evitare
+    // che il bridge conservi lambda riferite a oggetti ormai in
+    // distruzione.
+    // ========================================================
+
     ~BridgeEngine()
     {
-        delete pacer;
-        pacer = nullptr;
+        clearReceiveCallback();
+
+        releasePacer();
+
+        initialized =
+            false;
     }
 
+    // ========================================================
+    // NON-COPYABLE / NON-MOVABLE
+    //
+    // BridgeEngine contiene:
+    //
+    // - un DMMasterBridge con stato runtime;
+    // - un pacer posseduto dinamicamente;
+    // - riferimenti indiretti a transport e registry.
+    //
+    // Copia e movimento vengono disabilitati per evitare:
+    //
+    // - doppia distruzione del pacer;
+    // - invalidazione dei riferimenti;
+    // - duplicazione dello stato del protocollo;
+    // - callback associate all'istanza errata.
+    // ========================================================
+
     BridgeEngine(
-        const BridgeEngine&) = delete;
+        const BridgeEngine&) =
+            delete;
 
     BridgeEngine& operator=(
-        const BridgeEngine&) = delete;
+        const BridgeEngine&) =
+            delete;
 
     BridgeEngine(
-        BridgeEngine&&) = delete;
+        BridgeEngine&&) =
+            delete;
 
     BridgeEngine& operator=(
-        BridgeEngine&&) = delete;
+        BridgeEngine&&) =
+            delete;
 
-    // ============================================================
+    // ========================================================
     // IDENTITY
-    // ============================================================
+    // ========================================================
 
     uint8_t getId() const
     {
-        return id;
+        return
+            id;
     }
 
     const String& getName() const
     {
-        return name;
+        return
+            name;
     }
 
     void setIdentity(
@@ -1377,69 +2526,141 @@ public:
             bridgeId;
 
         name =
-            bridgeName
+            bridgeName &&
+            bridgeName[0] != '\0'
                 ? bridgeName
                 : "BRIDGE";
     }
 
-    // ============================================================
+    // ========================================================
     // BRIDGE ACCESS
-    // ============================================================
+    //
+    // Accesso diretto al DMMasterBridge.
+    //
+    // Deve essere utilizzato solamente per configurazioni o
+    // diagnostica non esposte direttamente da BridgeEngine.
+    // ========================================================
 
     DMMasterBridge& getBridge()
     {
-        return bridge;
+        return
+            bridge;
     }
 
     const DMMasterBridge& getBridge() const
     {
-        return bridge;
+        return
+            bridge;
     }
 
-    // ============================================================
+    // ========================================================
     // RECEIVE CALLBACK
-    // ============================================================
+    //
+    // La callback appartiene alla singola istanza.
+    //
+    // Per associare il BridgeEngine a un AEEBridgeChannel si
+    // utilizza una lambda che cattura il puntatore this del
+    // channel:
+    //
+    // bridgeEngine.setReceiveCallback(
+    //     //         AEEVariableBase* variable,
+    //         unsigned long now
+    //     {
+    //         onVariableReceived(
+    //             variable,
+    //             now
+    //         );
+    //     }
+    // );
+    //
+    // Ogni istanza conserva una lambda diversa e quindi inoltra
+    // la variabile al proprio AEEEngine.
+    // ========================================================
 
     void setReceiveCallback(
-        std::function<
-            void(
-                AEEVariableBase*,
-                unsigned long
-            )
-        > callback)
+        ReceiveCallback callback)
     {
         bridge.onFrontendAEEChange =
-            std::move(callback);
+            std::move(
+                callback
+            );
     }
 
-    // ============================================================
+    // ========================================================
+    // CLEAR RECEIVE CALLBACK
+    //
+    // Disconnette esplicitamente il destinatario degli eventi
+    // AEE ricevuti.
+    //
+    // È utile durante distruzione, reset o riconfigurazione.
+    // ========================================================
+
+    void clearReceiveCallback()
+    {
+        bridge.onFrontendAEEChange =
+            nullptr;
+    }
+
+    // ========================================================
     // INIT
-    // ============================================================
+    //
+    // Associa il bridge a:
+    //
+    // - uno specifico transport;
+    // - uno specifico registry AEE;
+    // - uno specifico ruolo master/slave.
+    //
+    // Il transport e il registry non vengono copiati e devono
+    // rimanere validi per tutta la durata operativa del bridge.
+    //
+    // Chiamare init() una sola volta per configurazione oppure
+    // solamente dopo aver arrestato completamente l'utilizzo
+    // precedente del bridge.
+    // ========================================================
 
     void init(
         ICommandTransport& transport,
         AEERegistry& registry,
         bool master = true)
     {
+        initialized =
+            false;
+
         bridge.init(
             &transport,
             registry,
             master
         );
 
+        initialized =
+            true;
+
         LOG_IF(
             "BRIDGE",
-            "BridgeEngine '%s' inizializzato id=%u",
+            "BridgeEngine '%s' inizializzato: "
+            "id=%u master=%u registry=%u",
             name.c_str(),
             static_cast<unsigned>(
                 id
+            ),
+            master
+                ? 1U
+                : 0U,
+            static_cast<unsigned>(
+                registry.size()
             )
         );
     }
 
-    // ============================================================
-    // PACER
-    // ============================================================
+    // ========================================================
+    // PACER SETUP
+    //
+    // Crea un pacer associato al protocollo registrato per
+    // questa istanza BridgeEngine.
+    //
+    // Se esiste già un pacer, viene eliminato prima della nuova
+    // configurazione.
+    // ========================================================
 
     bool setupPacer(
         DMNetworkManager& network,
@@ -1449,15 +2670,17 @@ public:
         {
             LOG_EF(
                 "BRIDGE",
-                "Protocol ID non valido per '%s'",
-                name.c_str()
+                "Protocol ID non valido per '%s': %d",
+                name.c_str(),
+                static_cast<int>(
+                    protocolId
+                )
             );
 
             return false;
         }
 
-        delete pacer;
-        pacer = nullptr;
+        releasePacer();
 
         pacer =
             new DomoBridgePacer(
@@ -1480,19 +2703,2964 @@ public:
             *pacer
         );
 
+        pacerConfigured =
+            true;
+
+        LOG_IF(
+            "BRIDGE",
+            "Pacer configurato per '%s': "
+            "protocol=%d",
+            name.c_str(),
+            static_cast<int>(
+                protocolId
+            )
+        );
+
         return true;
     }
 
-    // ============================================================
+    // ========================================================
     // LOOP
-    // ============================================================
+    //
+    // Esegue il ciclo del singolo DMMasterBridge.
+    //
+    // BridgeEngine non applica scheduling locale. Il pacing è
+    // delegato al DomoBridgePacer e al DMNetworkManager.
+    //
+    // Il composition root può richiamare più BridgeEngine nello
+    // stesso task oppure utilizzare un task per ogni channel.
+    // ========================================================
 
     void loop(
         unsigned long now)
     {
+        if (!initialized)
+        {
+            return;
+        }
+
         bridge.loop(
             now
         );
+    }
+
+    // ========================================================
+    // RUNTIME ACCESSORS
+    // ========================================================
+
+    bool isInitialized() const
+    {
+        return
+            initialized;
+    }
+
+    bool isPacerConfigured() const
+    {
+        return
+            pacerConfigured;
+    }
+
+    DMNetworkManager::ProtocolId
+    getProtocolId() const
+    {
+        if (!pacer)
+        {
+            return
+                -1;
+        }
+
+        return
+            pacer->getProtocolId();
+    }
+};
+
+// ============================================================
+// AEE BRIDGE CHANNEL
+//
+// Rappresenta un canale di comunicazione AEE completamente
+// autonomo.
+//
+// Ogni istanza possiede:
+//
+// - un AEEEngine;
+// - un BridgeEngine;
+// - un registry AEE indipendente;
+// - un AEEManagement indipendente;
+// - un transport UDP indipendente;
+// - un protocollo DMNetworkManager indipendente;
+// - un socket owner indipendente;
+// - una sorgente EventManager indipendente;
+// - una configurazione AEE indipendente.
+//
+// La classe permette quindi di eseguire più bridge in parallelo
+// senza condividere registry, stato, callback o transport.
+//
+// Esempio:
+//
+//   AEEBridgeChannel primaryBridgeChannel;
+//   AEEBridgeChannel knobBridgeChannel;
+//
+// Il transport viene allocato solamente durante setup() e viene
+// rilasciato dal distruttore. Non vengono effettuate allocazioni
+// dinamiche nel loop.
+//
+// La classe non possiede:
+//
+// - DomoManager;
+// - DMNetworkManager;
+// - Buffer;
+// - EventManager.
+//
+// Queste dipendenze vengono ricevute durante setup() e conservate
+// esclusivamente dove necessario.
+// ============================================================
+
+class AEEBridgeChannel
+{
+public:
+
+    // ========================================================
+    // TYPE ALIASES
+    // ========================================================
+
+    using ProtocolId =
+        DMNetworkManager::ProtocolId;
+
+    using SocketOwnerId =
+        SocketManager::OwnerId;
+
+    // ========================================================
+    // CONFIGURATION
+    //
+    // La configurazione appartiene al chiamante.
+    //
+    // AEEBridgeChannel non conserva il puntatore alla struttura
+    // Config dopo il completamento di setup().
+    //
+    // Il blocco AEE viene copiato internamente da AEEEngine
+    // secondo il comportamento della relativa setup().
+    // ========================================================
+
+    struct Config
+    {
+        // ----------------------------------------------------
+        // ENABLE
+        // ----------------------------------------------------
+
+        bool enabled =
+            false;
+
+        // ----------------------------------------------------
+        // CHANNEL IDENTITY
+        // ----------------------------------------------------
+
+        uint8_t id =
+            0;
+
+        const char* name =
+            nullptr;
+
+        // ----------------------------------------------------
+        // UDP ENDPOINT
+        // ----------------------------------------------------
+
+        IPAddress remoteIp;
+
+        uint16_t localPort =
+            0;
+
+        uint16_t remotePort =
+            0;
+
+        // ----------------------------------------------------
+        // NETWORK PACING
+        // ----------------------------------------------------
+
+        uint32_t protocolIntervalMs =
+            50UL;
+
+        uint32_t protocolTimeoutMs =
+            300UL;
+
+        uint32_t taskIntervalMs =
+            20UL;
+
+        // ----------------------------------------------------
+        // STATIC AEE CONFIGURATION
+        //
+        // Utilizzata solamente quando:
+        //
+        //     modelSource == AEE_REGISTRY
+        // ----------------------------------------------------
+
+        FrontendConfig::Bridge::AEE aee;
+    };
+
+private:
+
+    // ========================================================
+    // IDENTITY
+    // ========================================================
+
+    uint8_t channelId =
+        0;
+
+    const char* channelName =
+        nullptr;
+
+    // ========================================================
+    // ENABLE / RUNTIME STATE
+    // ========================================================
+
+    bool enabled =
+        false;
+
+    bool initialized =
+        false;
+
+    // ========================================================
+    // EVENT SOURCE
+    //
+    // La sorgente EventManager è specifica del canale.
+    //
+    // Il valore 255 rappresenta una sorgente non valida o non
+    // ancora inizializzata.
+    // ========================================================
+
+    uint8_t eventSource =
+        255;
+
+    // ========================================================
+    // NETWORK REGISTRATION
+    // ========================================================
+
+    ProtocolId protocolId =
+        -1;
+
+    SocketOwnerId socketOwner =
+        -1;
+
+    // ========================================================
+    // TASK CONFIGURATION
+    //
+    // Il valore viene conservato per consentire al composition
+    // root di registrare il task con l'intervallo configurato.
+    // ========================================================
+
+    uint32_t taskIntervalMs =
+        20UL;
+
+    // ========================================================
+    // SHARED BUFFER
+    //
+    // Puntatore non posseduto.
+    //
+    // Viene utilizzato per filtrare lo snapshot iniziale del
+    // channel Introspection tramite HasEverChanged().
+    // ========================================================
+
+    Buffer* buffer =
+        nullptr;
+
+    // ========================================================
+    // CHANNEL ENGINES
+    //
+    // L'ordine di dichiarazione è intenzionale.
+    //
+    // Costruzione:
+    //   1. AEEEngine
+    //   2. BridgeEngine
+    //
+    // Distruzione:
+    //   1. BridgeEngine
+    //   2. AEEEngine
+    //
+    // Il Bridge utilizza il registry posseduto da AEEEngine.
+    // ========================================================
+
+    AEEEngine aeeEngine;
+
+    BridgeEngine bridgeEngine;
+
+    // ========================================================
+    // UDP TRANSPORT
+    //
+    // UdpAdapter non viene costruito finché non sono disponibili:
+    //
+    // - configurazione IP;
+    // - porte;
+    // - DMNetworkManager;
+    // - socket owner.
+    //
+    // L'allocazione avviene una sola volta durante setup().
+    // Nessuna allocazione viene eseguita nel loop.
+    // ========================================================
+
+    UdpAdapter* transport =
+        nullptr;
+
+    // ========================================================
+    // DIAGNOSTICS
+    // ========================================================
+
+    unsigned long lastAliveLog =
+        0;
+
+    unsigned long maximumLoopTimeUs =
+        0;
+
+    // ========================================================
+    // VALID CHANNEL NAME
+    // ========================================================
+
+    const char* validName() const
+    {
+        return
+            channelName &&
+            channelName[0] != '\0'
+                ? channelName
+                : "AEE-BRIDGE";
+    }
+
+    // ========================================================
+    // RESET RUNTIME STATE
+    //
+    // Azzera lo stato runtime, disconnette le callback,
+    // pulisce AEEEngine e rilascia il transport posseduto.
+    //
+    // Non distrugge BridgeEngine, ma rimuove le callback che
+    // potrebbero riferirsi alla configurazione precedente.
+    // ========================================================
+
+    void resetRuntimeState()
+    {
+        initialized =
+            false;
+
+        enabled =
+            false;
+
+        eventSource =
+            EventManager::
+                INVALID_CONSUMER_ID;
+
+        protocolId =
+            -1;
+
+        socketOwner =
+            -1;
+
+        taskIntervalMs =
+            20UL;
+
+        introspection =
+            nullptr;
+
+        buffer =
+            nullptr;
+
+        lastAliveLog =
+            0;
+
+        maximumLoopTimeUs =
+            0;
+
+        /*
+        * Disconnette preventivamente la callback che cattura this.
+        */
+        bridgeEngine
+            .clearReceiveCallback();
+
+        /*
+        * Rimuove registry, management e definizioni dinamiche
+        * appartenenti alla configurazione precedente.
+        */
+        aeeEngine.clear();
+
+        if (transport)
+        {
+            delete transport;
+
+            transport =
+                nullptr;
+        }
+    }
+
+    // ========================================================
+    // RECEIVED VARIABLE HANDLER
+    //
+    // Metodo associato esclusivamente all'istanza corrente.
+    //
+    // La lambda registrata nel BridgeEngine cattura this e
+    // inoltra qui ogni variabile ricevuta.
+    //
+    // Di conseguenza:
+    //
+    // - primaryBridgeChannel aggiorna primary AEE;
+    // - knobBridgeChannel aggiorna knob AEE;
+    // - i registry non vengono incrociati.
+    // ========================================================
+
+    void onVariableReceived(
+        AEEVariableBase* variable,
+        unsigned long now)
+    {
+        if (!initialized ||
+            !variable)
+        {
+            return;
+        }
+
+        aeeEngine.applyReceived(
+            variable,
+            now
+        );
+    }
+
+    const DomoIntrospection*
+        introspection =
+            nullptr;
+public:
+    // ========================================================
+    // CONSTRUCTOR
+    // ========================================================
+
+    AEEBridgeChannel() = default;
+
+    // ========================================================
+    // DESTRUCTOR
+    //
+    // Il transport deve essere distrutto prima degli engine.
+    //
+    // Poiché transport è un puntatore posseduto, viene eliminato
+    // esplicitamente qui. Gli engine vengono poi distrutti
+    // automaticamente in ordine inverso di dichiarazione.
+    // ========================================================
+
+    ~AEEBridgeChannel()
+    {
+        if (transport)
+        {
+            delete transport;
+
+            transport =
+                nullptr;
+        }
+    }
+
+    // ========================================================
+    // NON-COPYABLE
+    //
+    // La classe possiede un transport e contiene engine con
+    // stato runtime. La copia produrrebbe:
+    //
+    // - doppia ownership del transport;
+    // - registry duplicati in modo ambiguo;
+    // - protocol ID duplicati;
+    // - socket owner duplicati.
+    //
+    // La copia viene quindi esplicitamente disabilitata.
+    // ========================================================
+
+    AEEBridgeChannel(
+        const AEEBridgeChannel&) =
+            delete;
+
+    AEEBridgeChannel& operator=(
+        const AEEBridgeChannel&) =
+            delete;
+
+    // ========================================================
+    // SETUP
+    //
+    // Inizializza completamente il canale.
+    //
+    // Sequenza:
+    //
+    //  1. reset dello stato runtime;
+    //  2. acquisizione identità;
+    //  3. setup AEEEngine;
+    //  4. registrazione sorgente EventManager;
+    //  5. collegamento AEE a Buffer ed EventManager;
+    //  6. registrazione protocollo DMNetworkManager;
+    //  7. acquisizione socket owner;
+    //  8. costruzione UdpAdapter;
+    //  9. impostazione contesto socket;
+    // 10. registrazione callback Bridge contestualizzata;
+    // 11. inizializzazione BridgeEngine;
+    // 12. configurazione pacer;
+    // 13. attivazione runtime.
+    //
+    // La funzione non registra il task nel TaskEngine. Questa
+    // responsabilità rimane al composition root.
+    // ========================================================
+
+    bool setup(
+        const Config& config,
+        DomoManager& manager,
+        DMNetworkManager& networkManager,
+        const DomoIntrospection* runtimeIntrospection =
+            nullptr)
+    {
+        // ----------------------------------------------------
+        // RESET PREVIOUS STATE
+        // ----------------------------------------------------
+
+        resetRuntimeState();
+
+        // ----------------------------------------------------
+        // IDENTITY
+        // ----------------------------------------------------
+
+        channelId =
+            config.id;
+
+        channelName =
+            config.name;
+
+        taskIntervalMs =
+            config.taskIntervalMs > 0
+                ? config.taskIntervalMs
+                : 1UL;
+
+        buffer =
+            &manager.getBuffer();
+
+        /*
+        * Se esiste una configurazione AEE statica, il channel
+        * utilizza quella.
+        *
+        * Se vars/count sono assenti, utilizza Introspection
+        * fornita dal composition root.
+        */
+        const bool hasStaticAEE =
+            config.aee.vars != nullptr &&
+            config.aee.count > 0;
+
+        introspection =
+            hasStaticAEE
+                ? nullptr
+                : runtimeIntrospection;
+
+        // ----------------------------------------------------
+        // DISABLED CHANNEL
+        // ----------------------------------------------------
+
+        if (!config.enabled)
+        {
+            LOG_IF(
+                "AEE-BRIDGE",
+                "[%u] %s disabled",
+                static_cast<unsigned>(
+                    channelId
+                ),
+                validName()
+            );
+
+            return true;
+        }
+
+        // ----------------------------------------------------
+        // NAME VALIDATION
+        // ----------------------------------------------------
+
+        if (!config.name ||
+            config.name[0] == '\0')
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "Setup failed: invalid channel name"
+            );
+
+            return false;
+        }
+
+        // ----------------------------------------------------
+        // UDP VALIDATION
+        // ----------------------------------------------------
+
+        const bool dynamicRemoteEndpoint =
+            config.remoteIp[0] == 0 &&
+            config.remoteIp[1] == 0 &&
+            config.remoteIp[2] == 0 &&
+            config.remoteIp[3] == 0;
+
+        if (config.localPort == 0)
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "[%u] %s invalid local UDP port",
+                static_cast<unsigned>(
+                    channelId
+                ),
+                validName()
+            );
+
+            return false;
+        }
+
+        if (
+            !dynamicRemoteEndpoint &&
+            config.remotePort == 0
+        )
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "[%u] %s static endpoint without remote port",
+                static_cast<unsigned>(
+                    channelId
+                ),
+                validName()
+            );
+
+            return false;
+        }
+
+        // ----------------------------------------------------
+        // MODEL VALIDATION
+        // ----------------------------------------------------
+
+        if (!hasStaticAEE)
+        {
+            if (!introspection)
+            {
+                LOG_EF(
+                    "AEE-BRIDGE",
+                    "[%u] %s has no static AEE and "
+                    "no runtime Introspection",
+                    static_cast<unsigned>(
+                        channelId
+                    ),
+                    validName()
+                );
+
+                return false;
+            }
+
+            if (introspection->entityCount() == 0)
+            {
+                LOG_EF(
+                    "AEE-BRIDGE",
+                    "[%u] %s runtime Introspection empty",
+                    static_cast<unsigned>(
+                        channelId
+                    ),
+                    validName()
+                );
+
+                return false;
+            }
+        }
+
+        // ----------------------------------------------------
+        // BRIDGE IDENTITY
+        // ----------------------------------------------------
+
+        bridgeEngine.setIdentity(
+            channelId,
+            validName()
+        );
+
+        // ----------------------------------------------------
+        // AEE ENGINE
+        // ----------------------------------------------------
+
+        const bool aeeSetupCompleted =
+            hasStaticAEE
+                ? aeeEngine.setup(
+                    config.aee
+                )
+                : aeeEngine.setup(
+                    *introspection
+                );
+
+        if (!aeeSetupCompleted)
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "[%u] %s AEE setup failed: model=%s",
+                static_cast<unsigned>(
+                    channelId
+                ),
+                validName(),
+                hasStaticAEE
+                    ? "STATIC"
+                    : "INTROSPECTION"
+            );
+
+            return false;
+        }
+
+        // ----------------------------------------------------
+        // EVENT SOURCE
+        // ----------------------------------------------------
+
+        const int registeredSource =
+            manager
+                .getEventManager()
+                .add(
+                    validName()
+                );
+
+        if (
+            registeredSource < 0 ||
+            registeredSource > 254
+        )
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "[%u] %s invalid event source: %d",
+                static_cast<unsigned>(
+                    channelId
+                ),
+                validName(),
+                registeredSource
+            );
+
+            return false;
+        }
+
+        eventSource =
+            static_cast<uint8_t>(
+                registeredSource
+            );
+
+        // ----------------------------------------------------
+        // RECEIVE CONTEXT
+        // ----------------------------------------------------
+
+        aeeEngine.attachReceiveContext(
+            manager.getBuffer(),
+            manager.getEventManager(),
+            eventSource
+        );
+
+        // ----------------------------------------------------
+        // NETWORK PROTOCOL
+        // ----------------------------------------------------
+
+        const uint32_t protocolIntervalMs =
+            config.protocolIntervalMs > 0
+                ? config.protocolIntervalMs
+                : 1UL;
+
+        const uint32_t protocolTimeoutMs =
+            config.protocolTimeoutMs > 0
+                ? config.protocolTimeoutMs
+                : 1UL;
+
+        protocolId =
+            networkManager.registerProtocol(
+                validName(),
+                protocolIntervalMs,
+                protocolTimeoutMs,
+                1,
+                true
+            );
+
+        if (protocolId < 0)
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "[%u] %s protocol registration failed",
+                static_cast<unsigned>(
+                    channelId
+                ),
+                validName()
+            );
+
+            return false;
+        }
+
+        // ----------------------------------------------------
+        // SOCKET OWNER
+        // ----------------------------------------------------
+
+        socketOwner =
+            networkManager
+                .getProtocol(
+                    protocolId
+                )
+                .socketOwner;
+
+        if (socketOwner < 0)
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "[%u] %s invalid socket owner",
+                static_cast<unsigned>(
+                    channelId
+                ),
+                validName()
+            );
+
+            return false;
+        }
+
+        // ----------------------------------------------------
+        // UDP TRANSPORT
+        // ----------------------------------------------------
+
+        transport =
+            new UdpAdapter(
+                config.remoteIp,
+                config.localPort,
+                config.remotePort
+            );
+
+        if (!transport)
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "[%u] %s transport allocation failed",
+                static_cast<unsigned>(
+                    channelId
+                ),
+                validName()
+            );
+
+            return false;
+        }
+
+        transport->setSocketContext(
+            networkManager,
+            socketOwner
+        );
+
+        // ----------------------------------------------------
+        // RECEIVE CALLBACK
+        // ----------------------------------------------------
+
+        bridgeEngine.setReceiveCallback(
+            [this](
+                AEEVariableBase* variable,
+                unsigned long now)
+            {
+                onVariableReceived(
+                    variable,
+                    now
+                );
+            }
+        );
+
+        // ----------------------------------------------------
+        // BRIDGE INITIALIZATION
+        // ----------------------------------------------------
+
+        bridgeEngine.init(
+            *transport,
+            aeeEngine.getRegistry(),
+            true
+        );
+
+        // ----------------------------------------------------
+        // INTROSPECTION SNAPSHOT
+        // ----------------------------------------------------
+
+        if (introspection)
+        {
+            bridgeEngine
+                .getBridge()
+                .setInitialSnapshotCallback(
+                    [this](
+                        AEERegistry& registry,
+                        unsigned long now) -> size_t
+                    {
+                        if (!buffer ||
+                            !introspection)
+                        {
+                            return 0;
+                        }
+
+                        size_t selectedCount =
+                            0;
+
+                        registry.forEach(
+                            [this,
+                            now,
+                            &selectedCount](
+                                AEEVariableBase* variable)
+                            {
+                                if (!variable)
+                                {
+                                    return;
+                                }
+
+                                if (
+                                    variable->def.sourceType !=
+                                    AEEVarSourceType::BufferArea
+                                )
+                                {
+                                    return;
+                                }
+
+                                const int area =
+                                    variable
+                                        ->def
+                                        .bufferArea;
+
+                                if (
+                                    area < 0 ||
+                                    area >= buffer->size()
+                                )
+                                {
+                                    return;
+                                }
+
+                                const DomoIntrospection::Entity*
+                                    entity =
+                                        introspection->findEntity(
+                                            area
+                                        );
+
+                                if (
+                                    !entity ||
+                                    !entity->isReadableBufferEntity()
+                                )
+                                {
+                                    return;
+                                }
+
+                                if (
+                                    !buffer->HasEverChanged(
+                                        area
+                                    )
+                                )
+                                {
+                                    return;
+                                }
+
+                                const long bufferValue =
+                                    buffer->getValueFast(
+                                        area
+                                    );
+
+                                bool valueApplied =
+                                    false;
+
+                                // ====================================
+                                // BOOL
+                                // ====================================
+
+                                if (
+                                    auto* boolVariable =
+                                        as<bool>(
+                                            variable
+                                        )
+                                )
+                                {
+                                    const bool value =
+                                        variable->def.bitIndex >= 0
+                                            ? bitRead(
+                                                bufferValue,
+                                                variable->def.bitIndex
+                                            )
+                                            : bufferValue != 0;
+
+                                    boolVariable->set(
+                                        value,
+                                        now
+                                    );
+
+                                    valueApplied =
+                                        true;
+                                }
+
+                                // ====================================
+                                // INT
+                                // ====================================
+
+                                else if (
+                                    auto* intVariable =
+                                        as<int>(
+                                            variable
+                                        )
+                                )
+                                {
+                                    const float scaledValue =
+                                        static_cast<float>(
+                                            bufferValue
+                                        ) *
+                                        variable->def.scale;
+
+                                    intVariable->set(
+                                        static_cast<int>(
+                                            scaledValue
+                                        ),
+                                        now
+                                    );
+
+                                    valueApplied =
+                                        true;
+                                }
+
+                                // ====================================
+                                // FLOAT
+                                // ====================================
+
+                                else if (
+                                    auto* floatVariable =
+                                        as<float>(
+                                            variable
+                                        )
+                                )
+                                {
+                                    const float scaledValue =
+                                        static_cast<float>(
+                                            bufferValue
+                                        ) *
+                                        variable->def.scale;
+
+                                    floatVariable->set(
+                                        scaledValue,
+                                        now
+                                    );
+
+                                    valueApplied =
+                                        true;
+                                }
+
+                                if (!valueApplied)
+                                {
+                                    LOG_WF(
+                                        "AEE-BRIDGE",
+                                        "[%u] %s snapshot type "
+                                        "non supportato: area=%d name=%s",
+                                        static_cast<unsigned>(
+                                            channelId
+                                        ),
+                                        validName(),
+                                        area,
+                                        variable
+                                            ->def
+                                            .name
+                                            .c_str()
+                                    );
+
+                                    return;
+                                }
+
+                                variable->forceChanged(
+                                    now
+                                );
+
+                                ++selectedCount;
+                            }
+                        );
+
+                        return
+                            selectedCount;
+                    }
+                );
+        }
+        else
+        {
+            bridgeEngine
+                .getBridge()
+                .clearInitialSnapshotCallback();
+        }
+
+        // ----------------------------------------------------
+        // PACER
+        // ----------------------------------------------------
+
+        if (
+            !bridgeEngine.setupPacer(
+                networkManager,
+                protocolId
+            )
+        )
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "[%u] %s pacer setup failed",
+                static_cast<unsigned>(
+                    channelId
+                ),
+                validName()
+            );
+
+            return false;
+        }
+
+        enabled =
+            true;
+
+        initialized =
+            true;
+
+        LOG_IF(
+            "AEE-BRIDGE",
+            "[%u] %s ready: model=%s endpoint=%s "
+            "protocol=%d owner=%d source=%u "
+            "localPort=%u remotePort=%u vars=%u",
+            static_cast<unsigned>(
+                channelId
+            ),
+            validName(),
+            hasStaticAEE
+                ? "STATIC"
+                : "INTROSPECTION",
+            dynamicRemoteEndpoint
+                ? "DYNAMIC"
+                : "STATIC",
+            static_cast<int>(
+                protocolId
+            ),
+            static_cast<int>(
+                socketOwner
+            ),
+            static_cast<unsigned>(
+                eventSource
+            ),
+            static_cast<unsigned>(
+                config.localPort
+            ),
+            static_cast<unsigned>(
+                config.remotePort
+            ),
+            static_cast<unsigned>(
+                aeeEngine
+                    .getRegistry()
+                    .size()
+            )
+        );
+
+        return true;
+    }
+
+    // ========================================================
+    // LOOP
+    //
+    // Esegue esclusivamente il BridgeEngine appartenente al
+    // canale.
+    //
+    // Non vengono eseguite allocazioni dinamiche.
+    // ========================================================
+
+    void loop(
+        unsigned long now)
+    {
+        if (!enabled ||
+            !initialized)
+        {
+            return;
+        }
+
+        const unsigned long startUs =
+            micros();
+
+        bridgeEngine.loop(
+            now
+        );
+
+        const unsigned long elapsedUs =
+            micros() - startUs;
+
+        if (
+            elapsedUs >
+            maximumLoopTimeUs
+        )
+        {
+            maximumLoopTimeUs =
+                elapsedUs;
+        }
+
+        if (elapsedUs > 100000UL)
+        {
+            LOG_WF(
+                "AEE-BRIDGE",
+                "[%u] %s slow loop: %lu us",
+                static_cast<unsigned>(
+                    channelId
+                ),
+                validName(),
+                elapsedUs
+            );
+        }
+
+        if (
+            lastAliveLog == 0 ||
+            now - lastAliveLog >=
+                5000UL
+        )
+        {
+            LOG_DF(
+                "AEE-BRIDGE",
+                "[%u] %s active: "
+                "now=%lu elapsed=%lu us max=%lu us state=%d",
+                static_cast<unsigned>(
+                    channelId
+                ),
+                validName(),
+                now,
+                elapsedUs,
+                maximumLoopTimeUs,
+                static_cast<int>(
+                    bridgeEngine
+                        .getBridge()
+                        .getState()
+                )
+            );
+
+            lastAliveLog =
+                now;
+        }
+    }
+
+    // ========================================================
+    // UPDATE FROM POLLED SOURCES
+    //
+    // Costruisce gli aggiornamenti AEE derivati dalle sorgenti
+    // acquisite dal DomoManager.
+    //
+    // La funzione utilizza esclusivamente l'AEEManagement e il
+    // registry appartenenti al canale corrente.
+    //
+    // Deve essere richiamata dopo il completamento del ciclo
+    // backend/frontend.
+    // ========================================================
+
+    void updateFromPolledSources(
+        DomoManager& manager,
+        unsigned long now)
+    {
+        if (!enabled ||
+            !initialized)
+        {
+            return;
+        }
+
+        AEEManagement* aeeManager =
+            aeeEngine.getManager();
+
+        if (!aeeManager)
+        {
+            return;
+        }
+
+        std::vector<DMAEE::Update>
+            updates;
+
+        updates.reserve(
+            16
+        );
+
+        if (
+            !DMAEE::
+                BuildUpdatesFromPolledSources(
+                    *aeeManager,
+                    manager.getBuffer(),
+                    updates
+                )
+        )
+        {
+            return;
+        }
+
+        if (updates.empty())
+        {
+            return;
+        }
+
+        DMAEE::ApplyUpdates(
+            updates,
+            now
+        );
+    }
+
+    // ========================================================
+    // APPLY BUFFER EVENT
+    //
+    // Converte una variazione di area Buffer negli aggiornamenti
+    // appartenenti esclusivamente al registry di questo canale.
+    //
+    // Può essere richiamata da una callback EventManager comune
+    // che distribuisce l'evento a tutti i canali attivi.
+    //
+    // Restituisce true quando è stato generato almeno un update.
+    // ========================================================
+
+    bool applyBufferEvent(
+        int area,
+        long value,
+        unsigned long now)
+    {
+        if (!enabled ||
+            !initialized ||
+            area < 0)
+        {
+            return false;
+        }
+
+        // ----------------------------------------------------
+        // INTROSPECTION FILTER
+        //
+        // Se Introspection è presente, l'area deve essere una
+        // entity Buffer pubblica e leggibile.
+        //
+        // Per il modello AEE statico il filtro viene applicato
+        // direttamente dalle AEEVarDef configurate.
+        // ----------------------------------------------------
+
+        if (introspection)
+        {
+            const DomoIntrospection::Entity*
+                entity =
+                    introspection->findEntity(
+                        area
+                    );
+
+            if (
+                !entity ||
+                !entity
+                    ->isReadableBufferEntity()
+            )
+            {
+                return false;
+            }
+        }
+
+        AEEManagement* aeeManager =
+            aeeEngine.getManager();
+
+        if (!aeeManager)
+        {
+            return false;
+        }
+
+        std::vector<DMAEE::Update>
+            updates;
+
+        updates.reserve(
+            8
+        );
+
+        if (
+            !DMAEE::
+                BuildUpdatesFromBufferArea(
+                    *aeeManager,
+                    area,
+                    value,
+                    updates
+                )
+        )
+        {
+            return false;
+        }
+
+        if (updates.empty())
+        {
+            return false;
+        }
+
+        DMAEE::ApplyUpdates(
+            updates,
+            now
+        );
+
+        return true;
+    }
+
+    // ========================================================
+    // ACCESSORS
+    // ========================================================
+
+    bool isEnabled() const
+    {
+        return
+            enabled;
+    }
+
+    bool isInitialized() const
+    {
+        return
+            initialized;
+    }
+
+    uint8_t getChannelId() const
+    {
+        return
+            channelId;
+    }
+
+    const char* getChannelName() const
+    {
+        return
+            validName();
+    }
+
+    uint8_t getEventSource() const
+    {
+        return
+            eventSource;
+    }
+
+    ProtocolId getProtocolId() const
+    {
+        return
+            protocolId;
+    }
+
+    SocketOwnerId getSocketOwner() const
+    {
+        return
+            socketOwner;
+    }
+
+    uint32_t getTaskIntervalMs() const
+    {
+        return
+            taskIntervalMs;
+    }
+
+    unsigned long getMaximumLoopTimeUs() const
+    {
+        return
+            maximumLoopTimeUs;
+    }
+
+    AEEEngine& getAEEEngine()
+    {
+        return
+            aeeEngine;
+    }
+
+    const AEEEngine& getAEEEngine() const
+    {
+        return
+            aeeEngine;
+    }
+
+    AEERegistry& getRegistry()
+    {
+        return
+            aeeEngine.getRegistry();
+    }
+
+    const AEERegistry& getRegistry() const
+    {
+        return
+            aeeEngine.getRegistry();
+    }
+
+    AEEManagement* getAEEManager()
+    {
+        return
+            aeeEngine.getManager();
+    }
+
+    BridgeEngine& getBridgeEngine()
+    {
+        return
+            bridgeEngine;
+    }
+
+    const BridgeEngine& getBridgeEngine() const
+    {
+        return
+            bridgeEngine;
+    }
+
+    UdpAdapter* getTransport()
+    {
+        return
+            transport;
+    }
+
+    const UdpAdapter* getTransport() const
+    {
+        return
+            transport;
+    }
+};
+
+// ============================================================
+// AEE BRIDGE ORCHESTRATOR
+//
+// Coordina più istanze AEEBridgeChannel indipendenti.
+//
+// Ogni AEEBridgeChannel possiede autonomamente:
+//
+// - AEEEngine;
+// - BridgeEngine;
+// - AEERegistry;
+// - AEEManagement;
+// - UdpAdapter;
+// - protocollo DMNetworkManager;
+// - socket owner;
+// - sorgente EventManager;
+// - stato runtime e diagnostica.
+//
+// L'orchestrator non implementa direttamente:
+//
+// - protocolli AEE;
+// - trasporto UDP;
+// - pacing di rete;
+// - conversione delle variabili AEE;
+// - registrazione delle variabili;
+// - scrittura nel Buffer;
+// - ricezione dei pacchetti.
+//
+// Queste responsabilità rimangono incapsulate nel singolo
+// AEEBridgeChannel.
+//
+// Responsabilità dell'orchestrator:
+//
+// - possedere la collezione dei canali;
+// - inizializzare i canali configurati;
+// - eseguire il loop di tutti i canali;
+// - distribuire gli eventi Buffer;
+// - distribuire gli aggiornamenti provenienti dal polling;
+// - fornire accesso controllato ai singoli canali;
+// - fornire accesso ai registry AEE per Introspection;
+// - produrre diagnostica aggregata.
+//
+// La quantità massima è intenzionalmente statica per evitare:
+//
+// - allocazioni durante il runtime;
+// - riallocazioni;
+// - spostamenti di oggetti non copiabili;
+// - invalidazione dei riferimenti ai registry;
+// - invalidazione delle lambda che catturano this.
+//
+// AEEBridgeChannel non è copiabile né spostabile, quindi non
+// deve essere conservato in std::vector.
+// ============================================================
+
+class AEEBridgeOrchestrator
+{
+public:
+
+    // ========================================================
+    // CONSTANTS
+    //
+    // Il valore corrente consente:
+    //
+    //   channel 0 = bridge AEE principale;
+    //   channel 1 = bridge AEE Knob.
+    //
+    // Può essere aumentato successivamente senza modificare
+    // l'interfaccia pubblica dell'orchestrator.
+    // ========================================================
+
+    static constexpr size_t
+        MAX_CHANNELS =
+            2;
+
+private:
+
+    // ========================================================
+    // CHANNEL STORAGE
+    //
+    // Storage statico e contiguo.
+    //
+    // Non utilizziamo std::vector perché AEEBridgeChannel:
+    //
+    // - possiede risorse runtime;
+    // - non è copiabile;
+    // - non è spostabile;
+    // - registra callback che catturano this.
+    // ========================================================
+
+    AEEBridgeChannel channels[
+        MAX_CHANNELS
+    ];
+
+    // ========================================================
+    // CONFIGURED COUNT
+    //
+    // Numero di slot definiti dalla configurazione.
+    //
+    // Comprende anche eventuali canali configurati ma
+    // esplicitamente disabilitati.
+    // ========================================================
+
+    size_t configuredCount =
+        0;
+
+    // ========================================================
+    // INITIALIZED COUNT
+    //
+    // Numero di canali che hanno completato effettivamente:
+    //
+    // - setup AEE;
+    // - registrazione EventManager;
+    // - registrazione protocollo;
+    // - acquisizione socket owner;
+    // - creazione transport;
+    // - inizializzazione BridgeEngine;
+    // - setup pacer.
+    // ========================================================
+
+    size_t initializedCount =
+        0;
+
+    // ========================================================
+    // ENABLED COUNT
+    //
+    // Numero di configurazioni con enabled=true.
+    //
+    // Può essere maggiore di initializedCount se uno dei setup
+    // fallisce.
+    // ========================================================
+
+    size_t enabledCount =
+        0;
+
+    // ========================================================
+    // RUNTIME STATE
+    //
+    // configured:
+    //   setup() è stato invocato con parametri formalmente
+    //   validi.
+    //
+    // initialized:
+    //   tutti i canali abilitati hanno completato il setup.
+    // ========================================================
+
+    bool configured =
+        false;
+
+    bool initialized =
+        false;
+
+    // ========================================================
+    // DIAGNOSTICS
+    // ========================================================
+
+    unsigned long loopCount =
+        0;
+
+    unsigned long eventCount =
+        0;
+
+    unsigned long handledEventCount =
+        0;
+
+    unsigned long polledUpdateCount =
+        0;
+
+    // ========================================================
+    // NORMALIZED COUNT
+    //
+    // Limita il numero richiesto alla capacità reale dello
+    // storage.
+    // ========================================================
+
+    static size_t normalizeCount(
+        size_t count)
+    {
+        return
+            count < MAX_CHANNELS
+                ? count
+                : MAX_CHANNELS;
+    }
+
+    // ========================================================
+    // VALIDATE INDEX
+    // ========================================================
+
+    bool isValidIndex(
+        size_t index) const
+    {
+        return
+            index <
+                configuredCount &&
+            index <
+                MAX_CHANNELS;
+    }
+
+public:
+
+    // ========================================================
+    // CONSTRUCTOR
+    // ========================================================
+
+    AEEBridgeOrchestrator() =
+        default;
+
+    // ========================================================
+    // DESTRUCTOR
+    //
+    // I canali vengono distrutti automaticamente in ordine
+    // inverso.
+    //
+    // Ogni AEEBridgeChannel rilascia autonomamente:
+    //
+    // - UdpAdapter;
+    // - BridgeEngine;
+    // - pacer;
+    // - AEEManagement;
+    // - registry AEE.
+    // ========================================================
+
+    ~AEEBridgeOrchestrator() =
+        default;
+
+    // ========================================================
+    // NON-COPYABLE
+    //
+    // Copiare l'orchestrator duplicherebbe ownership e stato
+    // di protocolli, transport, pacer e registry.
+    // ========================================================
+
+    AEEBridgeOrchestrator(
+        const AEEBridgeOrchestrator&) =
+            delete;
+
+    AEEBridgeOrchestrator& operator=(
+        const AEEBridgeOrchestrator&) =
+            delete;
+
+    // ========================================================
+    // NON-MOVABLE
+    //
+    // Le callback dei BridgeEngine catturano l'indirizzo del
+    // rispettivo AEEBridgeChannel.
+    //
+    // Spostare l'orchestrator invaliderebbe tali indirizzi.
+    // ========================================================
+
+    AEEBridgeOrchestrator(
+        AEEBridgeOrchestrator&&) =
+            delete;
+
+    AEEBridgeOrchestrator& operator=(
+        AEEBridgeOrchestrator&&) =
+            delete;
+
+    // ========================================================
+    // SETUP STATIC CHANNELS
+    //
+    // Prima fase di inizializzazione.
+    //
+    // Configura esclusivamente i channel che possiedono:
+    //
+    //     aee.vars != nullptr
+    //     aee.count > 0
+    //
+    // I channel privi di configurazione AEE statica vengono
+    // rimandati alla fase setupIntrospectionChannels().
+    // ========================================================
+
+    bool setupStaticChannels(
+        AEEBridgeChannel::Config* configurations,
+        size_t count,
+        DomoManager& manager,
+        DMNetworkManager& networkManager)
+    {
+        configured =
+            true;
+
+        initialized =
+            false;
+
+        configuredCount =
+            normalizeCount(
+                count
+            );
+
+        initializedCount =
+            0;
+
+        enabledCount =
+            0;
+
+        loopCount =
+            0;
+
+        eventCount =
+            0;
+
+        handledEventCount =
+            0;
+
+        polledUpdateCount =
+            0;
+
+        if (!configurations ||
+            configuredCount == 0)
+        {
+            initialized =
+                true;
+
+            return true;
+        }
+
+        bool setupCompleted =
+            true;
+
+        for (
+            size_t index = 0;
+            index < configuredCount;
+            ++index
+        )
+        {
+            AEEBridgeChannel::Config& config =
+                configurations[index];
+
+            if (!config.enabled)
+            {
+                continue;
+            }
+
+            ++enabledCount;
+
+            const bool hasStaticAEE =
+                config.aee.vars != nullptr &&
+                config.aee.count > 0;
+
+            if (!hasStaticAEE)
+            {
+                /*
+                * Channel Introspection:
+                * inizializzato nella seconda fase.
+                */
+                continue;
+            }
+
+            const bool channelResult =
+                channels[index].setup(
+                    config,
+                    manager,
+                    networkManager,
+                    nullptr
+                );
+
+            if (!channelResult)
+            {
+                setupCompleted =
+                    false;
+
+                LOG_EF(
+                    "AEE-BRIDGE",
+                    "Static channel setup failed: "
+                    "index=%u id=%u name=%s",
+                    static_cast<unsigned>(
+                        index
+                    ),
+                    static_cast<unsigned>(
+                        config.id
+                    ),
+                    config.name
+                        ? config.name
+                        : "AEE-BRIDGE"
+                );
+
+                continue;
+            }
+
+            if (
+                channels[index]
+                    .isInitialized()
+            )
+            {
+                ++initializedCount;
+            }
+        }
+
+        /*
+        * Non impostiamo ancora initialized=true se esistono
+        * channel Introspection non inizializzati.
+        */
+        initialized =
+            setupCompleted &&
+            initializedCount ==
+                enabledCount;
+
+        LOG_IF(
+            "AEE-BRIDGE",
+            "Static phase completed: "
+            "configured=%u enabled=%u initialized=%u",
+            static_cast<unsigned>(
+                configuredCount
+            ),
+            static_cast<unsigned>(
+                enabledCount
+            ),
+            static_cast<unsigned>(
+                initializedCount
+            )
+        );
+
+        return
+            setupCompleted;
+    }
+
+    // ========================================================
+    // SETUP INTROSPECTION CHANNELS
+    //
+    // Seconda fase di inizializzazione.
+    //
+    // Configura esclusivamente i channel abilitati privi di
+    // configurazione AEE statica.
+    //
+    // Tali channel utilizzano il modello appena costruito da
+    // DomoIntrospection.
+    // ========================================================
+
+    bool setupIntrospectionChannels(
+        AEEBridgeChannel::Config* configurations,
+        size_t count,
+        DomoManager& manager,
+        DMNetworkManager& networkManager,
+        const DomoIntrospection& runtimeIntrospection)
+    {
+        if (!configurations)
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "Introspection phase failed: "
+                "configurations NULL"
+            );
+
+            return false;
+        }
+
+        if (
+            runtimeIntrospection
+                .entityCount() == 0
+        )
+        {
+            LOG_EF(
+                "AEE-BRIDGE",
+                "Introspection phase failed: "
+                "model empty"
+            );
+
+            return false;
+        }
+
+        const size_t normalizedCount =
+            normalizeCount(
+                count
+            );
+
+        /*
+        * Mantiene coerente il numero configurato anche se questa
+        * funzione viene richiamata dopo la fase statica.
+        */
+        configuredCount =
+            normalizedCount;
+
+        bool setupCompleted =
+            true;
+
+        for (
+            size_t index = 0;
+            index < normalizedCount;
+            ++index
+        )
+        {
+            AEEBridgeChannel::Config& config =
+                configurations[index];
+
+            if (!config.enabled)
+            {
+                continue;
+            }
+
+            const bool hasStaticAEE =
+                config.aee.vars != nullptr &&
+                config.aee.count > 0;
+
+            if (hasStaticAEE)
+            {
+                /*
+                * Già gestito durante setupStaticChannels().
+                */
+                continue;
+            }
+
+            LOG_IF(
+                "AEE-BRIDGE",
+                "Introspection channel setup: "
+                "index=%u id=%u name=%s entities=%u",
+                static_cast<unsigned>(
+                    index
+                ),
+                static_cast<unsigned>(
+                    config.id
+                ),
+                config.name
+                    ? config.name
+                    : "AEE-BRIDGE",
+                static_cast<unsigned>(
+                    runtimeIntrospection
+                        .entityCount()
+                )
+            );
+
+            const bool channelResult =
+                channels[index].setup(
+                    config,
+                    manager,
+                    networkManager,
+                    &runtimeIntrospection
+                );
+
+            if (!channelResult)
+            {
+                setupCompleted =
+                    false;
+
+                LOG_EF(
+                    "AEE-BRIDGE",
+                    "Introspection channel setup failed: "
+                    "index=%u id=%u name=%s",
+                    static_cast<unsigned>(
+                        index
+                    ),
+                    static_cast<unsigned>(
+                        config.id
+                    ),
+                    config.name
+                        ? config.name
+                        : "AEE-BRIDGE"
+                );
+
+                continue;
+            }
+
+            if (
+                channels[index]
+                    .isInitialized()
+            )
+            {
+                ++initializedCount;
+            }
+        }
+
+        initialized =
+            setupCompleted &&
+            initializedCount ==
+                enabledCount;
+
+        LOG_IF(
+            "AEE-BRIDGE",
+            "Introspection phase completed: "
+            "configured=%u enabled=%u initialized=%u "
+            "running=%u",
+            static_cast<unsigned>(
+                configuredCount
+            ),
+            static_cast<unsigned>(
+                enabledCount
+            ),
+            static_cast<unsigned>(
+                initializedCount
+            ),
+            initialized
+                ? 1U
+                : 0U
+        );
+
+        return
+            initialized;
+    }
+
+    // ========================================================
+    // SETUP
+    //
+    // Inizializza tutti i canali dichiarati nella configurazione.
+    //
+    // Parametri:
+    //
+    // configurations:
+    //   array di configurazioni AEEBridgeChannel.
+    //
+    // count:
+    //   numero di elementi presenti nell'array.
+    //
+    // manager:
+    //   DomoManager condiviso.
+    //
+    // networkManager:
+    //   DMNetworkManager condiviso.
+    //
+    // Comportamento:
+    //
+    // - count viene limitato a MAX_CHANNELS;
+    // - ogni canale mantiene risorse completamente separate;
+    // - un canale disabilitato non viene considerato errore;
+    // - il fallimento di un canale abilitato rende fallito il
+    //   setup complessivo;
+    // - i canali già inizializzati rimangono disponibili per
+    //   diagnostica, ma il loop aggregato non viene attivato.
+    //
+    // La registrazione del TaskEngine rimane responsabilità
+    // del composition root.
+    // ========================================================
+
+    bool setup(
+        const AEEBridgeChannel::Config* configurations,
+        size_t count,
+        DomoManager& manager,
+        DMNetworkManager& networkManager,
+        const DomoIntrospection* introspection =
+            nullptr)
+    {
+        configured =
+            false;
+
+        initialized =
+            false;
+
+        configuredCount =
+            0;
+
+        initializedCount =
+            0;
+
+        enabledCount =
+            0;
+
+        loopCount =
+            0;
+
+        eventCount =
+            0;
+
+        handledEventCount =
+            0;
+
+        polledUpdateCount =
+            0;
+
+        if (!configurations ||
+            count == 0)
+        {
+            configured =
+                true;
+
+            initialized =
+                true;
+
+            LOG_IF(
+                "AEE-BRIDGE",
+                "No AEE bridge channels configured"
+            );
+
+            return true;
+        }
+
+        configuredCount =
+            normalizeCount(
+                count
+            );
+
+        configured =
+            true;
+
+        if (count > MAX_CHANNELS)
+        {
+            LOG_WF(
+                "AEE-BRIDGE",
+                "Configured channel count truncated: "
+                "requested=%u maximum=%u",
+                static_cast<unsigned>(
+                    count
+                ),
+                static_cast<unsigned>(
+                    MAX_CHANNELS
+                )
+            );
+        }
+
+        // ----------------------------------------------------
+        // UNIQUE IDS
+        // ----------------------------------------------------
+
+        for (
+            size_t index = 0;
+            index < configuredCount;
+            ++index
+        )
+        {
+            for (
+                size_t previous = 0;
+                previous < index;
+                ++previous
+            )
+            {
+                if (
+                    configurations[index].id ==
+                    configurations[previous].id
+                )
+                {
+                    LOG_EF(
+                        "AEE-BRIDGE",
+                        "Duplicate channel id: "
+                        "index=%u previous=%u id=%u",
+                        static_cast<unsigned>(
+                            index
+                        ),
+                        static_cast<unsigned>(
+                            previous
+                        ),
+                        static_cast<unsigned>(
+                            configurations[index].id
+                        )
+                    );
+
+                    return false;
+                }
+            }
+        }
+
+        bool setupCompleted =
+            true;
+
+        for (
+            size_t index = 0;
+            index < configuredCount;
+            ++index
+        )
+        {
+            const AEEBridgeChannel::Config&
+                channelConfig =
+                    configurations[index];
+
+            if (channelConfig.enabled)
+            {
+                ++enabledCount;
+            }
+
+            /*
+            * Se il channel non possiede configurazione AEE
+            * statica, riceve Introspection.
+            */
+            const bool hasStaticAEE =
+                channelConfig.aee.vars != nullptr &&
+                channelConfig.aee.count > 0;
+
+            const DomoIntrospection*
+                channelIntrospection =
+                    hasStaticAEE
+                        ? nullptr
+                        : introspection;
+
+            const bool channelResult =
+                channels[index].setup(
+                    channelConfig,
+                    manager,
+                    networkManager,
+                    channelIntrospection
+                );
+
+            if (!channelResult)
+            {
+                setupCompleted =
+                    false;
+
+                LOG_EF(
+                    "AEE-BRIDGE",
+                    "Channel setup failed: "
+                    "index=%u id=%u name=%s",
+                    static_cast<unsigned>(
+                        index
+                    ),
+                    static_cast<unsigned>(
+                        channelConfig.id
+                    ),
+                    channelConfig.name &&
+                    channelConfig.name[0] != '\0'
+                        ? channelConfig.name
+                        : "AEE-BRIDGE"
+                );
+
+                continue;
+            }
+
+            if (
+                channels[index]
+                    .isInitialized()
+            )
+            {
+                ++initializedCount;
+            }
+        }
+
+        initialized =
+            setupCompleted &&
+            initializedCount ==
+                enabledCount;
+
+        LOG_IF(
+            "AEE-BRIDGE",
+            "Orchestrator setup completed: "
+            "configured=%u enabled=%u initialized=%u "
+            "running=%u",
+            static_cast<unsigned>(
+                configuredCount
+            ),
+            static_cast<unsigned>(
+                enabledCount
+            ),
+            static_cast<unsigned>(
+                initializedCount
+            ),
+            initialized
+                ? 1U
+                : 0U
+        );
+
+        return
+            initialized;
+    }
+
+    // ========================================================
+    // LOOP
+    //
+    // Esegue sequenzialmente tutti i canali inizializzati.
+    //
+    // Ogni channel applica internamente:
+    //
+    // - controllo enabled;
+    // - controllo initialized;
+    // - BridgeEngine::loop();
+    // - diagnostica dei tempi;
+    // - pacing tramite protocolId dedicato.
+    //
+    // L'esecuzione sequenziale evita concorrenza sui servizi
+    // condivisi del DMNetworkManager.
+    // ========================================================
+
+    void loop(
+        unsigned long now)
+    {
+        if (!initialized)
+        {
+            return;
+        }
+
+        ++loopCount;
+
+        for (
+            size_t index = 0;
+            index < configuredCount;
+            ++index
+        )
+        {
+            if (
+                !channels[index]
+                    .isInitialized()
+            )
+            {
+                continue;
+            }
+
+            channels[index].loop(
+                now
+            );
+        }
+    }
+
+    // ========================================================
+    // APPLY BUFFER EVENT
+    //
+    // Distribuisce un evento Buffer a tutti i canali attivi.
+    //
+    // Ogni canale consulta esclusivamente il proprio:
+    //
+    // - AEEManagement;
+    // - AEERegistry;
+    // - insieme di AEEVarDef.
+    //
+    // Di conseguenza uno stesso evento può:
+    //
+    // - essere ignorato da tutti i canali;
+    // - appartenere a un solo canale;
+    // - appartenere a più canali.
+    //
+    // Restituisce true se almeno un canale ha generato un
+    // aggiornamento AEE.
+    // ========================================================
+
+    bool applyBufferEvent(
+        int area,
+        long value,
+        unsigned long now)
+    {
+        if (!initialized ||
+            area < 0)
+        {
+            return false;
+        }
+
+        ++eventCount;
+
+        bool handled =
+            false;
+
+        for (
+            size_t index = 0;
+            index < configuredCount;
+            ++index
+        )
+        {
+            if (
+                !channels[index]
+                    .isInitialized()
+            )
+            {
+                continue;
+            }
+
+            if (
+                channels[index]
+                    .applyBufferEvent(
+                        area,
+                        value,
+                        now
+                    )
+            )
+            {
+                handled =
+                    true;
+            }
+        }
+
+        if (handled)
+        {
+            ++handledEventCount;
+        }
+
+        return
+            handled;
+    }
+
+    // ========================================================
+    // UPDATE FROM POLLED SOURCES
+    //
+    // Propaga a ogni canale i valori acquisiti dal ciclo di
+    // polling DomoManager.
+    //
+    // Ogni canale costruisce aggiornamenti esclusivamente per
+    // le proprie definizioni AEE.
+    //
+    // Questa funzione deve essere richiamata al completamento
+    // del ciclo backend/frontend.
+    // ========================================================
+
+    void updateFromPolledSources(
+        DomoManager& manager,
+        unsigned long now)
+    {
+        if (!initialized)
+        {
+            return;
+        }
+
+        ++polledUpdateCount;
+
+        for (
+            size_t index = 0;
+            index < configuredCount;
+            ++index
+        )
+        {
+            if (
+                !channels[index]
+                    .isInitialized()
+            )
+            {
+                continue;
+            }
+
+            channels[index]
+                .updateFromPolledSources(
+                    manager,
+                    now
+                );
+        }
+    }
+
+    // ========================================================
+    // CONFIGURED STATE
+    // ========================================================
+
+    bool isConfigured() const
+    {
+        return
+            configured;
+    }
+
+    // ========================================================
+    // INITIALIZED STATE
+    // ========================================================
+
+    bool isInitialized() const
+    {
+        return
+            initialized;
+    }
+
+    // ========================================================
+    // OPERATIONAL STATE
+    //
+    // Un orchestrator è operativo quando:
+    //
+    // - setup è stato completato;
+    // - almeno un canale è abilitato;
+    // - tutti i canali abilitati sono inizializzati.
+    // ========================================================
+
+    bool isOperational() const
+    {
+        return
+            initialized &&
+            enabledCount > 0 &&
+            initializedCount ==
+                enabledCount;
+    }
+
+    // ========================================================
+    // COUNTS
+    // ========================================================
+
+    size_t getConfiguredCount() const
+    {
+        return
+            configuredCount;
+    }
+
+    size_t getEnabledCount() const
+    {
+        return
+            enabledCount;
+    }
+
+    size_t getInitializedCount() const
+    {
+        return
+            initializedCount;
+    }
+
+    // ========================================================
+    // CHANNEL BY INDEX
+    // ========================================================
+
+    AEEBridgeChannel* getChannel(
+        size_t index)
+    {
+        if (!isValidIndex(
+                index))
+        {
+            return nullptr;
+        }
+
+        return
+            &channels[index];
+    }
+
+    const AEEBridgeChannel* getChannel(
+        size_t index) const
+    {
+        if (!isValidIndex(
+                index))
+        {
+            return nullptr;
+        }
+
+        return
+            &channels[index];
+    }
+
+    // ========================================================
+    // CHANNEL BY ID
+    // ========================================================
+
+    AEEBridgeChannel* findChannelById(
+        uint8_t channelId)
+    {
+        for (
+            size_t index = 0;
+            index < configuredCount;
+            ++index
+        )
+        {
+            if (
+                channels[index]
+                    .getChannelId() ==
+                channelId
+            )
+            {
+                return
+                    &channels[index];
+            }
+        }
+
+        return nullptr;
+    }
+
+    const AEEBridgeChannel*
+    findChannelById(
+        uint8_t channelId) const
+    {
+        for (
+            size_t index = 0;
+            index < configuredCount;
+            ++index
+        )
+        {
+            if (
+                channels[index]
+                    .getChannelId() ==
+                channelId
+            )
+            {
+                return
+                    &channels[index];
+            }
+        }
+
+        return nullptr;
+    }
+
+    // ========================================================
+    // PRIMARY CHANNEL
+    //
+    // Per compatibilità con la configurazione corrente e con
+    // Introspection, il primo canale viene considerato il
+    // canale AEE principale.
+    // ========================================================
+
+    AEEBridgeChannel* getPrimaryChannel()
+    {
+        return
+            getChannel(
+                0
+            );
+    }
+
+    const AEEBridgeChannel*
+    getPrimaryChannel() const
+    {
+        return
+            getChannel(
+                0
+            );
+    }
+
+    // ========================================================
+    // PRIMARY REGISTRY
+    //
+    // Restituisce nullptr quando:
+    //
+    // - non esiste alcun channel;
+    // - il primary channel non è inizializzato.
+    //
+    // Questo accessor può essere utilizzato temporaneamente da
+    // Introspection finché non verrà aggiunto il supporto per
+    // registry multipli.
+    // ========================================================
+
+    AEERegistry* getPrimaryRegistry()
+    {
+        AEEBridgeChannel* channel =
+            getPrimaryChannel();
+
+        if (!channel ||
+            !channel->isInitialized())
+        {
+            return nullptr;
+        }
+
+        return
+            &channel->getRegistry();
+    }
+
+    const AEERegistry*
+    getPrimaryRegistry() const
+    {
+        const AEEBridgeChannel* channel =
+            getPrimaryChannel();
+
+        if (!channel ||
+            !channel->isInitialized())
+        {
+            return nullptr;
+        }
+
+        return
+            &channel->getRegistry();
+    }
+
+    // ========================================================
+    // REGISTRY BY CHANNEL ID
+    // ========================================================
+
+    AEERegistry* getRegistryById(
+        uint8_t channelId)
+    {
+        AEEBridgeChannel* channel =
+            findChannelById(
+                channelId
+            );
+
+        if (!channel ||
+            !channel->isInitialized())
+        {
+            return nullptr;
+        }
+
+        return
+            &channel->getRegistry();
+    }
+
+    const AEERegistry*
+    getRegistryById(
+        uint8_t channelId) const
+    {
+        const AEEBridgeChannel* channel =
+            findChannelById(
+                channelId
+            );
+
+        if (!channel ||
+            !channel->isInitialized())
+        {
+            return nullptr;
+        }
+
+        return
+            &channel->getRegistry();
+    }
+
+    // ========================================================
+    // DIAGNOSTIC COUNTERS
+    // ========================================================
+
+    unsigned long getLoopCount() const
+    {
+        return
+            loopCount;
+    }
+
+    unsigned long getEventCount() const
+    {
+        return
+            eventCount;
+    }
+
+    unsigned long
+    getHandledEventCount() const
+    {
+        return
+            handledEventCount;
+    }
+
+    unsigned long
+    getPolledUpdateCount() const
+    {
+        return
+            polledUpdateCount;
+    }
+
+    // ========================================================
+    // DIAGNOSTIC REPORT
+    //
+    // Produce un riepilogo sintetico dell'orchestrator e di
+    // ogni canale configurato.
+    // ========================================================
+
+    void diagnosticReport() const
+    {
+        Serial.println();
+
+        Serial.println(
+            "===== AEE BRIDGE ORCHESTRATOR ====="
+        );
+
+        Serial.print(
+            "Configured: "
+        );
+
+        Serial.println(
+            configured
+                ? "YES"
+                : "NO"
+        );
+
+        Serial.print(
+            "Initialized: "
+        );
+
+        Serial.println(
+            initialized
+                ? "YES"
+                : "NO"
+        );
+
+        Serial.print(
+            "Configured channels: "
+        );
+
+        Serial.println(
+            static_cast<unsigned>(
+                configuredCount
+            )
+        );
+
+        Serial.print(
+            "Enabled channels: "
+        );
+
+        Serial.println(
+            static_cast<unsigned>(
+                enabledCount
+            )
+        );
+
+        Serial.print(
+            "Initialized channels: "
+        );
+
+        Serial.println(
+            static_cast<unsigned>(
+                initializedCount
+            )
+        );
+
+        Serial.print(
+            "Loop count: "
+        );
+
+        Serial.println(
+            loopCount
+        );
+
+        Serial.print(
+            "Buffer events: "
+        );
+
+        Serial.println(
+            eventCount
+        );
+
+        Serial.print(
+            "Handled events: "
+        );
+
+        Serial.println(
+            handledEventCount
+        );
+
+        Serial.print(
+            "Polled updates: "
+        );
+
+        Serial.println(
+            polledUpdateCount
+        );
+
+        for (
+            size_t index = 0;
+            index < configuredCount;
+            ++index
+        )
+        {
+            const AEEBridgeChannel&
+                channel =
+                    channels[index];
+
+            Serial.print(
+                "Channel["
+            );
+
+            Serial.print(
+                static_cast<unsigned>(
+                    index
+                )
+            );
+
+            Serial.print(
+                "] id="
+            );
+
+            Serial.print(
+                static_cast<unsigned>(
+                    channel.getChannelId()
+                )
+            );
+
+            Serial.print(
+                " name="
+            );
+
+            Serial.print(
+                channel.getChannelName()
+            );
+
+            Serial.print(
+                " initialized="
+            );
+
+            Serial.print(
+                channel.isInitialized()
+                    ? "YES"
+                    : "NO"
+            );
+
+            Serial.print(
+                " protocol="
+            );
+
+            Serial.print(
+                static_cast<int>(
+                    channel.getProtocolId()
+                )
+            );
+
+            Serial.print(
+                " owner="
+            );
+
+            Serial.print(
+                static_cast<int>(
+                    channel.getSocketOwner()
+                )
+            );
+
+            Serial.print(
+                " source="
+            );
+
+            Serial.print(
+                static_cast<unsigned>(
+                    channel.getEventSource()
+                )
+            );
+
+            Serial.print(
+                " vars="
+            );
+
+            Serial.print(
+                static_cast<unsigned>(
+                    channel
+                        .getRegistry()
+                        .size()
+                )
+            );
+
+            Serial.print(
+                " maxLoopUs="
+            );
+
+            Serial.println(
+                channel
+                    .getMaximumLoopTimeUs()
+            );
+        }
+
+        Serial.println(
+            "===== END AEE BRIDGE ORCHESTRATOR ====="
+        );
+
+        Serial.println();
     }
 };
 

@@ -199,10 +199,38 @@ struct BufferInfo
 {
     BufferSourceInfo field;
 
-    bool Reverse = false;
-    int areaToWrite = -1;
+    bool Reverse =
+        false;
+
+    int areaToWrite =
+        -1;
+
     String name;
-    bool isVirtual = false;
+
+    bool isVirtual =
+        false;
+
+    /*
+     * Stato storico runtime.
+     *
+     * Viene impostato alla prima variazione effettiva del valore:
+     *
+     *     nuovoValore != valoreCorrente
+     *
+     * Non coincide con:
+     *
+     * - la configurazione dell'area;
+     * - la registrazione in AreaTracker;
+     * - la presenza nella mappa transitoria _changed.
+     *
+     * Non viene cancellato da ResetElement() o ResetAll().
+     *
+     * Utilizzo principale:
+     *
+     *     snapshot iniziale del Knob.
+     */
+    bool hasEverChanged =
+        false;
 };
 
 
@@ -236,28 +264,75 @@ public:
     // CONSTRUCTOR
     // ========================================================================
 
-    explicit Buffer(unsigned int items)
-        : tracker(static_cast<int>(items)),
-          _items(static_cast<int>(items)),
-          _buffer(nullptr)
+    explicit Buffer(
+        unsigned int items)
+        : tracker(
+            static_cast<int>(
+                items
+            )
+        ),
+        _items(
+            static_cast<int>(
+                items
+            )
+        ),
+        _buffer(
+            nullptr
+        )
     {
+        // ========================================================
+        // ALLOCAZIONE BUFFER
+        // ========================================================
+
         if (items > 0)
-            _buffer = new BufferInfo[items];
-
-        for (int i = 0; i < _items; ++i)
         {
-            auto& info = _buffer[i];
+            _buffer =
+                new BufferInfo[
+                    items
+                ];
+        }
 
-            info.field = {
-                0,
-                0,
-                0
+        // ========================================================
+        // INIZIALIZZAZIONE AREE
+        // ========================================================
+
+        for (
+            int area = 0;
+            area < _items;
+            ++area
+        )
+        {
+            BufferInfo& info =
+                _buffer[area];
+
+            info.field =
+            {
+                0,  // time
+                0,  // value
+                0   // prevValue
             };
 
-            info.Reverse     = false;
-            info.areaToWrite = NO_AREA;
-            info.name        = String();
-            info.isVirtual   = false;
+            info.Reverse =
+                false;
+
+            info.areaToWrite =
+                NO_AREA;
+
+            info.name =
+                String();
+
+            info.isVirtual =
+                false;
+
+            /*
+            * Nessuna area è considerata variata alla costruzione.
+            *
+            * Il flag verrà impostato da WriteElement() soltanto
+            * quando il nuovo valore sarà differente da quello
+            * correntemente memorizzato.
+            */
+            info.hasEverChanged =
+                false;
         }
     }
 
@@ -419,6 +494,10 @@ public:
         bool silent,
         unsigned long now)
     {
+        // ========================================================
+        // AREA VALIDATION
+        // ========================================================
+
         if (!isValidArea(area))
         {
             LOG_WFN(
@@ -427,22 +506,77 @@ public:
                 area
             );
 
-            return WriteResult::ERROR;
+            return
+                WriteResult::ERROR;
         }
 
-        auto& entry = _buffer[area].field;
+        BufferInfo& info =
+            _buffer[area];
 
-        if (entry.value == value)
-            return WriteResult::EQUAL;
+        BufferSourceInfo& entry =
+            info.field;
 
-        entry.prevValue = entry.value;
-        entry.value     = value;
-        entry.time      = now;
+        // ========================================================
+        // VALUE UNCHANGED
+        //
+        // Una scrittura uguale al valore corrente non costituisce
+        // una variazione.
+        //
+        // Esempio:
+        //
+        // valore iniziale = 0
+        // prima scrittura = 0
+        //
+        // hasEverChanged rimane false.
+        // ========================================================
+
+        if (
+            entry.value ==
+            value
+        )
+        {
+            return
+                WriteResult::EQUAL;
+        }
+
+        // ========================================================
+        // VALUE UPDATE
+        // ========================================================
+
+        entry.prevValue =
+            entry.value;
+
+        entry.value =
+            value;
+
+        entry.time =
+            now;
+
+        // ========================================================
+        // HISTORICAL CHANGE STATE
+        //
+        // Viene impostato anche con silent=true.
+        //
+        // Il parametro silent controlla solamente l'inserimento
+        // nella mappa transitoria _changed.
+        // ========================================================
+
+        info.hasEverChanged =
+            true;
+
+        // ========================================================
+        // TRANSIENT CHANGE STATE
+        // ========================================================
 
         if (!silent)
-            markChanged(area);
+        {
+            markChanged(
+                area
+            );
+        }
 
-        return WriteResult::CHANGED;
+        return
+            WriteResult::CHANGED;
     }
 
 
@@ -526,6 +660,33 @@ public:
         return _changed.find(area) != _changed.end();
     }
 
+    // ========================================================================
+    // HAS EVER CHANGED
+    //
+    // Restituisce true se l'area ha subito almeno una variazione effettiva
+    // dall'avvio del Buffer.
+    //
+    // A differenza di HasChanged():
+    //
+    // - rappresenta uno stato storico;
+    // - non viene cancellato da ResetElement();
+    // - non viene cancellato da ResetAll();
+    // - viene impostato anche dalle scritture silent;
+    // - viene usato per filtrare lo snapshot iniziale del Knob.
+    // ========================================================================
+
+    inline bool HasEverChanged(
+        int area) const
+    {
+        if (!isValidArea(area))
+        {
+            return false;
+        }
+
+        return
+            _buffer[area]
+                .hasEverChanged;
+    }
 
     inline const std::unordered_set<int>&
     getChangedMap() const
