@@ -801,6 +801,77 @@ public:
 class AEEEngine
 {
 public:
+    // ============================================================
+    // COMPOSABLE INTROSPECTION FILTER
+    //
+    // Tutte le condizioni configurate sono cumulative (AND).
+    // Le maschere descrivono gli elementi da escludere.
+    // Nessuna std::function e nessuna allocazione dinamica.
+    // ============================================================
+
+    struct EntityFilter
+    {
+        uint32_t excludedKinds = 0;
+        uint32_t excludedIOTypes = 0;
+
+        bool excludeRouteTriggers = false;
+        bool excludeToggleSources = false;
+        bool excludeSplitMains = false;
+
+        static constexpr uint32_t kindMask(
+            DomoIntrospection::EntityKind kind)
+        {
+            return
+                1UL << static_cast<uint8_t>(kind);
+        }
+
+        static constexpr uint32_t ioTypeMask(
+            DomoIntrospection::IOType ioType)
+        {
+            return
+                1UL << static_cast<uint8_t>(ioType);
+        }
+
+        bool matches(
+            const DomoIntrospection::Entity& entity) const
+        {
+            if (
+                excludedKinds &
+                kindMask(entity.kind)
+            )
+            {
+                return false;
+            }
+
+            if (
+                excludedIOTypes &
+                ioTypeMask(entity.ioType)
+            )
+            {
+                return false;
+            }
+
+            if (excludeRouteTriggers &&
+                entity.isRouteTrigger)
+            {
+                return false;
+            }
+
+            if (excludeToggleSources &&
+                entity.isToggleSource)
+            {
+                return false;
+            }
+
+            if (excludeSplitMains &&
+                entity.isSplitMain)
+            {
+                return false;
+            }
+
+            return true;
+        }
+    };
 
     // ============================================================
     // RECEIVE CONTEXT
@@ -986,6 +1057,142 @@ private:
 
         return
             configuredScale;
+    }
+
+    static const char* resolveSemanticKind(
+        DomoIntrospection::EntityKind kind)
+    {
+        using Kind = DomoIntrospection::EntityKind;
+
+        switch (kind)
+        {
+            case Kind::SENSOR:        return "sensor";
+            case Kind::BINARY_SENSOR: return "binary_sensor";
+            case Kind::SWITCH:        return "switch";
+            case Kind::LIGHT:         return "light";
+            case Kind::COVER:         return "cover";
+            case Kind::CLIMATE:       return "climate";
+            case Kind::BUTTON:        return "button";
+            case Kind::NUMBER:        return "number";
+            case Kind::TEXT:          return "text";
+            case Kind::STATUS:        return "status";
+            case Kind::UNKNOWN:
+            default:                  return "";
+        }
+    }
+
+    static const char* resolveSemanticGroup(
+        DomoIntrospection::EntityGroup group)
+    {
+        using Group = DomoIntrospection::EntityGroup;
+
+        switch (group)
+        {
+            case Group::PHYSICAL_DEVICE: return "device";
+            case Group::SECURITY:        return "security";
+            case Group::SOLAR:           return "solar";
+            case Group::ROOT:
+            default:                     return "";
+        }
+    }
+
+    static const char* resolveSchemaSection(
+        DomoIntrospection::EntityGroup group)
+    {
+        using Group = DomoIntrospection::EntityGroup;
+
+        switch (group)
+        {
+            case Group::PHYSICAL_DEVICE: return "zones";
+            case Group::SECURITY:        return "security";
+            case Group::SOLAR:           return "solar";
+            case Group::ROOT:
+            default:                     return "variables";
+        }
+    }
+
+    static const char* resolveSchemaZone(
+        const DomoIntrospection::Entity& entity)
+    {
+        using Group = DomoIntrospection::EntityGroup;
+
+        if (entity.group != Group::PHYSICAL_DEVICE &&
+            entity.group != Group::SECURITY)
+        {
+            return "";
+        }
+
+        if (entity.device &&
+            entity.device->suggestedArea &&
+            entity.device->suggestedArea[0] != '\0')
+        {
+            return entity.device->suggestedArea;
+        }
+
+        return "Generali";
+    }
+
+    void attachSchemaMetadata(
+        const DomoIntrospection& introspection)
+    {
+        registry.reserveSchemaMetadata(
+            dynamicDefinitions.size()
+        );
+
+        introspection.forEachEntity(
+            [this, &introspection](
+                const DomoIntrospection::Entity& entity)
+            {
+                if (!entity.isPublicBufferEntity())
+                    return;
+
+                if (!entity.readable && !entity.writable)
+                    return;
+
+                AEEVarType variableType;
+
+                if (!resolveVariableType(entity, variableType))
+                    return;
+
+                const String variableName =
+                    buildVariableName(entity.area);
+
+                if (!registry.find(variableName))
+                    return;
+
+                const char* label =
+                    introspection.getAreaName(entity.area);
+
+                const bool hasNumericRange =
+                    entity.kind ==
+                        DomoIntrospection::EntityKind::NUMBER &&
+                    entity.number.valid();
+
+                registry.setSchemaMetadata(
+                    variableName.c_str(),
+                    label,
+                    resolveSemanticKind(entity.kind),
+                    resolveSemanticGroup(entity.group),
+                    resolveSchemaSection(entity.group),
+                    resolveSchemaZone(entity),
+                    entity.unit,
+                    entity.deviceClass,
+                    hasNumericRange,
+                    entity.number.minimumValue,
+                    entity.number.maximumValue,
+                    entity.number.stepValue,
+                    entity.number.displayDecimals
+                );
+            }
+        );
+
+        LOG_IF(
+            "AEE",
+            "Schema metadata ready: entries=%u",
+            static_cast<unsigned>(
+                registry.schemaMetadataSize()
+            )
+        );
     }
 
     // ============================================================
@@ -1207,7 +1414,8 @@ private:
     // ============================================================
 
     bool buildIntrospectionDefinitions(
-        const DomoIntrospection& introspection)
+        const DomoIntrospection& introspection,
+        const EntityFilter* entityFilter)
     {
         const size_t maximumDefinitions =
             introspection.entityCount();
@@ -1227,9 +1435,19 @@ private:
         );
 
         introspection.forEachEntity(
-            [this](
+            [this, entityFilter](
                 const DomoIntrospection::Entity& entity)
             {
+                // =================================================
+                // COMPOSABLE CHANNEL FILTER
+                // =================================================
+
+                if (entityFilter &&
+                    !entityFilter->matches(entity))
+                {
+                    return;
+                }
+
                 // =================================================
                 // PUBLIC BUFFER ENTITY
                 // =================================================
@@ -1452,13 +1670,15 @@ public:
     // ============================================================
 
     bool setup(
-        const DomoIntrospection& introspection)
+        const DomoIntrospection& introspection,
+        const EntityFilter* entityFilter = nullptr)
     {
         clear();
 
         if (
             !buildIntrospectionDefinitions(
-                introspection
+                introspection,
+                entityFilter
             )
         )
         {
@@ -1479,6 +1699,10 @@ public:
 
             return false;
         }
+
+        attachSchemaMetadata(
+            introspection
+        );
 
         LOG_IF(
             "AEE",
@@ -2894,6 +3118,19 @@ public:
         // ----------------------------------------------------
 
         FrontendConfig::Bridge::AEE aee;
+
+        // ----------------------------------------------------
+        // COMPOSABLE INTROSPECTION FILTER
+        //
+        // Disabilitato per default: gli altri channel continuano
+        // a ricevere il modello Introspection completo.
+        // ----------------------------------------------------
+
+        bool filterIntrospection =
+            false;
+
+        AEEEngine::EntityFilter
+            introspectionFilter;
     };
 
 private:
@@ -3365,13 +3602,20 @@ public:
         // AEE ENGINE
         // ----------------------------------------------------
 
+        const AEEEngine::EntityFilter*
+            entityFilter =
+                config.filterIntrospection
+                    ? &config.introspectionFilter
+                    : nullptr;
+
         const bool aeeSetupCompleted =
             hasStaticAEE
                 ? aeeEngine.setup(
                     config.aee
                 )
                 : aeeEngine.setup(
-                    *introspection
+                    *introspection,
+                    entityFilter
                 );
 
         if (!aeeSetupCompleted)

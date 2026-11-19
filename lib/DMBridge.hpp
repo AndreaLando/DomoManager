@@ -8,7 +8,7 @@
    Nome:            Andrea Lando
    Contatto:        mail@domo-manager.it
 
-   Versione modulo: 1.1.0
+   Versione modulo: 1.2.0
    Ultima modifica: 2026-11-08
 
    Note:
@@ -17,6 +17,7 @@
                     - Cache schema per istanza.
                     - Resend AEE con stesso payload e stesso sequence.
                     - Gestione ACK duplicati schema.
+                    - Schema paginato con commit solo a sessione completa.
 
    ============================================================================ */
 
@@ -714,6 +715,12 @@ protected:
             unsigned long startTime =
                 0;
 
+            uint8_t retryCount =
+                0;
+
+            static constexpr uint8_t MAX_RETRIES_PER_FRAME =
+                5;
+
             std::vector<String>
                 frames;
 
@@ -732,6 +739,9 @@ protected:
                     0;
 
                 startTime =
+                    0;
+
+                retryCount =
                     0;
 
                 frames.clear();
@@ -1160,6 +1170,7 @@ protected:
             tx.waitingAckFor = -1;
             tx.lastSend = 0;
             tx.startTime = millis();
+            tx.retryCount = 0;
 
             LOG_IF(
                 "BRIDGE::SCHEMA",
@@ -1213,6 +1224,8 @@ protected:
                 tx.waitingAckFor =
                     -1;
 
+                parent->onSchemaTransportCompleted();
+
                 return;
             }
 
@@ -1234,6 +1247,28 @@ protected:
                     ackTimeout
                 )
                 {
+                    ++tx.retryCount;
+
+                    if (tx.retryCount >=
+                        TxState::MAX_RETRIES_PER_FRAME)
+                    {
+                        LOG_WF(
+                            "BRIDGE::SCHEMA",
+                            "ACK timeout frame %d dopo %u retry "
+                            "-> restart da frame 0",
+                            tx.waitingAckFor,
+                            static_cast<unsigned>(tx.retryCount)
+                        );
+
+                        tx.index = 0;
+                        tx.waitingAckFor = -1;
+                        tx.lastSend = 0;
+                        tx.retryCount = 0;
+                        tx.startTime = now;
+
+                        return;
+                    }
+
                     transport->send(
                         tx.frames[
                             tx.index
@@ -1245,8 +1280,12 @@ protected:
 
                     LOG_WF(
                         "BRIDGE::SCHEMA",
-                        "ACK timeout frame %d -> ritrasmissione",
-                        tx.waitingAckFor
+                        "ACK timeout frame %d -> ritrasmissione "
+                        "(%u/%u)",
+                        tx.waitingAckFor,
+                        static_cast<unsigned>(tx.retryCount),
+                        static_cast<unsigned>(
+                            TxState::MAX_RETRIES_PER_FRAME)
                     );
                 }
 
@@ -1373,6 +1412,9 @@ protected:
                     tx.waitingAckFor =
                         -1;
 
+                    tx.retryCount =
+                        0;
+
                     ++tx.index;
                 }
 
@@ -1400,6 +1442,17 @@ protected:
             {
                 return true;
             }
+
+            /*
+             * Ogni frame schema valido rinnova il timeout globale
+             * dell'handshake. Con lo schema paginato il timeout deve
+             * misurare l'inattivita reale, non il tempo totale
+             * trascorso dalla richiesta iniziale.
+             */
+            parent
+                ->session
+                .helloTime =
+                    now;
 
             const int part =
                 document["schema_part"];
@@ -1661,18 +1714,67 @@ protected:
                         "schema"
                     ].as<JsonArray>();
 
-                parent->onSchemaReceived(
-                    schemaArray
-                );
+                const uint16_t pageIndex =
+                    schemaDocument[
+                        "schema_page"
+                    ] | 0U;
 
+                const uint16_t pageCount =
+                    schemaDocument[
+                        "schema_pages"
+                    ] | 1U;
+
+                const size_t totalItems =
+                    schemaDocument[
+                        "schema_items"
+                    ] | schemaArray.size();
+
+                if (
+                    schemaArray.isNull() ||
+                    pageCount == 0U ||
+                    pageIndex >= pageCount
+                )
+                {
+                    LOG_WF(
+                        "BRIDGE::SCHEMA",
+                        "Pagina schema non valida: page=%u pages=%u",
+                        static_cast<unsigned>(pageIndex),
+                        static_cast<unsigned>(pageCount)
+                    );
+
+                    rx.reset();
+                    return true;
+                }
+
+                const bool schemaComplete =
+                    parent->onSchemaPageReceived(
+                        schemaArray,
+                        pageIndex,
+                        pageCount,
+                        totalItems
+                    );
+
+                /*
+                 * La pagina e stata ricevuta e consegnata al derived
+                 * bridge. Mantiene viva la sessione mentre il master
+                 * prepara e avvia la pagina successiva.
+                 */
                 parent
                     ->session
-                    .schemaReceived =
-                        true;
+                    .helloTime =
+                        now;
 
-                parent->setState(
-                    BridgeState::ALIGNING
-                );
+                if (schemaComplete)
+                {
+                    parent
+                        ->session
+                        .schemaReceived =
+                            true;
+
+                    parent->setState(
+                        BridgeState::ALIGNING
+                    );
+                }
 
                 rx.reset();
             }
@@ -2032,6 +2134,50 @@ protected:
         (void)schemaArray;
     }
 
+    // ========================================================
+    // PAGED SCHEMA CALLBACK
+    //
+    // Il comportamento storico resta valido per uno schema a
+    // pagina singola. Per schemi multipagina, SlaveBridge deve
+    // accumulare le definizioni in un modello temporaneo e
+    // restituire true soltanto dopo il commit dell'ultima pagina.
+    // ========================================================
+
+    virtual bool onSchemaPageReceived(
+        const JsonArray& schemaArray,
+        uint16_t pageIndex,
+        uint16_t pageCount,
+        size_t totalItems)
+    {
+        (void)totalItems;
+
+        if (
+            pageIndex != 0U ||
+            pageCount != 1U
+        )
+        {
+            LOG_EF(
+                "BRIDGE::SCHEMA",
+                "Schema multipagina non gestito dal derived bridge: "
+                "page=%u pages=%u",
+                static_cast<unsigned>(pageIndex),
+                static_cast<unsigned>(pageCount)
+            );
+
+            return false;
+        }
+
+        onSchemaReceived(
+            schemaArray
+        );
+
+        return true;
+    }
+
+    virtual void onSchemaTransportCompleted()
+    {
+    }
+
     virtual void onAligned()
     {
     }
@@ -2162,13 +2308,17 @@ protected:
                             BridgeState::ALIGNING
                         );
                     }
-                    else if (!schema.isRxActive() &&
-                            now - session.helloTime >
-                                HELLO_TIMEOUT)
+                    else if (
+                        !schema.isRxActive() &&
+                        static_cast<unsigned long>(
+                            now - session.helloTime
+                        ) >=
+                            HELLO_TIMEOUT
+                    )
                     {
                         LOG_IF(
                             "BRIDGE",
-                            "Timeout schema -> retry"
+                            "Timeout schema per inattivita -> retry"
                         );
 
                         session.helloSent =
@@ -2364,6 +2514,8 @@ protected:
                             "-> restart handshake"
                         );
 
+                        ack.reset();
+
                         session.schemaReceived =
                             false;
 
@@ -2382,6 +2534,8 @@ protected:
                         "MASTER: peer offline "
                         "-> restart handshake"
                     );
+
+                    ack.reset();
 
                     session.schemaRequested =
                         false;
@@ -2788,13 +2942,108 @@ inline bool BridgeProtocol::handleIncoming(
     DMBridge* parent)
 {
     if (!parent)
-        return false;
-
-    if (!protocol.parseJSON(
-            document,
-            registry))
     {
         return false;
+    }
+
+    // ========================================================
+    // TRANSPORT ACK
+    //
+    // Il documento e gia stato validato e deserializzato da
+    // processIncoming(). L'ACK conferma la ricezione del payload,
+    // non la modifica effettiva di una variabile AEE.
+    // ========================================================
+
+    if (document.containsKey("seq"))
+    {
+        const uint32_t sequence =
+            document["seq"];
+
+        StaticJsonDocument<64>
+            ackDocument;
+
+        ackDocument["ack"] =
+            sequence;
+
+        char ackBuffer[64];
+
+        const size_t ackLength =
+            serializeJson(
+                ackDocument,
+                ackBuffer,
+                sizeof(ackBuffer)
+            );
+
+        if (ackLength == 0U ||
+            ackLength >= sizeof(ackBuffer))
+        {
+            LOG_EF(
+                "BRIDGE::AEE::RX",
+                "Serializzazione ACK fallita: seq=%lu",
+                static_cast<unsigned long>(sequence)
+            );
+            return false;
+        }
+
+        ackBuffer[ackLength] =
+            '\0';
+
+        String ackPayload;
+
+        if (!ackPayload.reserve(
+                ackLength + 1U))
+        {
+            LOG_EF(
+                "BRIDGE::AEE::RX",
+                "Allocazione ACK fallita: seq=%lu bytes=%u",
+                static_cast<unsigned long>(sequence),
+                static_cast<unsigned>(ackLength + 1U)
+            );
+            return false;
+        }
+
+        ackPayload =
+            ackBuffer;
+
+        const bool ackSent =
+            transport.send(
+                ackPayload
+            );
+
+        LOG_IF(
+            "BRIDGE::AEE::RX",
+            "ACK TX: seq=%lu sent=%u",
+            static_cast<unsigned long>(sequence),
+            ackSent ? 1U : 0U
+        );
+
+        if (!ackSent)
+        {
+            return false;
+        }
+    }
+
+    // ========================================================
+    // APPLY AEE PAYLOAD
+    // ========================================================
+
+    const bool applied =
+        protocol.parseJSON(
+            document,
+            registry
+        );
+
+    if (!applied)
+    {
+        const uint32_t sequence =
+            document["seq"] | 0U;
+
+        LOG_WF(
+            "BRIDGE::AEE::RX",
+            "Payload ricevuto e confermato ma non applicato: seq=%lu",
+            static_cast<unsigned long>(sequence)
+        );
+        return true;
     }
 
     const unsigned long now =
@@ -2819,78 +3068,15 @@ inline bool BridgeProtocol::handleIncoming(
                 );
             }
 
-            variable->lastChange = 0;
+            variable->lastChange =
+                0;
         }
     );
 
-    /*
-    i aggiornamenti ricevuti sono stati consumati
-     * dalle callback applicative.
-     */
     registry.clearAllChanged();
-
-    if (!document.containsKey("seq"))
-        return true;
-
-    const uint32_t sequence =
-        document["seq"];
-
-    StaticJsonDocument<64> ackDocument;
-    ackDocument["ack"] = sequence;
-
-    char buffer[64];
-
-    const size_t length =
-        serializeJson(
-            ackDocument,
-            buffer,
-            sizeof(buffer)
-        );
-
-    if (length == 0 ||
-        length >= sizeof(buffer))
-    {
-        LOG_EF(
-            "BRIDGE::AEE::RX",
-            "Serializzazione ACK fallita: seq=%lu",
-            static_cast<unsigned long>(
-                sequence
-            )
-        );
-
-        return false;
-    }
-
-    buffer[length] = '\0';
-
-    String output;
-
-    if (!output.reserve(length + 1U))
-    {
-        LOG_EF(
-            "BRIDGE::AEE::RX",
-            "Allocazione ACK fallita: "
-            "seq=%lu bytes=%u",
-            static_cast<unsigned long>(
-                sequence
-            ),
-            static_cast<unsigned>(
-                length + 1U
-            )
-        );
-
-        return false;
-    }
-
-    output = buffer;
-
-    transport.send(
-        output
-    );
 
     return true;
 }
-
 
 // ============================================================
 // MASTER BRIDGE
@@ -2900,64 +3086,54 @@ class DMMasterBridge
     : public DMBridge
 {
 private:
-    // ========================================================
-    // CONSTANTS
-    // ========================================================
-
     static constexpr unsigned long
         SCHEMA_CACHE_TIME =
             10000UL;
 
     static constexpr unsigned long
         SCHEMA_TX_TIMEOUT =
-            5000UL;
+            12000UL;
 
-    /*
-     * Deve essere coerente con:
-     *
-     *     SchemaMultiframe::RxState::buffer[8192]
-     *
-     * Viene lasciato un byte disponibile per il terminatore.
-     */
     static constexpr size_t
-        MAX_SCHEMA_PAYLOAD_SIZE =
-            8191;
+        SCHEMA_PAGE_DOCUMENT_CAPACITY =
+            4096U;
 
-    /*
-     * Capacità del documento usato per costruire lo schema.
-     *
-     * Il registry Knob può contenere molte più variabili rispetto
-     * al registry AEE statico.
-     */
     static constexpr size_t
-        SCHEMA_DOCUMENT_CAPACITY =
-            8192;
+        MAX_SCHEMA_PAGE_PAYLOAD_SIZE =
+            3072U;
 
-    // ========================================================
-    // SCHEMA CACHE
-    // ========================================================
+    static constexpr size_t
+        FULL_SCHEMA_DOCUMENT_CAPACITY =
+            32768U;
 
     struct SchemaCache
     {
-        String payload;
+        std::vector<String> pages;
+
+        size_t totalItems =
+            0;
+
+        size_t totalBytes =
+            0;
+
+        size_t currentPage =
+            0;
 
         unsigned long lastBuild =
             0;
 
         void clear()
         {
-            payload =
-                "";
-
-            lastBuild =
-                0;
+            pages.clear();
+            totalItems = 0;
+            totalBytes = 0;
+            currentPage = 0;
+            lastBuild = 0;
         }
 
         bool empty() const
         {
-            return
-                payload.length() ==
-                0;
+            return pages.empty();
         }
 
         bool expired(
@@ -2968,37 +3144,30 @@ private:
                 empty() ||
                 static_cast<unsigned long>(
                     now - lastBuild
-                ) >
-                timeout;
+                ) > timeout;
+        }
+
+        bool hasCurrentPage() const
+        {
+            return
+                currentPage <
+                pages.size();
+        }
+
+        const String& currentPayload() const
+        {
+            return pages[currentPage];
         }
     };
 
     SchemaCache schemaCache;
 
 public:
-    // ========================================================
-    // CONSTRUCTOR
-    // ========================================================
-
     DMMasterBridge() =
         default;
 
-    // ========================================================
-    // DESTRUCTOR
-    // ========================================================
-
     ~DMMasterBridge() override =
         default;
-
-    // ========================================================
-    // INVALIDATE SCHEMA CACHE
-    //
-    // Deve essere chiamata quando il registry viene ricostruito
-    // dopo l'inizializzazione del bridge.
-    //
-    // Nel setup normale non è necessaria, perché il registry
-    // viene costruito prima di BridgeEngine::init().
-    // ========================================================
 
     void invalidateSchemaCache()
     {
@@ -3006,13 +3175,9 @@ public:
 
         LOG_DF(
             "MASTER::AEE",
-            "Schema cache invalidata"
+            "Schema cache paginata invalidata"
         );
     }
-
-    // ========================================================
-    // HAS CACHED SCHEMA
-    // ========================================================
 
     bool hasCachedSchema() const
     {
@@ -3020,29 +3185,105 @@ public:
             !schemaCache.empty();
     }
 
-    // ========================================================
-    // CACHED SCHEMA SIZE
-    // ========================================================
-
     size_t getCachedSchemaSize() const
     {
         return
-            schemaCache.payload.length();
+            schemaCache.totalBytes;
+    }
+
+    size_t getCachedSchemaPageCount() const
+    {
+        return
+            schemaCache.pages.size();
     }
 
 protected:
-    // ========================================================
-    // BUILD SCHEMA CACHE
-    //
-    // Lo schema viene serializzato in un buffer char
-    // dimensionato tramite measureJson().
-    //
-    // Si evita il writer ArduinoJson diretto verso String,
-    // che sulla piattaforma ha causato StoreProhibited.
-    // ========================================================
-
-    bool buildSchemaCache(unsigned long now)
+    static bool serializePage(
+        JsonDocument& document,
+        String& output)
     {
+        if (document.overflowed())
+        {
+            return false;
+        }
+
+        const size_t requiredLength =
+            measureJson(
+                document
+            );
+
+        if (
+            requiredLength == 0U ||
+            requiredLength >
+                MAX_SCHEMA_PAGE_PAYLOAD_SIZE
+        )
+        {
+            return false;
+        }
+
+        const size_t bufferSize =
+            requiredLength + 1U;
+
+        char* buffer =
+            new char[bufferSize];
+
+        if (!buffer)
+        {
+            return false;
+        }
+
+        const size_t serializedLength =
+            serializeJson(
+                document,
+                buffer,
+                bufferSize
+            );
+
+        if (
+            serializedLength !=
+                requiredLength ||
+            serializedLength >=
+                bufferSize
+        )
+        {
+            delete[] buffer;
+            return false;
+        }
+
+        buffer[serializedLength] =
+            '\0';
+
+        String result;
+
+        if (!result.reserve(
+                serializedLength + 1U))
+        {
+            delete[] buffer;
+            return false;
+        }
+
+        result = buffer;
+        delete[] buffer;
+
+        if (
+            result.length() !=
+            serializedLength
+        )
+        {
+            return false;
+        }
+
+        output =
+            std::move(result);
+
+        return true;
+    }
+
+    bool buildSchemaCache(
+        unsigned long now)
+    {
+        schemaCache.clear();
+
         if (!reg)
         {
             LOG_EF(
@@ -3056,7 +3297,7 @@ protected:
         const size_t registrySize =
             reg->size();
 
-        if (registrySize == 0)
+        if (registrySize == 0U)
         {
             LOG_EF(
                 "MASTER::AEE",
@@ -3066,18 +3307,20 @@ protected:
             return false;
         }
 
-        DynamicJsonDocument document(
-            SCHEMA_DOCUMENT_CAPACITY
+        DynamicJsonDocument fullDocument(
+            FULL_SCHEMA_DOCUMENT_CAPACITY
         );
 
-        JsonArray schemaArray =
-            document.createNestedArray("schema");
+        JsonArray fullArray =
+            fullDocument.createNestedArray(
+                "schema"
+            );
 
-        if (schemaArray.isNull())
+        if (fullArray.isNull())
         {
             LOG_EF(
                 "MASTER::AEE",
-                "Creazione array schema fallita"
+                "Creazione schema completo fallita"
             );
 
             return false;
@@ -3085,159 +3328,277 @@ protected:
 
         aee.ExportSchema(
             *reg,
-            schemaArray
+            fullArray
         );
 
-        if (document.overflowed())
+        if (
+            fullDocument.overflowed() ||
+            fullArray.size() !=
+                registrySize
+        )
         {
             LOG_EF(
                 "MASTER::AEE",
-                "Schema JSON overflow: "
-                "vars=%u capacity=%u",
+                "Export schema completo fallito: vars=%u items=%u capacity=%u",
                 static_cast<unsigned>(registrySize),
-                static_cast<unsigned>(
-                    SCHEMA_DOCUMENT_CAPACITY
+                static_cast<unsigned>(fullArray.size()),
+                static_cast<unsigned>(FULL_SCHEMA_DOCUMENT_CAPACITY)
+            );
+
+            return false;
+        }
+
+        schemaCache.totalItems =
+            fullArray.size();
+
+        std::vector<size_t> pageStarts;
+        std::vector<size_t> pageCounts;
+
+        size_t cursor =
+            0U;
+
+        while (cursor < fullArray.size())
+        {
+            const size_t pageStart =
+                cursor;
+
+            size_t accepted =
+                0U;
+
+            while (cursor < fullArray.size())
+            {
+                DynamicJsonDocument probe(
+                    SCHEMA_PAGE_DOCUMENT_CAPACITY
+                );
+
+                probe["schema_page"] =
+                    0U;
+
+                probe["schema_pages"] =
+                    1U;
+
+                probe["schema_items"] =
+                    schemaCache.totalItems;
+
+                JsonArray probeArray =
+                    probe.createNestedArray(
+                        "schema"
+                    );
+
+                for (
+                    size_t index = 0U;
+                    index < accepted;
+                    ++index)
+                {
+                    probeArray.add(
+                        fullArray[
+                            pageStart + index
+                        ]
+                    );
+                }
+
+                probeArray.add(
+                    fullArray[cursor]
+                );
+
+                const size_t pageBytes =
+                    measureJson(
+                        probe
+                    );
+
+                if (
+                    probe.overflowed() ||
+                    pageBytes >
+                        MAX_SCHEMA_PAGE_PAYLOAD_SIZE
                 )
+                {
+                    if (accepted == 0U)
+                    {
+                        LOG_EF(
+                            "MASTER::AEE",
+                            "Singola definizione troppo grande: index=%u bytes=%u",
+                            static_cast<unsigned>(cursor),
+                            static_cast<unsigned>(pageBytes)
+                        );
+
+                        schemaCache.clear();
+                        return false;
+                    }
+
+                    break;
+                }
+
+                ++accepted;
+                ++cursor;
+            }
+
+            pageStarts.push_back(
+                pageStart
             );
 
-            schemaCache.clear();
-            return false;
+            pageCounts.push_back(
+                accepted
+            );
         }
 
-        const size_t requiredLength =
-            measureJson(document);
+        const size_t pageCount =
+            pageStarts.size();
 
-        if (requiredLength == 0U ||
-            requiredLength >
-                MAX_SCHEMA_PAYLOAD_SIZE)
+        if (pageCount == 0U)
         {
-            LOG_EF(
-                "MASTER::AEE",
-                "Dimensione schema non valida: "
-                "bytes=%u maximum=%u vars=%u",
-                static_cast<unsigned>(requiredLength),
-                static_cast<unsigned>(
-                    MAX_SCHEMA_PAYLOAD_SIZE
-                ),
-                static_cast<unsigned>(registrySize)
-            );
-
-            schemaCache.clear();
             return false;
         }
 
-        const size_t bufferSize =
-            requiredLength + 1U;
+        schemaCache.pages.reserve(
+            pageCount
+        );
 
-        char* serializationBuffer =
-            new char[bufferSize];
-
-        if (!serializationBuffer)
+        for (
+            size_t pageIndex = 0U;
+            pageIndex < pageCount;
+            ++pageIndex)
         {
-            LOG_EF(
-                "MASTER::AEE",
-                "Allocazione buffer schema fallita: bytes=%u",
-                static_cast<unsigned>(bufferSize)
+            DynamicJsonDocument pageDocument(
+                SCHEMA_PAGE_DOCUMENT_CAPACITY
             );
 
-            schemaCache.clear();
-            return false;
+            pageDocument["schema_page"] =
+                pageIndex;
+
+            pageDocument["schema_pages"] =
+                pageCount;
+
+            pageDocument["schema_items"] =
+                schemaCache.totalItems;
+
+            JsonArray pageArray =
+                pageDocument.createNestedArray(
+                    "schema"
+                );
+
+            const size_t start =
+                pageStarts[pageIndex];
+
+            const size_t count =
+                pageCounts[pageIndex];
+
+            for (
+                size_t offset = 0U;
+                offset < count;
+                ++offset)
+            {
+                pageArray.add(
+                    fullArray[
+                        start + offset
+                    ]
+                );
+            }
+
+            String payload;
+
+            if (!serializePage(
+                    pageDocument,
+                    payload))
+            {
+                LOG_EF(
+                    "MASTER::AEE",
+                    "Serializzazione pagina fallita: page=%u",
+                    static_cast<unsigned>(pageIndex)
+                );
+
+                schemaCache.clear();
+                return false;
+            }
+
+            schemaCache.totalBytes +=
+                payload.length();
+
+            schemaCache.pages.push_back(
+                std::move(payload)
+            );
         }
 
-        serializationBuffer[0] = '\0';
-
-        const size_t serializedLength =
-            serializeJson(
-                document,
-                serializationBuffer,
-                bufferSize
-            );
-
-        if (serializedLength == 0U ||
-            serializedLength != requiredLength ||
-            serializedLength >= bufferSize)
-        {
-            LOG_EF(
-                "MASTER::AEE",
-                "Serializzazione schema fallita: "
-                "serialized=%u required=%u",
-                static_cast<unsigned>(serializedLength),
-                static_cast<unsigned>(requiredLength)
-            );
-
-            delete[] serializationBuffer;
-            schemaCache.clear();
-
-            return false;
-        }
-
-        serializationBuffer[serializedLength] =
-            '\0';
-
-        String newPayload;
-
-        if (!newPayload.reserve(
-                serializedLength + 1U))
-        {
-            LOG_EF(
-                "MASTER::AEE",
-                "Allocazione String schema fallita: bytes=%u",
-                static_cast<unsigned>(
-                    serializedLength + 1U
-                )
-            );
-
-            delete[] serializationBuffer;
-            schemaCache.clear();
-
-            return false;
-        }
-
-        newPayload = serializationBuffer;
-
-        delete[] serializationBuffer;
-        serializationBuffer = nullptr;
-
-        if (newPayload.length() !=
-            serializedLength)
-        {
-            LOG_EF(
-                "MASTER::AEE",
-                "Lunghezza schema incoerente: "
-                "serialized=%u string=%u",
-                static_cast<unsigned>(serializedLength),
-                static_cast<unsigned>(
-                    newPayload.length()
-                )
-            );
-
-            schemaCache.clear();
-            return false;
-        }
-
-        schemaCache.payload =
-            std::move(newPayload);
+        schemaCache.currentPage =
+            0U;
 
         schemaCache.lastBuild =
             now;
 
         LOG_IF(
             "MASTER::AEE",
-            "Schema ricostruito: "
-            "vars=%u items=%u bytes=%u",
-            static_cast<unsigned>(registrySize),
-            static_cast<unsigned>(schemaArray.size()),
-            static_cast<unsigned>(
-                schemaCache.payload.length()
-            )
+            "Schema paginato ricostruito: vars=%u pages=%u bytes=%u",
+            static_cast<unsigned>(schemaCache.totalItems),
+            static_cast<unsigned>(schemaCache.pages.size()),
+            static_cast<unsigned>(schemaCache.totalBytes)
         );
 
         return true;
     }
 
-    // ========================================================
-    // SCHEMA REQUEST
-    // ========================================================
+    bool startCurrentSchemaPage()
+    {
+        if (!schemaCache.hasCurrentPage())
+        {
+            return false;
+        }
+
+        schema.startTx(
+            schemaCache.currentPayload()
+        );
+
+        if (!schema.isTxActive())
+        {
+            LOG_EF(
+                "MASTER::AEE",
+                "Avvio pagina schema fallito: page=%u",
+                static_cast<unsigned>(schemaCache.currentPage)
+            );
+
+            return false;
+        }
+
+        LOG_IF(
+            "MASTER::AEE",
+            "Pagina schema TX avviata: page=%u/%u bytes=%u",
+            static_cast<unsigned>(schemaCache.currentPage + 1U),
+            static_cast<unsigned>(schemaCache.pages.size()),
+            static_cast<unsigned>(schemaCache.currentPayload().length())
+        );
+
+        return true;
+    }
+
+    void onSchemaTransportCompleted() override
+    {
+        if (
+            schemaCache.empty() ||
+            !session.schemaRequested
+        )
+        {
+            return;
+        }
+
+        ++schemaCache.currentPage;
+
+        if (schemaCache.hasCurrentPage())
+        {
+            if (!startCurrentSchemaPage())
+            {
+                schemaCache.clear();
+                session.schemaRequested = false;
+                session.resetSnapshot();
+            }
+
+            return;
+        }
+
+        LOG_IF(
+            "MASTER::AEE",
+            "Schema paginato TX completato: pages=%u vars=%u",
+            static_cast<unsigned>(schemaCache.pages.size()),
+            static_cast<unsigned>(schemaCache.totalItems)
+        );
+    }
 
     void onSchemaRequest() override
     {
@@ -3254,10 +3615,7 @@ protected:
             return;
         }
 
-        const size_t registrySize =
-            reg->size();
-
-        if (registrySize == 0)
+        if (reg->size() == 0U)
         {
             LOG_EF(
                 "MASTER::AEE",
@@ -3267,11 +3625,7 @@ protected:
             return;
         }
 
-        // ----------------------------------------------------
-        // SCHEMA TX GIÀ ATTIVA
-        // ----------------------------------------------------
-
-        if (schema.tx.active)
+        if (schema.isTxActive())
         {
             const unsigned long elapsed =
                 static_cast<unsigned long>(
@@ -3282,8 +3636,7 @@ protected:
             {
                 LOG_IF(
                     "MASTER::AEE",
-                    "Schema request durante TX attiva "
-                    "(%lu ms) -> ignorata",
+                    "Schema request durante TX attiva (%lu ms) -> ignorata",
                     elapsed
                 );
 
@@ -3292,17 +3645,12 @@ protected:
 
             LOG_WF(
                 "MASTER::AEE",
-                "Schema TX timeout (%lu ms) "
-                "-> abort e restart",
+                "Schema TX timeout (%lu ms) -> abort e restart",
                 elapsed
             );
 
             schema.abortTx();
         }
-
-        // ----------------------------------------------------
-        // CACHE BUILD
-        // ----------------------------------------------------
 
         if (schemaCache.expired(
                 now,
@@ -3312,70 +3660,34 @@ protected:
             {
                 LOG_EF(
                     "MASTER::AEE",
-                    "Schema request annullata: build fallita"
+                    "Schema request annullata: build paginata fallita"
                 );
 
                 return;
             }
-        }
-        else
-        {
-            LOG_IF(
-                "MASTER::AEE",
-                "Schema inviato dalla cache: "
-                "vars=%u bytes=%u age=%lu",
-                static_cast<unsigned>(registrySize),
-                static_cast<unsigned>(
-                    schemaCache.payload.length()
-                ),
-                static_cast<unsigned long>(
-                    now - schemaCache.lastBuild
-                )
-            );
         }
 
         if (schemaCache.empty())
         {
             LOG_EF(
                 "MASTER::AEE",
-                "Schema request annullata: cache vuota"
+                "Schema request annullata: cache paginata vuota"
             );
 
             return;
         }
 
-        /*
-        * Ogni richiesta valida riapre la fase di allineamento.
-        * Lo snapshot verrà preparato dopo il completamento
-        * della trasmissione multiframe.
-        */
+        schemaCache.currentPage =
+            0U;
+
         session.armInitialSnapshot();
 
-        schema.startTx(
-            schemaCache.payload
-        );
-
-        if (!schema.isTxActive())
+        if (!startCurrentSchemaPage())
         {
             session.schemaRequested = false;
             session.resetSnapshot();
-
-            LOG_EF(
-                "MASTER::AEE",
-                "Avvio schema TX fallito"
-            );
-
             return;
         }
-
-        LOG_IF(
-            "MASTER::AEE",
-            "Schema TX avviata: vars=%u bytes=%u",
-            static_cast<unsigned>(registrySize),
-            static_cast<unsigned>(
-                schemaCache.payload.length()
-            )
-        );
     }
 };
 

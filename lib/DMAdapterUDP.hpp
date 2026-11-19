@@ -10,8 +10,8 @@
    Nome:            Andrea Lando
    Contatto:        mail@domo-manager.it
 
-   Versione modulo: 1.1.0
-   Ultima modifica: 2026-11-08
+   Versione modulo: 1.1.2
+   Ultima modifica: 2026-11-17
 
    Note:
                     - Backend UDP astratto tramite DMEthernetUDP.
@@ -1021,6 +1021,8 @@ protected:
     void rawLoop(
         unsigned long now) override
     {
+        (void)now;
+
         if (!started)
         {
             return;
@@ -1034,32 +1036,18 @@ protected:
             return;
         }
 
-        if (
-            dynamicRemote &&
-            remoteLearned &&
-            online &&
-            lastRx != 0 &&
-            static_cast<unsigned long>(
-                now -
-                lastRx
-            ) >
-            timeoutMs
-        )
-        {
-            LOG_IF(
-                "UDP",
-                "Dynamic endpoint released after timeout: "
-                "%s:%u",
-                remoteIP
-                    .toString()
-                    .c_str(),
-                static_cast<unsigned>(
-                    remotePort
-                )
-            );
-
-            clearRemoteEndpoint();
-        }
+        /*
+         * Il timeout RX di TransportBase determina soltanto
+         * lo stato online/offline del trasporto.
+         *
+         * Non deve invalidare l'endpoint UDP dinamico appreso:
+         * un peer può trasmettere con un intervallo superiore a
+         * timeoutMs e l'indirizzo resta comunque valido.
+         *
+         * L'endpoint dinamico viene azzerato esclusivamente da
+         * stop() o setSocketContext(), cioè quando il socket o
+         * la relativa sessione vengono realmente reinizializzati.
+         */
     }
 };
 

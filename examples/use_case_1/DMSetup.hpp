@@ -856,14 +856,26 @@ static const char* AUTOMATION_JSON = R"json(
 }
 )json";
 
-// ************ LOADER *******************************
-DomoManagerConfig makeDomoConfig() {
-    DomoManagerConfig cfg;   // usa tutti i default della struct
-
-    cfg.hmi.enabled = true;   // opzionale, è già default
-    cfg.hmi.port = 502;        // default
-    cfg.hmi.pollingMs = 250;   // default
-    cfg.hmi.maxClients = 2;
+// ============================================================================
+// DOMOMANAGER CONFIGURATION LOADER
+//
+// La configurazione non viene costruita come oggetto globale.
+//
+// DomoManagerConfig contiene std::vector e Arduino String. La costruzione e
+// la copia durante do_global_ctors avvenivano prima dell'ingresso nel runtime
+// Arduino e causavano, su ESP32-S3, corruzione dell'heap e stack smashing.
+//
+// Chiamare ConfigureDomoManager() esclusivamente da setup(), passando una
+// configurazione costruita a runtime.
+// ============================================================================
+inline void ConfigureDomoManager(
+    DomoManagerConfig& cfg)
+{
+    // --- HMI ---
+    cfg.hmi.enabled = true;
+    cfg.hmi.port = 502;
+    cfg.hmi.pollingMs = 250;
+    cfg.hmi.maxClients = 1;
 
     // --- Watchdog ---
     cfg.watchdog = wdConfig;
@@ -880,13 +892,9 @@ DomoManagerConfig makeDomoConfig() {
     // --- Automation JSON ---
     cfg.automation.json = AUTOMATION_JSON;
 
-    // Configura gli I/O locali.
+    // --- Local I/O ---
     cfg.localIO = mainLocalIOConfig;
- 
-    return cfg;
 }
-
-static DomoManagerConfig domoConfig = makeDomoConfig();
 
 // ------------------------------------------------------------
 // CONFIGURAZIONE FRONTEND

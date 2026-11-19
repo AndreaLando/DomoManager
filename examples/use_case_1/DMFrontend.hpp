@@ -3138,6 +3138,73 @@ private:
                     source.aee;
 
                 // ========================================================
+                // COMPOSABLE INTROSPECTION FILTER
+                //
+                // I channel con AEE statica non vengono filtrati.
+                // Il channel dinamico AEE-KNOB applica una policy
+                // componibile senza estendere FrontendConfig::Bridge.
+                // ========================================================
+
+                const bool dynamicIntrospectionModel =
+                    source.aee.vars == nullptr ||
+                    source.aee.count == 0;
+
+                const bool knobChannel =
+                    dynamicIntrospectionModel &&
+                    source.name != nullptr &&
+                    strcmp(
+                        source.name,
+                        "AEE-KNOB"
+                    ) == 0;
+
+                destination.filterIntrospection =
+                    knobChannel;
+
+                if (knobChannel)
+                {
+                    using EntityKind =
+                        DomoIntrospection::EntityKind;
+
+                    using IOType =
+                        DomoIntrospection::IOType;
+
+                    using EntityFilter =
+                        AEEEngine::EntityFilter;
+
+                    destination
+                        .introspectionFilter
+                        .excludedKinds =
+                            EntityFilter::kindMask(
+                                EntityKind::BUTTON
+                            ) |
+                            EntityFilter::kindMask(
+                                EntityKind::SWITCH
+                            );
+
+                    destination
+                        .introspectionFilter
+                        .excludedIOTypes =
+                            EntityFilter::ioTypeMask(
+                                IOType::DIGITAL_INPUT
+                            );
+
+                    destination
+                        .introspectionFilter
+                        .excludeRouteTriggers =
+                            true;
+
+                    destination
+                        .introspectionFilter
+                        .excludeToggleSources =
+                            true;
+
+                    destination
+                        .introspectionFilter
+                        .excludeSplitMains =
+                            true;
+                }
+
+                // ========================================================
                 // MODEL DEDUCTION
                 //
                 // Config non contiene ModelSource.

@@ -578,6 +578,74 @@ public:
         }
     };
 
+
+    // ========================================================================
+    // ENTITY FILTER
+    // ========================================================================
+    //
+    // Filtro cumulativo per la selezione delle entity.
+    //
+    // I flag espliciti evitano di usare EntityGroup::ROOT e IOType::UNKNOWN
+    // come wildcard implicite: entrambi restano valori filtrabili reali.
+    //
+    // ========================================================================
+    struct EntityFilter
+    {
+        bool filterGroup = false;
+        EntityGroup group = EntityGroup::ROOT;
+
+        bool filterIOType = false;
+        IOType ioType = IOType::UNKNOWN;
+
+        bool matches(
+            const Entity& entity) const
+        {
+            if (filterGroup &&
+                entity.group != group)
+            {
+                return false;
+            }
+
+            if (filterIOType &&
+                entity.ioType != ioType)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        static EntityFilter byGroup(
+            EntityGroup value)
+        {
+            EntityFilter filter;
+            filter.filterGroup = true;
+            filter.group = value;
+            return filter;
+        }
+
+        static EntityFilter byIOType(
+            IOType value)
+        {
+            EntityFilter filter;
+            filter.filterIOType = true;
+            filter.ioType = value;
+            return filter;
+        }
+
+        static EntityFilter byGroupAndIOType(
+            EntityGroup groupValue,
+            IOType ioTypeValue)
+        {
+            EntityFilter filter;
+            filter.filterGroup = true;
+            filter.group = groupValue;
+            filter.filterIOType = true;
+            filter.ioType = ioTypeValue;
+            return filter;
+        }
+    };
+
     // ========================================================================
     // RELATION
     // ========================================================================
@@ -1177,7 +1245,66 @@ public:
     void forEachEntity(F fn) const
     {
         for (const auto& entity : _entities)
+        {
             fn(entity);
+        }
+    }
+
+
+    template<typename F>
+    void forEachEntity(
+        const EntityFilter& filter,
+        F fn) const
+    {
+        for (const auto& entity : _entities)
+        {
+            if (!filter.matches(entity))
+            {
+                continue;
+            }
+
+            fn(entity);
+        }
+    }
+
+
+    template<typename F>
+    void forEachEntity(
+        EntityGroup group,
+        F fn) const
+    {
+        forEachEntity(
+            EntityFilter::byGroup(group),
+            fn
+        );
+    }
+
+
+    template<typename F>
+    void forEachEntity(
+        IOType ioType,
+        F fn) const
+    {
+        forEachEntity(
+            EntityFilter::byIOType(ioType),
+            fn
+        );
+    }
+
+
+    template<typename F>
+    void forEachEntity(
+        EntityGroup group,
+        IOType ioType,
+        F fn) const
+    {
+        forEachEntity(
+            EntityFilter::byGroupAndIOType(
+                group,
+                ioType
+            ),
+            fn
+        );
     }
 
 
@@ -1185,7 +1312,9 @@ public:
     void forEachRelation(F fn) const
     {
         for (const auto& relation : _relations)
+        {
             fn(relation);
+        }
     }
 
 
@@ -1193,7 +1322,9 @@ public:
     void forEachAutomation(F fn) const
     {
         for (const auto& automation : _automations)
+        {
             fn(automation);
+        }
     }
 
 

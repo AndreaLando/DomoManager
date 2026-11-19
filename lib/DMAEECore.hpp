@@ -241,9 +241,69 @@ public:
 // ============================================================
 
 class AEERegistry {
+public:
+    struct SchemaMetadata
+    {
+        static constexpr size_t NAME_CAPACITY = 24;
+        static constexpr size_t LABEL_CAPACITY = 64;
+        static constexpr size_t KIND_CAPACITY = 20;
+        static constexpr size_t GROUP_CAPACITY = 16;
+        static constexpr size_t SECTION_CAPACITY = 24;
+        static constexpr size_t ZONE_CAPACITY = 40;
+        static constexpr size_t UNIT_CAPACITY = 16;
+        static constexpr size_t DEVICE_CLASS_CAPACITY = 24;
+
+        char name[NAME_CAPACITY] = {};
+        char label[LABEL_CAPACITY] = {};
+        char kind[KIND_CAPACITY] = {};
+        char group[GROUP_CAPACITY] = {};
+        char section[SECTION_CAPACITY] = {};
+        char zone[ZONE_CAPACITY] = {};
+        char unit[UNIT_CAPACITY] = {};
+        char deviceClass[DEVICE_CLASS_CAPACITY] = {};
+
+        bool numericRangeEnabled = false;
+        float minimum = 0.0f;
+        float maximum = 100.0f;
+        float step = 1.0f;
+        uint8_t decimals = 0;
+    };
+
 private:
     std::vector<AEEVariableBase*> vars;
     std::vector<AEEVariableBase*> changedVars;   // 🔥 nuovo
+    std::vector<SchemaMetadata> schemaMetadata;
+
+    static void copySchemaText(
+        char* destination,
+        size_t capacity,
+        const char* source)
+    {
+        if (!destination || capacity == 0)
+            return;
+
+        destination[0] = '\0';
+
+        if (!source)
+            return;
+
+        const size_t sourceLength = strlen(source);
+        const size_t copyLength =
+            sourceLength < capacity - 1
+                ? sourceLength
+                : capacity - 1;
+
+        if (copyLength > 0)
+        {
+            memcpy(
+                destination,
+                source,
+                copyLength
+            );
+        }
+
+        destination[copyLength] = '\0';
+    }
 
 public:
     void add(AEEVariableBase* v)
@@ -266,6 +326,7 @@ public:
         // elimina soltanto i riferimenti.
         vars.clear();
         changedVars.clear();
+        schemaMetadata.clear();
     }
 
     void notifyChanged(AEEVariableBase* v)
@@ -333,6 +394,84 @@ public:
     
     bool hasChanges() const {
         return !changedVars.empty();
+    }
+
+    void reserveSchemaMetadata(
+        size_t count)
+    {
+        schemaMetadata.reserve(count);
+    }
+
+    bool setSchemaMetadata(
+        const char* variableName, const char* label, const char* kind,
+        const char* group, const char* section, const char* zone,
+        const char* unit, const char* deviceClass,
+        bool numericRangeEnabled = false, float minimum = 0.0f,
+        float maximum = 100.0f, float step = 1.0f, uint8_t decimals = 0)
+    {
+        if (!variableName || variableName[0] == '\0') return false;
+        SchemaMetadata* metadata = nullptr;
+        for (SchemaMetadata& current : schemaMetadata)
+        {
+            if (strcmp(current.name, variableName) == 0)
+            {
+                metadata = &current;
+                break;
+            }
+        }
+        if (!metadata)
+        {
+            schemaMetadata.emplace_back();
+            metadata = &schemaMetadata.back();
+        }
+        copySchemaText(metadata->name, sizeof(metadata->name), variableName);
+        copySchemaText(metadata->label, sizeof(metadata->label), label);
+        copySchemaText(metadata->kind, sizeof(metadata->kind), kind);
+        copySchemaText(metadata->group, sizeof(metadata->group), group);
+        copySchemaText(metadata->section, sizeof(metadata->section), section);
+        copySchemaText(metadata->zone, sizeof(metadata->zone), zone);
+        copySchemaText(metadata->unit, sizeof(metadata->unit), unit);
+        copySchemaText(metadata->deviceClass, sizeof(metadata->deviceClass), deviceClass);
+        metadata->numericRangeEnabled = numericRangeEnabled &&
+            isfinite(minimum) && isfinite(maximum) && isfinite(step) &&
+            maximum >= minimum && step > 0.0f;
+        if (metadata->numericRangeEnabled)
+        {
+            metadata->minimum = minimum;
+            metadata->maximum = maximum;
+            metadata->step = step;
+            metadata->decimals = decimals;
+        }
+        return true;
+    }
+
+    // Backward-compatible overload for existing peer applications.
+    bool setSchemaMetadata(
+        const char* variableName, const char* label, const char* kind,
+        const char* group, const char* unit, const char* deviceClass,
+        bool numericRangeEnabled = false, float minimum = 0.0f,
+        float maximum = 100.0f, float step = 1.0f, uint8_t decimals = 0)
+    {
+        return setSchemaMetadata(
+            variableName, label, kind, group, "variables", "Generali",
+            unit, deviceClass, numericRangeEnabled, minimum, maximum, step, decimals);
+    }
+
+    const SchemaMetadata* findSchemaMetadata(
+        const String& variableName) const
+    {
+        for (const SchemaMetadata& metadata : schemaMetadata)
+        {
+            if (variableName == metadata.name)
+                return &metadata;
+        }
+
+        return nullptr;
+    }
+
+    size_t schemaMetadataSize() const
+    {
+        return schemaMetadata.size();
     }
 
     size_t size() const { return vars.size(); }
@@ -1530,6 +1669,45 @@ public:
         }
     }
 
+    static void ExportSchemaMetadata(
+        const AEERegistry::SchemaMetadata* metadata,
+        JsonObject object)
+    {
+        if (!metadata)
+            return;
+
+        if (metadata->label[0] != '\0')
+            object["label"] = metadata->label;
+
+        if (metadata->kind[0] != '\0')
+            object["kind"] = metadata->kind;
+
+        if (metadata->group[0] != '\0')
+            object["grp"] = metadata->group;
+
+        if (metadata->section[0] != '\0')
+            object["section"] = metadata->section;
+
+        if (metadata->zone[0] != '\0')
+            object["zone"] = metadata->zone;
+
+        if (metadata->unit[0] != '\0')
+            object["unit"] = metadata->unit;
+
+        if (metadata->deviceClass[0] != '\0')
+            object["class"] = metadata->deviceClass;
+
+        if (metadata->numericRangeEnabled)
+        {
+            object["min"] = metadata->minimum;
+            object["max"] = metadata->maximum;
+            object["step"] = metadata->step;
+
+            if (metadata->decimals > 0)
+                object["dec"] = metadata->decimals;
+        }
+    }
+
     // ------------------------------------------------------------
     // OVERLOAD: esporta schema direttamente dal registry
     // ------------------------------------------------------------
@@ -1553,6 +1731,11 @@ public:
                 case AEEDirection::ModuleToFrontend: o["dir"] = "M2F"; break;
                 case AEEDirection::Bidirectional:    o["dir"] = "BIDIR"; break;
             }
+
+            ExportSchemaMetadata(
+                reg.findSchemaMetadata(d.name),
+                o
+            );
         });
     }
 
