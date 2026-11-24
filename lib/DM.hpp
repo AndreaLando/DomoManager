@@ -18,6 +18,7 @@
    ============================================================================ */
 
 #include <Arduino.h>
+#include <new>
 
 
 #include "DMRuntime.hpp"
@@ -43,6 +44,20 @@ public:
 class DMSplitEngineEx : public DomoManagerSplitEngine {
 public:
     static void apply(DomoManager& manager, const SplitsConfig& cfg);
+};
+
+class DMBitSplitEngineEx : public DomoManagerBitSplitEngine {
+public:
+    static bool apply(
+        DomoManager& manager,
+        const BitSplitsConfig& cfg);
+};
+class FallingEdgeResetEngineEx : public FallingEdgeResetEngine
+{
+public:
+    static bool apply(
+        DomoManager& manager,
+        const ResetsConfig& cfg);
 };
 
 class DomoConfigValidator
@@ -519,6 +534,12 @@ private:
     DeviceProfiles profiles;
     DMRuntime runtime;
 
+    // Creato esplicitamente in setup(): nessuna istanza BitSplitManager
+    // viene costruita durante l'inizializzazione statica/globale.
+    BitSplitManager* bitSplitManager = nullptr;
+    uint8_t bitSplitSource = 255;
+    FallingEdgeResetManager* fallingEdgeResetManager = nullptr;
+
     void initBuffer() {
         DefineBufferElement(deviceManager.AREA_SYSTEM_ERRORS, 0, false, "Devices in error");
         DefineBufferElement(deviceManager.AREA_SYSTEM_RUNNING_T, 0, false, "Current cycle");
@@ -904,6 +925,293 @@ public:
         instance = this;
     }
 
+    ~DomoManager()
+    {
+        delete bitSplitManager;
+        bitSplitManager = nullptr;
+
+        if (instance == this)
+            instance = nullptr;
+    }
+
+private:
+    bool createBitSplitManager()
+    {
+        if (bitSplitManager)
+            return true;
+
+        bitSplitManager =
+            new (std::nothrow) BitSplitManager();
+
+        if (!bitSplitManager)
+        {
+            LOG_EF(
+                "DomoManager",
+                "Impossibile allocare BitSplitManager"
+            );
+            return false;
+        }
+
+        return true;
+    }
+
+    bool createFallingEdgeResetManager()
+      {
+          if (fallingEdgeResetManager)
+              return true;
+          fallingEdgeResetManager = new (std::nothrow) FallingEdgeResetManager();
+          if (!fallingEdgeResetManager)
+          {
+              LOG_EF("DomoManager", "Impossibile allocare FallingEdgeResetManager");
+              return false;
+          }
+          return true;
+      }
+      bool writeBitSplitRuntimeTarget(
+        const GenericSensor::Config& target,
+        bool value)
+    {
+        const auto handle = static_cast<DMRuntimeStore::Handle>(target.value);
+        const DMRuntimeStore::Entry* entry = state.runtime.getEntry(handle);
+        if (!entry)
+            return false;
+
+        const unsigned long now = timeManager.nowMs();
+        DMRuntimeStore::WriteResult result =
+            DMRuntimeStore::WriteResult::INVALID_TYPE;
+
+        switch (entry->type)
+        {
+            case DMRuntimeStore::Type::BOOL:
+                result = state.runtime.setBool(
+                    handle, value, DMRuntimeStore::Source::INTERNAL, now);
+                break;
+
+            case DMRuntimeStore::Type::INT32:
+                result = state.runtime.setInt32(
+                    handle, value ? 1 : 0,
+                    DMRuntimeStore::Source::INTERNAL, now);
+                break;
+
+            case DMRuntimeStore::Type::FLOAT:
+                result = state.runtime.setFloat(
+                    handle, value ? 1.0f : 0.0f,
+                    DMRuntimeStore::Source::INTERNAL, now);
+                break;
+
+            default:
+                return false;
+        }
+
+        return result == DMRuntimeStore::WriteResult::CHANGED ||
+               result == DMRuntimeStore::WriteResult::UNCHANGED;
+    }
+
+    static void BitSplitBufferEventCallback(
+        const EventManager::Event& event)
+    {
+        if (!instance)
+              return;
+          if (instance->fallingEdgeResetManager)
+          {
+              instance->fallingEdgeResetManager->processEvent(
+                  event.area, event.value,
+                  [](const GenericSensor::Config& target, long value)
+                  {
+                      if (!DomoManager::instance) return;
+                      if (target.type == GenericSensor::Config::Type::BUFFER)
+                          DomoManager::instance->forceInternalEvent(target.value, value);
+                  });
+          }
+          BitSplitManager& bitSplits =
+            instance->getBitSplits();
+
+        Buffer& buffer =
+            instance->getBuffer();
+
+        const uint8_t bitSplitSource =
+            static_cast<uint8_t>(
+                instance->bitSplitSource
+            );
+
+        const size_t splitCount =
+            bitSplits.splitCount();
+
+        for (size_t splitIndex = 0;
+            splitIndex < splitCount;
+            ++splitIndex)
+        {
+            const BitSplitManager::Split* split =
+                bitSplits.getSplit(
+                    splitIndex
+                );
+
+            if (!split)
+                continue;
+
+            // ============================================================
+            // SPLIT
+            //
+            // Word sorgente -> singole aree.
+            // ============================================================
+
+            if (!split->reverse)
+            {
+                if (split->source.type !=
+                        GenericSensor::Config::Type::BUFFER &&
+                    split->source.type !=
+                        GenericSensor::Config::Type::RUNTIME)
+                {
+                    continue;
+                }
+
+                if (split->source.value != event.area)
+                    continue;
+
+                const uint32_t word =
+                    static_cast<uint32_t>(
+                        event.value
+                    );
+
+                for (size_t outputIndex = 0;
+                    outputIndex < split->outputCount;
+                    ++outputIndex)
+                {
+                    const BitSplitManager::Output* output =
+                        bitSplits.getOutput(
+                            splitIndex,
+                            outputIndex
+                        );
+
+                    if (!output)
+                        continue;
+
+                    bool bitValue =
+                        (
+                            (
+                                word >>
+                                output->bitIndex
+                            ) &
+                            1U
+                        ) != 0;
+
+                    if (output->inverted)
+                        bitValue = !bitValue;
+
+                    instance->forceEvent(
+                        output->target.value,
+                        bitValue ? 1L : 0L,
+                        bitSplitSource
+                    );
+                }
+
+                return;
+            }
+
+            // ============================================================
+            // COMPACT
+            //
+            // Singole aree -> word destinazione.
+            // ============================================================
+
+            bool triggered = false;
+            uint32_t word = 0;
+
+            for (size_t outputIndex = 0;
+                outputIndex < split->outputCount;
+                ++outputIndex)
+            {
+                const BitSplitManager::Output* output =
+                    bitSplits.getOutput(
+                        splitIndex,
+                        outputIndex
+                    );
+
+                if (!output)
+                    continue;
+
+                if (output->target.type !=
+                        GenericSensor::Config::Type::BUFFER &&
+                    output->target.type !=
+                        GenericSensor::Config::Type::RUNTIME)
+                {
+                    continue;
+                }
+
+                const int inputArea =
+                    output->target.value;
+
+                if (inputArea == event.area)
+                    triggered = true;
+
+                bool bitValue =
+                    buffer.getValueFast(
+                        inputArea
+                    ) != 0;
+
+                if (output->inverted)
+                    bitValue = !bitValue;
+
+                if (bitValue)
+                {
+                    word |=
+                        (
+                            static_cast<uint32_t>(1U) <<
+                            output->bitIndex
+                        );
+                }
+            }
+
+            if (!triggered)
+                continue;
+
+            instance->forceEvent(
+                split->source.value,
+                static_cast<long>(word),
+                bitSplitSource
+            );
+
+            return;
+        }
+    }
+
+    bool prepareBitSplitBufferEvents()
+    {
+        if (!bitSplitManager)
+            return false;
+
+        runtime.setBitSplitCallback(
+            BitSplitBufferEventCallback
+        );
+
+        return true;
+    }
+
+    bool bindBitSplitBufferSource()
+    {
+        bitSplitSource = runtime.getBitSplitSource();
+
+        if (bitSplitSource == EventManager::INVALID_CONSUMER_ID)
+        {
+            LOG_EF(
+                "DomoManager",
+                "BIT_SPLIT_BUFFER non registrato dal runtime"
+            );
+            return false;
+        }
+
+        LOG_IF(
+            "BitSplit",
+            "Registered with runtime: source=%u splits=%u outputs=%u",
+            static_cast<unsigned>(bitSplitSource),
+            static_cast<unsigned>(bitSplitManager->splitCount()),
+            static_cast<unsigned>(bitSplitManager->outputCount())
+        );
+
+        return true;
+    }
+
+public:
     DeviceManager& devices() { return deviceManager; }
     const DeviceManager& devices() const { return deviceManager; }
 
@@ -925,6 +1233,14 @@ public:
         runtime.setCallbacks(changed, activity);
         instance = this;
 
+        // Patch 3: sola creazione dinamica del manager.
+        // Nessun collegamento a Buffer, RuntimeStore o EventManager.
+        if (!createBitSplitManager())
+            return false;
+
+        if (!createFallingEdgeResetManager())
+            return false;
+
         m_leds.begin();
         if (config.devices.list.empty() || config.areas.list.empty()) {
             m_leds.set(LedController::THREE, true);
@@ -944,7 +1260,24 @@ public:
         DMBufferEngineEx::apply(*this, config.areas);
         DMToggleEngineEx::apply(*this, config.toggles);
         DMSplitEngineEx::apply(*this, config.splits);
-        DomoManagerRouteEngine::apply(runtime.getLogic().getRoutes(), config.routes);
+
+        if (!DMBitSplitEngineEx::apply(
+                *this,
+                config.bitSplits))
+        {
+            LOG_EF(
+                "DomoManager",
+                "Configurazione BitSplit non valida"
+            );
+            return false;
+        }
+
+        if (!FallingEdgeResetEngineEx::apply(*this, config.fallingEdgeResets))
+          {
+              LOG_EF("DomoManager", "Configurazione FallingEdgeReset non valida");
+              return false;
+          }
+          DomoManagerRouteEngine::apply(runtime.getLogic().getRoutes(), config.routes);
 
         initBuffer();
 
@@ -957,10 +1290,16 @@ public:
         ipManager.BuildIps(deviceManager.getDevices());
         LOG_IF("DomoManager", "Hw items to query: %d", deviceManager.getDevices().size());
 
+        if (!prepareBitSplitBufferEvents())
+            return false;
+
         if (!runtime.begin()) {
             LOG_EF("DomoManager", "Impossibile inizializzare il runtime/EventManager");
             return false;
         }
+
+        if (!bindBitSplitBufferSource())
+            return false;
 
         delay(1000);
         m_leds.setAll(false);
@@ -1078,7 +1417,26 @@ public:
     const DomoManagerConfig& getConfig() const { return config; }
     DomoManagerConfig& getConfig() { return config; }
     Logic& getLogic() { return runtime.getLogic(); }
-    EventManager& getEventManager() { return runtime.getEventManager(); }
+
+    bool hasBitSplitManager() const
+    {
+        return bitSplitManager != nullptr;
+    }
+
+    BitSplitManager& getBitSplits()
+    {
+        return *bitSplitManager;
+    }
+
+    const BitSplitManager& getBitSplits() const
+    {
+        return *bitSplitManager;
+    }
+
+    bool hasFallingEdgeResetManager() const { return fallingEdgeResetManager != nullptr; }
+      FallingEdgeResetManager& getFallingEdgeResets() { return *fallingEdgeResetManager; }
+      const FallingEdgeResetManager& getFallingEdgeResets() const { return *fallingEdgeResetManager; }
+      EventManager& getEventManager() { return runtime.getEventManager(); }
     const Watchdog::CallbackTimings& getTimings() const { return runtime.getTimings(); }
         LedController& getLeds() {
         return m_leds;
@@ -1179,38 +1537,59 @@ inline void DMSplitEngineEx::apply(DomoManager& manager, const SplitsConfig& cfg
         L.getSplits().add(s.mainArea, s.outAreas, s.maxTime);
 }
 
-inline void mySplitCallback(const SplitOutManager::Split& s, bool isStart) {
-    if (!DomoManager::instance)
-        return;
-
-    auto& DomoManager = DomoManager::instance->devices();
-    
-    for (int a : s.outAreas) {
+inline bool DMBitSplitEngineEx::apply(
+    DomoManager& manager,
+    const BitSplitsConfig& cfg)
+{
+    if (!manager.hasBitSplitManager()) return false;
+    BitSplitManager& bitSplits = manager.getBitSplits();
+    size_t expectedOutputs = 0;
+    for (const auto& split : cfg.list) expectedOutputs += split.outputs.size();
+    bitSplits.beginConfiguration(cfg.list.size(), expectedOutputs);
+    for (const auto& split : cfg.list)
+    {
+        const auto splitIndex = bitSplits.add(split.source, split.reverse);
+        if (splitIndex == BitSplitManager::INVALID_SPLIT) return false;
+        for (const auto& output : split.outputs)
+            if (!bitSplits.add(splitIndex, output.target, output.bitIndex, output.inverted)) return false;
+    }
+    bitSplits.endConfiguration();
+    return true;
+}
+inline bool FallingEdgeResetEngineEx::apply(
+    DomoManager& manager,
+    const ResetsConfig& cfg)
+{
+    if (!manager.hasFallingEdgeResetManager()) return false;
+    FallingEdgeResetManager& resets = manager.getFallingEdgeResets();
+    size_t expectedOutputs = 0;
+    for (const auto& reset : cfg.list) expectedOutputs += reset.outputs.size();
+    resets.beginConfiguration(cfg.list.size(), expectedOutputs);
+    for (const auto& reset : cfg.list)
+    {
+        const auto entryIndex = resets.add(reset.source);
+        if (entryIndex == FallingEdgeResetManager::INVALID_ENTRY) return false;
+        for (const auto& output : reset.outputs)
+            if (!resets.add(entryIndex, output.target)) return false;
+    }
+    resets.endConfiguration();
+    return true;
+}
+inline void mySplitCallback(const SplitOutManager::Split& s, bool isStart)
+{
+    if (!DomoManager::instance) return;
+    auto& manager = DomoManager::instance->devices();
+    for (int area : s.outAreas)
+    {
         GenericPrgDevice* devFound = nullptr;
-        int ch = -1;
-        int item = -1;
-
-        for (auto& dev : DomoManager.getDevices()) {
-            if (dev.FindChannelByArea(a, ch, item)) {
-                devFound = &dev;
-                break;
-            }
-        }
-
-        if (!devFound) {
-            LOG_WF("SplitCallback", "Area %d non appartiene a nessun device", a);
-            continue;
-        }
-        if (devFound->GetError().IsInError()) {
-            LOG_WF("SplitCallback", "Skip WRITE: device %s area %d is excluded", devFound->GetName(), a);
-            continue;
-        }
-
-        DomoManager::instance->forceEvent(
-            a, isStart ? 1 : 0, DomoManager::instance->getSplitSource());
+        int channel = -1; int item = -1;
+        for (auto& device : manager.getDevices())
+            if (device.FindChannelByArea(area, channel, item)) { devFound = &device; break; }
+        if (!devFound) { LOG_WF("SplitCallback", "Area %d non appartiene a nessun device", area); continue; }
+        if (devFound->GetError().IsInError()) { LOG_WF("SplitCallback", "Skip WRITE: device %s area %d is excluded", devFound->GetName(), area); continue; }
+        DomoManager::instance->forceEvent(area, isStart ? 1 : 0, DomoManager::instance->getSplitSource());
     }
 }
-
 inline bool DomoConfigValidator::validateStatic(const DomoManagerConfig& cfg, DomoManager& DomoManager) {
     bool ok = true;
     LOG_DF("Config", "VALIDAZIONE STATICA: avvio…");

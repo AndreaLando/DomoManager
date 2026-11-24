@@ -436,7 +436,7 @@ public:
             }
 
             // --- MAIN AREA ---
-            BufferSourceInfo infoMain;
+            Buffer::SourceInfo infoMain;
             if (buffer.GetData(s.mainArea, infoMain)) {
                 Serial.print("Main value: ");
                 Serial.println(infoMain.value);
@@ -453,7 +453,7 @@ public:
 
             // --- OUT AREAS ---
             for (int out : s.outAreas) {
-                BufferSourceInfo infoOut;
+                Buffer::SourceInfo infoOut;
                 if (!buffer.GetData(out, infoOut)) {
                     Serial.print(" - ERROR: Out area ");
                     Serial.print(out);
@@ -861,7 +861,7 @@ inline void DiagnosticWatchAreas::printAll(DomoManager& manager) {
     Serial.println("\n===== WATCHED AREAS =====");
 
     for (auto& w : watched) {
-        BufferSourceInfo info;
+        Buffer::SourceInfo info;
         bool ok = buf.GetData(w.area, info);
 
         Serial.print("Area ");

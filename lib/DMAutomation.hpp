@@ -1115,7 +1115,7 @@ bool AutomationEngine::Condition::evaluate(
         return false;
     }
 
-    BufferSourceInfo info;
+    Buffer::SourceInfo info;
 
     if (!engine->sharedBuffer->GetData(
             area,

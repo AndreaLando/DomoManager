@@ -35,6 +35,17 @@
 
 class DMBridge;
 
+struct BridgeNamedValue
+{
+    String name;
+    AEEVarType type = AEEVarType::BOOL;
+    bool booleanValue = false;
+    int integerValue = 0;
+    float floatValue = 0.0f;
+    String stringValue;
+    AEEVariableBase* registeredVariable = nullptr;
+};
+
 
 // ============================================================
 // BRIDGE PROTOCOL
@@ -1489,6 +1500,12 @@ protected:
                     )
             )
             {
+                // Un duplicato valido dimostra che la sessione e attiva.
+                // startTs rappresenta l'ultima attivita RX, non l'inizio
+                // assoluto della ricostruzione multiframe.
+                rx.startTs =
+                    now;
+
                 sendAck(
                     part
                 );
@@ -1636,35 +1653,15 @@ protected:
 
             ++rx.received;
 
+            // Il timeout multiframe misura l'inattivita tra frame.
+            // Aggiornarlo dopo ogni frame valido evita di interrompere
+            // schemi lunghi che stanno avanzando regolarmente.
+            rx.startTs =
+                now;
+
             sendAck(
                 part
             );
-
-            // ------------------------------------------------
-            // TIMEOUT
-            // ------------------------------------------------
-
-            const unsigned long timeout =
-                parent
-                    ->peer
-                    .isOnline()
-                        ? 15000UL
-                        : 35000UL;
-
-            if (
-                now - rx.startTs >
-                timeout
-            )
-            {
-                LOG_WF(
-                    "BRIDGE::SCHEMA",
-                    "RX multiframe timeout -> reset"
-                );
-
-                rx.reset();
-
-                return true;
-            }
 
             // ------------------------------------------------
             // COMPLETE
@@ -1970,6 +1967,9 @@ public:
         )
     > onFrontendAEEChange;
 
+    std::function<void(const BridgeNamedValue&, unsigned long)>
+        onFrontendNamedValue;
+
     // ========================================================
     // LOOP
     // ========================================================
@@ -2117,6 +2117,53 @@ public:
         transport->send(
             payload
         );
+    }
+
+    template<typename T>
+    bool sendUnregisteredValue(
+        const String& tag,
+        const char* type,
+        const T& value,
+        unsigned long now)
+    {
+        (void)now;
+
+        if (!transport ||
+            !isReadyForData() ||
+            tag.length() == 0U ||
+            !type ||
+            type[0] == '\0')
+        {
+            return false;
+        }
+
+        StaticJsonDocument<256> document;
+        JsonObject payload =
+            document.createNestedObject("named_value");
+
+        // "name" e il campo canonico. "tag" resta presente per
+        // compatibilita con i client legacy gia distribuiti.
+        payload["name"] = tag;
+        payload["tag"] = tag;
+        payload["type"] = type;
+        payload["value"] = value;
+
+        if (document.overflowed())
+        {
+            return false;
+        }
+
+        String output;
+        const size_t length =
+            serializeJson(document, output);
+
+        if (length == 0U ||
+            output.length() != length)
+        {
+            return false;
+        }
+
+        return transport->send(output);
     }
 
 protected:
@@ -3024,6 +3071,120 @@ inline bool BridgeProtocol::handleIncoming(
     }
 
     // ========================================================
+    // NAMED VALUE OUTSIDE THE NEGOTIATED SCHEMA
+    // ========================================================
+
+    if (document.containsKey("named_value"))
+    {
+        JsonObject payload =
+            document["named_value"].as<JsonObject>();
+        const char* name =
+            payload["name"] | static_cast<const char*>(nullptr);
+
+        if (!name || name[0] == '\0')
+        {
+            name =
+                payload["tag"] | static_cast<const char*>(nullptr);
+        }
+
+        AEEVarType resolvedType =
+            AEEVarType::BOOL;
+        bool typeValid =
+            false;
+
+        const char* typeName =
+            payload["type"] | static_cast<const char*>(nullptr);
+
+        if (typeName)
+        {
+            if (strcmp(typeName, "bool") == 0)
+            {
+                resolvedType = AEEVarType::BOOL;
+                typeValid = true;
+            }
+            else if (strcmp(typeName, "int") == 0)
+            {
+                resolvedType = AEEVarType::INT;
+                typeValid = true;
+            }
+            else if (strcmp(typeName, "float") == 0)
+            {
+                resolvedType = AEEVarType::FLOAT;
+                typeValid = true;
+            }
+            else if (strcmp(typeName, "string") == 0)
+            {
+                resolvedType = AEEVarType::STRING;
+                typeValid = true;
+            }
+        }
+        else
+        {
+            const int rawType =
+                payload["type"] | -1;
+
+            if (rawType >= 0 &&
+                rawType <= static_cast<int>(AEEVarType::STRING))
+            {
+                resolvedType =
+                    static_cast<AEEVarType>(rawType);
+                typeValid =
+                    true;
+            }
+        }
+
+        if (!name || name[0] == '\0' ||
+            !typeValid ||
+            !payload.containsKey("value"))
+        {
+            LOG_WF(
+                "BRIDGE::VALUE::RX",
+                "Invalid named value: name=%s type=%s typeValid=%u hasValue=%u",
+                name ? name : "<null>",
+                typeName ? typeName : "<numeric-or-null>",
+                typeValid ? 1U : 0U,
+                payload.containsKey("value") ? 1U : 0U
+            );
+            return true;
+        }
+
+        BridgeNamedValue received;
+        received.name = name;
+        received.type = resolvedType;
+        received.registeredVariable = registry.find(received.name);
+
+        switch (received.type)
+        {
+            case AEEVarType::BOOL:
+                received.booleanValue = payload["value"].as<bool>();
+                break;
+            case AEEVarType::INT:
+                received.integerValue = payload["value"].as<int>();
+                break;
+            case AEEVarType::FLOAT:
+                received.floatValue = payload["value"].as<float>();
+                break;
+            case AEEVarType::STRING:
+            {
+                const char* stringValue =
+                    payload["value"].as<const char*>();
+                received.stringValue =
+                    stringValue ? stringValue : "";
+                break;
+            }
+            default:
+                return true;
+        }
+
+        if (parent->onFrontendNamedValue)
+        {
+            parent->onFrontendNamedValue(received, millis());
+        }
+
+        return true;
+    }
+
+    // ========================================================
     // APPLY AEE PAYLOAD
     // ========================================================
 
@@ -3279,39 +3440,13 @@ protected:
         return true;
     }
 
-    bool buildSchemaCache(
-        unsigned long now)
+    __attribute__((noinline))
+    bool exportFullSchema(
+        DynamicJsonDocument& fullDocument,
+        JsonArray& fullArray,
+        size_t registrySize)
     {
-        schemaCache.clear();
-
-        if (!reg)
-        {
-            LOG_EF(
-                "MASTER::AEE",
-                "Build schema senza registry"
-            );
-
-            return false;
-        }
-
-        const size_t registrySize =
-            reg->size();
-
-        if (registrySize == 0U)
-        {
-            LOG_EF(
-                "MASTER::AEE",
-                "Build schema con registry vuoto"
-            );
-
-            return false;
-        }
-
-        DynamicJsonDocument fullDocument(
-            FULL_SCHEMA_DOCUMENT_CAPACITY
-        );
-
-        JsonArray fullArray =
+        fullArray =
             fullDocument.createNestedArray(
                 "schema"
             );
@@ -3322,7 +3457,6 @@ protected:
                 "MASTER::AEE",
                 "Creazione schema completo fallita"
             );
-
             return false;
         }
 
@@ -3333,8 +3467,7 @@ protected:
 
         if (
             fullDocument.overflowed() ||
-            fullArray.size() !=
-                registrySize
+            fullArray.size() != registrySize
         )
         {
             LOG_EF(
@@ -3344,26 +3477,27 @@ protected:
                 static_cast<unsigned>(fullArray.size()),
                 static_cast<unsigned>(FULL_SCHEMA_DOCUMENT_CAPACITY)
             );
-
             return false;
         }
 
         schemaCache.totalItems =
             fullArray.size();
 
-        std::vector<size_t> pageStarts;
-        std::vector<size_t> pageCounts;
+        return true;
+    }
 
-        size_t cursor =
-            0U;
+    __attribute__((noinline))
+    bool calculateSchemaPages(
+        JsonArray fullArray,
+        std::vector<size_t>& pageStarts,
+        std::vector<size_t>& pageCounts)
+    {
+        size_t cursor = 0U;
 
         while (cursor < fullArray.size())
         {
-            const size_t pageStart =
-                cursor;
-
-            size_t accepted =
-                0U;
+            const size_t pageStart = cursor;
+            size_t accepted = 0U;
 
             while (cursor < fullArray.size())
             {
@@ -3371,29 +3505,21 @@ protected:
                     SCHEMA_PAGE_DOCUMENT_CAPACITY
                 );
 
-                probe["schema_page"] =
-                    0U;
-
-                probe["schema_pages"] =
-                    1U;
-
-                probe["schema_items"] =
-                    schemaCache.totalItems;
+                probe["schema_page"] = 0U;
+                probe["schema_pages"] = 1U;
+                probe["schema_items"] = schemaCache.totalItems;
 
                 JsonArray probeArray =
                     probe.createNestedArray(
                         "schema"
                     );
 
-                for (
-                    size_t index = 0U;
-                    index < accepted;
-                    ++index)
+                for (size_t index = 0U;
+                     index < accepted;
+                     ++index)
                 {
                     probeArray.add(
-                        fullArray[
-                            pageStart + index
-                        ]
+                        fullArray[pageStart + index]
                     );
                 }
 
@@ -3402,14 +3528,11 @@ protected:
                 );
 
                 const size_t pageBytes =
-                    measureJson(
-                        probe
-                    );
+                    measureJson(probe);
 
                 if (
                     probe.overflowed() ||
-                    pageBytes >
-                        MAX_SCHEMA_PAGE_PAYLOAD_SIZE
+                    pageBytes > MAX_SCHEMA_PAGE_PAYLOAD_SIZE
                 )
                 {
                     if (accepted == 0U)
@@ -3420,11 +3543,8 @@ protected:
                             static_cast<unsigned>(cursor),
                             static_cast<unsigned>(pageBytes)
                         );
-
-                        schemaCache.clear();
                         return false;
                     }
-
                     break;
                 }
 
@@ -3432,65 +3552,55 @@ protected:
                 ++cursor;
             }
 
-            pageStarts.push_back(
-                pageStart
-            );
-
-            pageCounts.push_back(
-                accepted
-            );
+            pageStarts.push_back(pageStart);
+            pageCounts.push_back(accepted);
         }
 
-        const size_t pageCount =
-            pageStarts.size();
+        return !pageStarts.empty();
+    }
 
-        if (pageCount == 0U)
+    __attribute__((noinline))
+    bool serializeSchemaPages(
+        JsonArray fullArray,
+        const std::vector<size_t>& pageStarts,
+        const std::vector<size_t>& pageCounts)
+    {
+        const size_t pageCount = pageStarts.size();
+
+        if (pageCount == 0U ||
+            pageCounts.size() != pageCount)
         {
             return false;
         }
 
-        schemaCache.pages.reserve(
-            pageCount
-        );
+        schemaCache.pages.reserve(pageCount);
 
-        for (
-            size_t pageIndex = 0U;
-            pageIndex < pageCount;
-            ++pageIndex)
+        for (size_t pageIndex = 0U;
+             pageIndex < pageCount;
+             ++pageIndex)
         {
             DynamicJsonDocument pageDocument(
                 SCHEMA_PAGE_DOCUMENT_CAPACITY
             );
 
-            pageDocument["schema_page"] =
-                pageIndex;
-
-            pageDocument["schema_pages"] =
-                pageCount;
-
-            pageDocument["schema_items"] =
-                schemaCache.totalItems;
+            pageDocument["schema_page"] = pageIndex;
+            pageDocument["schema_pages"] = pageCount;
+            pageDocument["schema_items"] = schemaCache.totalItems;
 
             JsonArray pageArray =
                 pageDocument.createNestedArray(
                     "schema"
                 );
 
-            const size_t start =
-                pageStarts[pageIndex];
+            const size_t start = pageStarts[pageIndex];
+            const size_t count = pageCounts[pageIndex];
 
-            const size_t count =
-                pageCounts[pageIndex];
-
-            for (
-                size_t offset = 0U;
-                offset < count;
-                ++offset)
+            for (size_t offset = 0U;
+                 offset < count;
+                 ++offset)
             {
                 pageArray.add(
-                    fullArray[
-                        start + offset
-                    ]
+                    fullArray[start + offset]
                 );
             }
 
@@ -3505,8 +3615,6 @@ protected:
                     "Serializzazione pagina fallita: page=%u",
                     static_cast<unsigned>(pageIndex)
                 );
-
-                schemaCache.clear();
                 return false;
             }
 
@@ -3518,11 +3626,72 @@ protected:
             );
         }
 
-        schemaCache.currentPage =
-            0U;
+        return schemaCache.pages.size() == pageCount;
+    }
 
-        schemaCache.lastBuild =
-            now;
+    __attribute__((noinline))
+    bool buildSchemaCache(
+        unsigned long now)
+    {
+        schemaCache.clear();
+
+        if (!reg)
+        {
+            LOG_EF(
+                "MASTER::AEE",
+                "Build schema senza registry"
+            );
+            return false;
+        }
+
+        const size_t registrySize = reg->size();
+
+        if (registrySize == 0U)
+        {
+            LOG_EF(
+                "MASTER::AEE",
+                "Build schema con registry vuoto"
+            );
+            return false;
+        }
+
+        DynamicJsonDocument fullDocument(
+            FULL_SCHEMA_DOCUMENT_CAPACITY
+        );
+        JsonArray fullArray;
+
+        if (!exportFullSchema(
+                fullDocument,
+                fullArray,
+                registrySize))
+        {
+            schemaCache.clear();
+            return false;
+        }
+
+        std::vector<size_t> pageStarts;
+        std::vector<size_t> pageCounts;
+
+        if (!calculateSchemaPages(
+                fullArray,
+                pageStarts,
+                pageCounts))
+        {
+            schemaCache.clear();
+            return false;
+        }
+
+        if (!serializeSchemaPages(
+                fullArray,
+                pageStarts,
+                pageCounts))
+        {
+            schemaCache.clear();
+            return false;
+        }
+
+        schemaCache.currentPage = 0U;
+        schemaCache.lastBuild = now;
 
         LOG_IF(
             "MASTER::AEE",

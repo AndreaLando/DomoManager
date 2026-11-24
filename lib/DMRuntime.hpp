@@ -728,6 +728,9 @@ private:
     static int splitSource;
     static int routeSource;
     static int automationSource;
+    static int bitSplitSource;
+
+    EventManager::Callback bitSplitCallback = nullptr;
 
     // Nuove source locali.
     static int physicalIOInputSource;
@@ -806,7 +809,7 @@ private:
                 if (!rt.watchDiag.isWatched(area))
                     continue;
 
-                BufferSourceInfo info;
+                Buffer::SourceInfo info;
                 rt.buffer.GetData(area, info);
                 rt.watchDiag.onValueChanged(rt.manager, area, info.value);
                 break;
@@ -1162,70 +1165,93 @@ private:
         if (!instance)
             return;
 
-        // Il Toggle reagisce esclusivamente agli ingressi Modbus.
-        // Toggle reagisce agli ingressi Modbus e agli ingressi fisici.
+        const uint8_t bitSplitBufferSource =
+            static_cast<uint8_t>(
+                instance->bitSplitSource
+            );
+
+        // Il Toggle reagisce esclusivamente a:
+        //
+        // - ingressi Modbus;
+        // - ingressi fisici;
+        // - bit estratti da BIT_SPLIT_BUFFER.
         if (event.source != modbusRtuSource &&
-            event.source != physicalIOInputSource)
+            event.source != physicalIOInputSource &&
+            event.source != bitSplitBufferSource)
         {
             return;
         }
 
-        // Le aree riservate al sistema non entrano nella logica Toggle.
-        if (DeviceManager::IsReservedArea(event.area))
+        if (DeviceManager::IsReservedArea(
+                event.area))
+        {
             return;
+        }
 
         auto& toggles =
             instance->logic.getToggles();
 
-        if (!toggles.handlesArea(event.area))
+        if (!toggles.handlesArea(
+                event.area))
+        {
             return;
+        }
 
         ToggleManager::ToggleResult result;
 
-        if (!toggles.processEvent(
+        const bool processed =
+            toggles.processEvent(
                 event.area,
                 event.value,
                 instance->buffer,
                 instance->timeManager.nowMs(),
-                result))
-        {
-            // -------------------------------------------------------- 
-            // NON È NECESSARIAMENTE UN ERRORE. // 
-            // Esempio: 
-            // value=1 -> fronte di salita -> Toggle esegue l'azione 
-            // value=0 -> rilascio -> nessuna nuova azione
-            // Quindi non usare ERROR "PROCESS FALLITO". 
-            // --------------------------------------------------------
+                result
+            );
 
-            return;
+        /*
+        * Le aree prodotte da BIT_SPLIT_BUFFER sono ingressi virtuali
+        * già consumati dal Toggle.
+        *
+        * La pending deve essere rimossa anche sul fronte di rilascio,
+        * quando processEvent() restituisce false.
+        *
+        * ResetElement() rimuove soltanto l'area dalla changed map e
+        * non modifica il valore conservato nel Buffer.
+        */
+        if (event.source == bitSplitBufferSource)
+        {
+            instance->buffer.ResetElement(
+                event.area
+            );
         }
 
-        // ============================================================
-        // TOGGLE NORMALE
-        // ============================================================
+        // Il fronte di rilascio aggiorna lo stato interno del Toggle,
+        // ma non produce un nuovo comando.
+        if (!processed)
+            return;
 
+        // Toggle con destinazione Buffer.
         if (result.area != Buffer::NO_AREA)
         {
             instance->forceInternalEvent(
                 result.area,
-                result.value);
+                result.value
+            );
 
             return;
         }
 
-        // ============================================================
-        // TOGGLE ROUTE-ONLY
-        // ============================================================
-
+        // Toggle Route-only.
         if (result.toggleArea == Buffer::NO_AREA)
-        {
             return;
-        }
 
         instance->eventManager.push(
             result.toggleArea,
             result.value,
-            static_cast<uint8_t>(toggleSource));
+            static_cast<uint8_t>(
+                toggleSource
+            )
+        );
     }
 
     static void SplitEventCallback(const EventManager::Event& event) {
@@ -1605,6 +1631,12 @@ public:
             -1
         );
 
+        bitSplitSource = eventManager.add(
+            bitSplitCallback,
+            "BIT_SPLIT_BUFFER",
+            -1
+        );
+
         toggleSource = eventManager.add(
             ToggleEventCallback,
             "TOGGLE");
@@ -1626,6 +1658,7 @@ public:
         internalEvents.attach();
 
         if (modbusRtuSource == 255 ||
+            bitSplitSource == 255 ||
             toggleSource == 255 ||
             splitSource == 255 ||
             routeSource == 255 ||
@@ -1872,6 +1905,16 @@ public:
     bool getPowerOnCycleCompleted() const { return ipCycleCompleted && backend1StCycleDone; }
     uint8_t getSplitSource() const { return static_cast<uint8_t>(splitSource); }
 
+    void setBitSplitCallback(EventManager::Callback callback)
+    {
+        bitSplitCallback = callback;
+    }
+
+    uint8_t getBitSplitSource() const
+    {
+        return static_cast<uint8_t>(bitSplitSource);
+    }
+
     static int getModbusRtuSource() { return modbusRtuSource; }
     static int getToggleSource() { return toggleSource; }
     static int getRouteSource() { return routeSource; }
@@ -1898,6 +1941,7 @@ inline int DMRuntime::toggleSource = 255;
 inline int DMRuntime::splitSource = 255;
 inline int DMRuntime::routeSource = 255;
 inline int DMRuntime::automationSource = 255;
+inline int DMRuntime::bitSplitSource = 255;
 inline int DMRuntime::physicalIOInputSource = 255;
 inline int DMRuntime::physicalIOOutputConsumer = 255;
 

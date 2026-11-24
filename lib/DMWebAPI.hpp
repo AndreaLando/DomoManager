@@ -32,6 +32,7 @@
    ========================================================================= */
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 
 #include <ctype.h>
 #include <stdlib.h>

@@ -811,8 +811,27 @@ public:
 
     struct EntityFilter
     {
+        struct AreaRange
+        {
+            int first = -1;
+            int last = -1;
+
+            bool contains(int area) const
+            {
+                return
+                    first >= 0 &&
+                    last >= first &&
+                    area >= first &&
+                    area <= last;
+            }
+        };
+
+        static constexpr size_t MAX_EXCLUDED_AREA_RANGES = 4U;
+
         uint32_t excludedKinds = 0;
         uint32_t excludedIOTypes = 0;
+        AreaRange excludedAreaRanges[MAX_EXCLUDED_AREA_RANGES] {};
+        size_t excludedAreaRangeCount = 0U;
 
         bool excludeRouteTriggers = false;
         bool excludeToggleSources = false;
@@ -835,6 +854,21 @@ public:
         bool matches(
             const DomoIntrospection::Entity& entity) const
         {
+            const size_t rangeCount =
+                excludedAreaRangeCount < MAX_EXCLUDED_AREA_RANGES
+                    ? excludedAreaRangeCount
+                    : MAX_EXCLUDED_AREA_RANGES;
+
+            for (size_t index = 0U;
+                 index < rangeCount;
+                 ++index)
+            {
+                if (excludedAreaRanges[index].contains(entity.area))
+                {
+                    return false;
+                }
+            }
+
             if (
                 excludedKinds &
                 kindMask(entity.kind)
@@ -1122,6 +1156,17 @@ private:
             return "";
         }
 
+        // La zona deve provenire dall'introspection gia risolta.
+        // Per Security non esiste necessariamente un device fisico, quindi
+        // suggestedArea non puo essere usata come unica sorgente.
+        if (entity.zoneResolved &&
+            entity.zone &&
+            entity.zone[0] != '\0')
+        {
+            return entity.zone;
+        }
+
+        // Fallback legacy per entita fisiche non ancora risolte.
         if (entity.device &&
             entity.device->suggestedArea &&
             entity.device->suggestedArea[0] != '\0')
@@ -2460,6 +2505,9 @@ public:
             )
         >;
 
+    using NamedValueCallback =
+        std::function<void(const BridgeNamedValue&, unsigned long)>;
+
 private:
 
     // ========================================================
@@ -2823,6 +2871,15 @@ public:
     {
         bridge.onFrontendAEEChange =
             nullptr;
+        bridge.onFrontendNamedValue =
+            nullptr;
+    }
+
+    void setNamedValueCallback(
+        NamedValueCallback callback)
+    {
+        bridge.onFrontendNamedValue =
+            std::move(callback);
     }
 
     // ========================================================
@@ -3131,6 +3188,9 @@ public:
 
         AEEEngine::EntityFilter
             introspectionFilter;
+
+        BridgeEngine::NamedValueCallback
+            namedValueCallback = nullptr;
     };
 
 private:
@@ -3198,6 +3258,9 @@ private:
 
     Buffer* buffer =
         nullptr;
+
+    BridgeEngine::NamedValueCallback
+        namedValueCallback = nullptr;
 
     // ========================================================
     // CHANNEL ENGINES
@@ -3454,6 +3517,9 @@ public:
 
         channelName =
             config.name;
+
+        namedValueCallback =
+            config.namedValueCallback;
 
         taskIntervalMs =
             config.taskIntervalMs > 0
@@ -3784,6 +3850,16 @@ public:
                     variable,
                     now
                 );
+            }
+        );
+
+        bridgeEngine.setNamedValueCallback(
+            [this](const BridgeNamedValue& value, unsigned long now)
+            {
+                if (initialized && namedValueCallback)
+                {
+                    namedValueCallback(value, now);
+                }
             }
         );
 
@@ -13405,6 +13481,29 @@ public:
     }
 
     // ============================================================
+    // REMOTE PANIC
+    // ============================================================
+
+    static bool TriggerPanic(unsigned long now)
+    {
+        if (!runtime.initialized ||
+            !context.config ||
+            !context.config->enabled ||
+            context.config->panelBitCommandArea < 0)
+        {
+            return false;
+        }
+
+        return ApplyCommand(
+            context.config->panelBitCommandArea,
+            static_cast<long>(
+                SecurityOrchestrator::SystemManager::ALARM_PANIC
+            ),
+            now
+        );
+    }
+
+    // ============================================================
     // EVENT MANAGER CALLBACK
     //
     // Riceve gli eventi globali da EventManager, ma inoltra ad
@@ -14798,6 +14897,9 @@ public:
 
         ctx.hvac =
             &config.hvac;
+
+        ctx.security =
+            &config.security;
 
         ctx.solar =
             config.solarInverters.count > 0

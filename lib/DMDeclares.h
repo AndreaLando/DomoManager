@@ -18,9 +18,10 @@
    ============================================================================ */
    
 
-#include "DMAEE.hpp"
+
 #include "DMWebAPI.hpp"
 #include "DMAccessControl.hpp"
+#include "DMAEE.hpp"
 
 #include "DMHVAC.h"
 #include "DMWeather.hpp"
@@ -47,7 +48,52 @@ struct DiagnosticConfig  {
 };
 
 // ************ DEFINIZIONE STRUTTURA DomoManager *******************************
+class DomoManagerBitSplitEngine
+{
+public:
+    struct OutputConfig
+    {
+        GenericSensor::Config target;
+        uint8_t bitIndex = 0;
+        bool inverted = false;
+    };
 
+    struct BitSplitConfig
+    {
+        GenericSensor::Config source{};
+        bool reverse = false;
+        std::vector<OutputConfig> outputs;
+    };
+
+    struct BitSplitsConfig
+    {
+        std::vector<BitSplitConfig> list;
+    };
+};
+
+// ============================================================================
+// FALLING EDGE RESET ENGINE
+//
+// Configurazione dichiarativa statica.
+// Non possiede memoria e non esegue allocazioni o copie di vector.
+// ============================================================================
+class FallingEdgeResetEngine
+{
+public:
+    struct OutputConfig
+    {
+        GenericSensor::Config target;
+    };
+    struct ResetConfig
+    {
+        GenericSensor::Config source{};
+        std::vector<OutputConfig> outputs;
+    };
+    struct ResetsConfig
+    {
+        std::vector<ResetConfig> list;
+    };
+};
 class DomoManagerBufferEngine {
 public:
 
@@ -230,6 +276,8 @@ struct DomoManagerConfig {
     DomoManagerBufferEngine::AreasConfig  areas;
     DomoManagerToggleEngine::TogglesConfig toggles;
     DomoManagerSplitEngine::SplitsConfig splits;
+    DomoManagerBitSplitEngine::BitSplitsConfig bitSplits;
+    FallingEdgeResetEngine::ResetsConfig fallingEdgeResets;
 
     struct Automation {
         const char* json = nullptr;

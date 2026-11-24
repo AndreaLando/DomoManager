@@ -1,186 +1,142 @@
 #ifndef DMAEE_HPP
 #define DMAEE_HPP
 
+#pragma once
 
 /* ============================================================================
-   SVILUPPATORE
-   ============================================================================
-
-   Nome:            Andrea Lando
-   Contatto:        mail@domo-manager.it
-  
-   Versione modulo: 1.0.0
-   Ultima modifica: 2026‑04‑24
-   Note:
-                    • Nessuna
-
-   ============================================================================ */
+ * DMAEE.hpp
+ *
+ * Adapter runtime tra AEEManagement e le sorgenti dati di DomoManager.
+ *
+ * Responsabilita:
+ *   - polling delle sorgenti GenericSensor e Function;
+ *   - conversione degli eventi BufferArea in aggiornamenti AEE;
+ *   - acquisizione delle BufferArea modificate;
+ *   - applicazione degli aggiornamenti alle variabili AEE tipizzate.
+ *
+ * Il modulo non possiede AEEManagement, Buffer o variabili AEE. Gli oggetti
+ * vengono ricevuti per riferimento e restano di proprieta dei rispettivi
+ * manager runtime.
+ *
+ * Autore:          Andrea Lando
+ * Contatto:        mail@domo-manager.it
+ * Versione modulo: 1.1.0
+ * Ultima modifica: 2026-11-21
+ * ============================================================================ */
 
 #include <Arduino.h>
-#include <ArduinoJson.h>
+#include <vector>
 
 #include "DMAEECore.hpp"
-#include "DMPLC.h"
+#include "DMBuffers.hpp"
+#include "DMBaseClassCore.hpp"
 
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
 
-class DMAEE {
+// ============================================================================
+// DMAEE
+// ============================================================================
+class DMAEE
+{
 public:
-
-    struct Update {
-        AEEVariableBase* var;
-        float rawValue;
-        bool valid;
+    struct Update
+    {
+        AEEVariableBase* var = nullptr;
+        float rawValue = 0.0f;
+        bool valid = false;
     };
 
-    // ------------------------------------------------------------
-    // POLLING DELLE SORGENTI NON-BUFFER
-    //
-    // Gestisce esclusivamente:
-    //   - GenericSensor
-    //   - Function
-    //
-    // NON gestisce BufferArea.
-    // ------------------------------------------------------------
+    // Polling di GenericSensor e Function. Le BufferArea sono escluse.
     static bool BuildUpdatesFromPolledSources(
         AEEManagement& mgr,
         Buffer& buf,
         std::vector<Update>& out)
     {
-        bool hasUpdates = false;
+        bool updated = false;
 
-        for (auto* v : mgr.vars)
+        for (auto* var : mgr.vars)
         {
-            if (!v)
+            if (!var ||
+                var->def.direction == AEEDirection::ModuleToFrontend ||
+                var->def.sourceType == AEEVarSourceType::BufferArea)
+            {
                 continue;
+            }
 
-            // Solo DOMO → PEER
-            if (v->def.direction == AEEDirection::ModuleToFrontend)
-                continue;
+            Update u{var, 0.0f, false};
 
-            // BufferArea gestite da BuildUpdatesFromBuffer()
-            if (v->def.sourceType == AEEVarSourceType::BufferArea)
-                continue;
-
-            Update u{ v, 0.0f, false };
-
-            switch (v->def.sourceType)
+            switch (var->def.sourceType)
             {
                 case AEEVarSourceType::GenericSensor:
-                {
-                    int raw =
-                        GenericSensor::read(
-                            v->def.sensorCfg,
-                            buf
-                        );
-
-                    u.rawValue = static_cast<float>(raw);
+                    u.rawValue = GenericSensor::read(var->def.sensorCfg, buf);
                     u.valid = true;
-                }
-                break;
+                    break;
 
                 case AEEVarSourceType::Function:
-                {
-                    if (v->def.fnFloat)
+                    if (var->def.fnFloat)
                     {
-                        u.rawValue = v->def.fnFloat();
+                        u.rawValue = var->def.fnFloat();
                         u.valid = true;
                     }
-                    else if (v->def.fnInt)
+                    else if (var->def.fnInt)
                     {
-                        u.rawValue =
-                            static_cast<float>(
-                                v->def.fnInt()
-                            );
+                        u.rawValue = static_cast<float>(var->def.fnInt());
                         u.valid = true;
                     }
-                    else if (v->def.fnBool)
+                    else if (var->def.fnBool)
                     {
-                        u.rawValue =
-                            v->def.fnBool()
-                                ? 1.0f
-                                : 0.0f;
+                        u.rawValue = var->def.fnBool() ? 1.0f : 0.0f;
                         u.valid = true;
                     }
-                }
-                break;
+                    break;
 
                 default:
                     break;
             }
 
-            if (u.valid)
-            {
-                out.push_back(u);
-                hasUpdates = true;
-            }
+            if (!u.valid)
+                continue;
+
+            out.push_back(u);
+            updated = true;
         }
 
-        return hasUpdates;
+        return updated;
     }
 
-
-    // ------------------------------------------------------------
-    // EVENT MANAGER → AEE
-    //
-    // Gestisce esclusivamente BufferArea.
-    // Il valore è già disponibile nell'evento.
-    //
-    // NON legge il Buffer.
-    // ------------------------------------------------------------
+    // Converte un evento BufferArea senza rileggere il Buffer.
     static bool BuildUpdatesFromBufferArea(
         AEEManagement& mgr,
         int area,
         long value,
         std::vector<Update>& out)
     {
-        bool hasUpdates = false;
+        bool updated = false;
 
-        for (auto* v : mgr.vars)
+        for (auto* var : mgr.vars)
         {
-            if (!v)
+            if (!var ||
+                var->def.direction == AEEDirection::ModuleToFrontend ||
+                var->def.sourceType != AEEVarSourceType::BufferArea ||
+                var->def.bufferArea != area)
+            {
                 continue;
-
-            if (v->def.direction == AEEDirection::ModuleToFrontend)
-                continue;
-
-            if (v->def.sourceType != AEEVarSourceType::BufferArea)
-                continue;
-
-            if (v->def.bufferArea != area)
-                continue;
-
-            Update u{ v, 0.0f, false };
+            }
 
             long raw = value;
+            if (var->def.bitIndex >= 0)
+                raw = (raw >> var->def.bitIndex) & 1L;
 
-            if (v->def.bitIndex >= 0)
-                raw = (raw >> v->def.bitIndex) & 1L;
-
-            u.rawValue = static_cast<float>(raw);
-            u.valid = true;
-
-            out.push_back(u);
-            hasUpdates = true;
+            out.push_back({var, static_cast<float>(raw), true});
+            updated = true;
         }
 
-        return hasUpdates;
+        return updated;
     }
 
-
-    // ------------------------------------------------------------
-    // BUFFER POLLING COMPLETO
-    //
-    // Mantiene il comportamento precedente:
-    //
-    //   BufferArea      → lettura dal Buffer
-    //   GenericSensor   → polling
-    //   Function        → polling
-    //
-    // La parte GenericSensor/Function è delegata a
-    // BuildUpdatesFromPolledSources().
-    // ------------------------------------------------------------
+    // Elabora le BufferArea modificate, quindi esegue il polling delle altre
+    // sorgenti. ChangedView deve essere iterabile e contenere indici area.
     template<typename ChangedView>
     static bool BuildUpdatesFromBuffer(
         AEEManagement& mgr,
@@ -188,134 +144,93 @@ public:
         const ChangedView& changed,
         std::vector<Update>& out)
     {
-        bool hasUpdates = false;
+        bool updated = false;
+        const size_t areaCount = buf.size();
+        std::vector<bool> areaChanged(areaCount, false);
 
-        const int AREA_COUNT = buf.size();
-
-        // --------------------------------------------------------
-        // BUFFER AREA
-        // --------------------------------------------------------
-
-        bool areaChanged[AREA_COUNT];
-        memset(areaChanged, 0, sizeof(areaChanged));
-
-        for (const auto& area : changed)
+        for (const auto& item : changed)
         {
-            if ((unsigned)area < AREA_COUNT)
-                areaChanged[area] = true;
+            const int area = static_cast<int>(item);
+            if (area >= 0 && static_cast<size_t>(area) < areaCount)
+                areaChanged[static_cast<size_t>(area)] = true;
         }
 
-        for (auto* v : mgr.vars)
+        for (auto* var : mgr.vars)
         {
-            if (!v)
+            if (!var ||
+                var->def.direction == AEEDirection::ModuleToFrontend ||
+                var->def.sourceType != AEEVarSourceType::BufferArea)
+            {
                 continue;
+            }
 
-            if (v->def.direction == AEEDirection::ModuleToFrontend)
+            const int area = var->def.bufferArea;
+            if (area < 0 ||
+                static_cast<size_t>(area) >= areaCount ||
+                !areaChanged[static_cast<size_t>(area)])
+            {
                 continue;
-
-            if (v->def.sourceType != AEEVarSourceType::BufferArea)
-                continue;
-
-            const int area = v->def.bufferArea;
-
-            if ((unsigned)area >= AREA_COUNT)
-                continue;
-
-            if (!areaChanged[area])
-                continue;
+            }
 
             long raw = buf.getValueFast(area);
+            if (var->def.bitIndex >= 0)
+                raw = (raw >> var->def.bitIndex) & 1L;
 
-            if (v->def.bitIndex >= 0)
-                raw = (raw >> v->def.bitIndex) & 1L;
-
-            Update u{ v, static_cast<float>(raw), true };
-
-            out.push_back(u);
-            hasUpdates = true;
+            out.push_back({var, static_cast<float>(raw), true});
+            updated = true;
         }
 
-        // --------------------------------------------------------
-        // GENERIC SENSOR + FUNCTION
-        // --------------------------------------------------------
-
-        if (BuildUpdatesFromPolledSources(
-                mgr,
-                buf,
-                out))
-        {
-            hasUpdates = true;
-        }
-
-        return hasUpdates;
+        return BuildUpdatesFromPolledSources(mgr, buf, out) || updated;
     }
 
-
-    // ------------------------------------------------------------
-    // APPLY
-    // ------------------------------------------------------------
-
+    // Applica gli aggiornamenti alle variabili AEE bool, int e float.
     static void ApplyUpdates(
         const std::vector<Update>& updates,
         unsigned long now)
     {
-        for (auto& u : updates)
+        for (const auto& u : updates)
         {
-            auto* v = u.var;
+            if (!u.valid || !u.var)
+                continue;
 
-            if (auto* b = as<bool>(v))
+            auto* var = u.var;
+
+            if (auto* target = as<bool>(var))
             {
-                bool old = b->get();
-                bool nv = (u.rawValue != 0.0f);
+                const bool oldValue = target->get();
+                const bool newValue = u.rawValue != 0.0f;
+                target->set(newValue, now);
 
-                b->set(nv, now);
+                if (target->get() != oldValue)
+                    LOG_DF("AEE", "Updated %s = %d", var->def.name, newValue);
 
-                if (b->get() != old)
-                    LOG_DF(
-                        "AEE",
-                        "Updated %s = %d",
-                        v->def.name,
-                        nv
-                    );
+                continue;
             }
 
-            else if (auto* i = as<int>(v))
+            if (auto* target = as<int>(var))
             {
-                int old = i->get();
-                int nv =
-                    static_cast<int>(
-                        u.rawValue * v->def.scale
-                    );
+                const int oldValue = target->get();
+                const int newValue =
+                    static_cast<int>(u.rawValue * var->def.scale);
+                target->set(newValue, now);
 
-                i->set(nv, now);
+                if (target->get() != oldValue)
+                    LOG_DF("AEE", "Updated %s = %d", var->def.name, newValue);
 
-                if (i->get() != old)
-                    LOG_DF(
-                        "AEE",
-                        "Updated %s = %d",
-                        v->def.name,
-                        nv
-                    );
+                continue;
             }
 
-            else if (auto* f = as<float>(v))
+            if (auto* target = as<float>(var))
             {
-                float old = f->get();
-                float nv =
-                    u.rawValue * v->def.scale;
+                const float oldValue = target->get();
+                const float newValue = u.rawValue * var->def.scale;
+                target->set(newValue, now);
 
-                f->set(nv, now);
-
-                if (f->get() != old)
-                    LOG_DF(
-                        "AEE",
-                        "Updated %s = %.2f",
-                        v->def.name,
-                        nv
-                    );
+                if (target->get() != oldValue)
+                    LOG_DF("AEE", "Updated %s = %.2f", var->def.name, newValue);
             }
         }
     }
 };
 
-#endif
+#endif // DMAEE_HPP

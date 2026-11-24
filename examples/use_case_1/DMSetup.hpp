@@ -55,8 +55,15 @@ DEFINE_AREA(AREA_CAMERA_PIR_TAMPER, 24)
 DEFINE_AREA(AREA_CAMERA_SMOKE_ALM, 29)
 
 DEFINE_AREA(AREA_INGRESSO_DOOR_ALM, 53)
-
+DEFINE_AREA(AREA_INGRESSO_SW3, 54)
+DEFINE_AREA(AREA_INGRESSO_SW1, 55)
+DEFINE_AREA(AREA_INGRESSO_SW2, 56)
+DEFINE_AREA(AREA_INGRESSO_LIGHT_SCALE, 57)
+DEFINE_AREA(AREA_INGRESSO_LIGHT_INGRESSO, 58)
 DEFINE_AREA(AREA_PLAFONIERA_EXT, 59)
+DEFINE_AREA(BOARD_2_IN,         60)
+DEFINE_AREA(BOARD_2_OUT,        61)
+
 DEFINE_AREA(AREA_CUCINA_PIR_ALM, 98)
 DEFINE_AREA(AREA_CUCINA_PIR_TAMPER, 99)
 DEFINE_AREA(AREA_CUCINA_DOOR_ALM, 100)
@@ -69,9 +76,11 @@ DEFINE_AREA(SENSORE_CUCINA_INDUZIONE, 122)
 DEFINE_AREA(AREA_CUCINA_FLOOD_ALM, 125)
 DEFINE_AREA(AREA_CUCINA_LUCE_1, 127)
 DEFINE_AREA(AREA_CUCINA_BLUETOOTH, 128)
-
+DEFINE_AREA(AREA_CUCINA_LUCE_2, 129)
 
 DEFINE_AREA(AREA_ESTRATTORE_CUCINA, 135)
+DEFINE_AREA(AREA_CUCINA_LED_FONDO, 138)
+
 DEFINE_AREA(AREA_INGRESSO_EV_OPEN_DI, 147)
 
 DEFINE_AREA(RELAY_LED_BAGNO, 151)
@@ -181,123 +190,119 @@ IPAddress WaveShareP1_Addr=IPAddress(192, 168, 12, 203);
 IPAddress WaveSharePT_Addr=IPAddress(192, 168, 12, 204);
 IPAddress WaveShareCantina_Addr=IPAddress(192, 168, 12, 206);
 
-static const DomoManagerConfig::Devices mainDevicesConfig = {
-    {
+// ============================================================================
+// DEVICES CONFIGURATION
+//
+// Costruisce la configurazione durante setup(), evitando la costruzione
+// globale anticipata dei vector e degli Arduino String.
+// ============================================================================
+static void ConfigureDevices(DomoManagerConfig& cfg)
+{
+    cfg.devices.list = {
         // --- P1 ---
         { "Lettore consumi", WaveShareP1_Addr, 1, "LE_01MQ",
           { 10, 11, 12, 13, 14 }, 3, Low,
-          "Camera da letto", "Quadro P1"
-        },
+          "Camera da letto", "Quadro P1" },
 
         { "Scheda 4DI+2DO", WaveShareP1_Addr, 8, "MA01_AXCX4020",
-          { 15, AREA_CAMERA_WIN1_ALM, 17, AREA_CAMERA_WIN2_ALM, 19, 20 }, 3, High,
-          "Camera da letto", "Fondo P1"
-        },
+          { 15, AREA_CAMERA_WIN1_ALM, 17, AREA_CAMERA_WIN2_ALM, 19, 20 },
+          3, High, "Camera da letto", "Fondo P1" },
 
         { "Scheda 32DI", WaveShareP1_Addr, 4, "N4DIH32",
-          {
-              21, 22, AREA_CAMERA_PIR_ALM, AREA_CAMERA_PIR_TAMPER, 25, 26, 27, 28,
-              AREA_CAMERA_SMOKE_ALM, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39, 40, 41, 42, 43, 44,
-              45, 46, 47, 48, 49, 50, 51, 52
-          },
-          3, High, "Camera da letto", "Parete P1"
-        },
+          { 21, 22, AREA_CAMERA_PIR_ALM, AREA_CAMERA_PIR_TAMPER,
+            25, 26, 27, 28, AREA_CAMERA_SMOKE_ALM, 30, 31, 32,
+            33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44,
+            45, 46, 47, 48, 49, 50, 51, 52 },
+          3, High, "Camera da letto", "Parete P1" },
 
+        /*
         { "Scheda 4DI+4DO", WaveShareP1_Addr, 2, "MA01_XACX0440",
-          { AREA_INGRESSO_DOOR_ALM, 54, 55, 56, 57, 58, AREA_PLAFONIERA_EXT, 60 },
-          3, High, "Ingresso", "Scala"
-        },
-/*
+          { AREA_INGRESSO_DOOR_ALM, AREA_INGRESSO_SW3,
+            AREA_INGRESSO_SW1, AREA_INGRESSO_SW2,
+            AREA_INGRESSO_LIGHT_SCALE, AREA_INGRESSO_LIGHT_INGRESSO,
+            AREA_PLAFONIERA_EXT, 60 },
+          3, High, "Ingresso", "Scala" },
+        */
+
+        { "Scheda 4DI+4DO", WaveShareP1_Addr, 2, "DOMO_4DI4DO01",
+          { BOARD_2_IN, BOARD_2_OUT },
+          3, High, "Ingresso", "Scala" },
+
+        /*
         { "Scheda 4DI+4DO - Quadro P1", WaveShareP1_Addr, 3, "MA01_XACX0440",
-          { 62, 63, 64, 65, 66, 67, 68, 69 }, 3, High
-        },*/
+          { 62, 63, 64, 65, 66, 67, 68, 69 },
+          3, High },
+        */
 
         { "Scheda 4DI+4DO", WaveShareP1_Addr, 5, "MA01_XACX0440",
-          { 70, 71, 72, 73, 74, 75, 76, 77 }, 3, Medium,
-          "Camera da letto", "Parete P1"
-        }, 
+          { 70, 71, 72, 73, 74, 75, 76, 77 },
+          3, Medium, "Camera da letto", "Parete P1" },
 
         { "Scheda 32DI", WaveShareP1_Addr, 6, "N4DIH32",
-          {
-              78, 79, 80, 81, 82, 83, 84, 85,
-              86, 87, 88, 89, 90, 91, 92, 93,
-              94, 95, 96, 97, AREA_CUCINA_PIR_ALM, AREA_CUCINA_PIR_TAMPER, AREA_CUCINA_DOOR_ALM, 101, 
-              102, 103, 104, 105, 106, 107, 108, 109
-          },
-          3, High, "Camera da letto", "Fondo P1"
-        },
+          { 78, 79, 80, 81, 82, 83, 84, 85,
+            86, 87, 88, 89, 90, 91, 92, 93,
+            94, 95, 96, 97, AREA_CUCINA_PIR_ALM,
+            AREA_CUCINA_PIR_TAMPER, AREA_CUCINA_DOOR_ALM,
+            101, 102, 103, 104, 105, 106, 107, 108, 109 },
+          3, High, "Camera da letto", "Fondo P1" },
 
         { "Scheda 8DO", WaveShareP1_Addr, 7, "MA01_AXCX0080",
-          { 110, 111, 112, 113, 114, 115, 116, 117 }, 3, Low,
-          "Camera da letto", "Fondo P1"
-        },
+          { 110, 111, 112, 113, 114, 115, 116, 117 },
+          3, Low, "Camera da letto", "Fondo P1" },
 
         { "Sensore CO/Temp/Hum", WaveShareP1_Addr, 10, "CWT_THCO_2K",
-          { SENSORE_CAMERA_HUM, SENSORE_CAMERA_TEMP, SENSORE_CAMERA_CO }, 3, Low,
-          "Camera da letto", "P1"
-        },
+          { SENSORE_CAMERA_HUM, SENSORE_CAMERA_TEMP, SENSORE_CAMERA_CO },
+          3, Low, "Camera da letto", "P1" },
 
         // --- PT ---
         { "Sensore Corrente", WaveSharePT_Addr, 1, "CTR4A01",
-          { SENSORE_CUCINA_INDUZIONE }, 3, Low,
-          "Cucina",  "Quadro cucina PT"
-        },
+          { SENSORE_CUCINA_INDUZIONE },
+          3, Low, "Cucina", "Quadro cucina PT" },
 
         { "Scheda 4DI+4DO", WaveSharePT_Addr, 3, "MA01_XACX0440",
-          { 123, 124, AREA_CUCINA_FLOOD_ALM, 126, AREA_CUCINA_LUCE_1, AREA_CUCINA_BLUETOOTH, 129, 130 }, 3, High,
-          "Cucina",  "Quadro cucina PT"
-        },
+          { 123, 124, AREA_CUCINA_FLOOD_ALM, 126,
+            AREA_CUCINA_LUCE_1, AREA_CUCINA_BLUETOOTH,
+            AREA_CUCINA_LUCE_2, 130 },
+          3, High, "Cucina", "Quadro cucina PT" },
 
         { "Scheda 4DI+4DO", WaveSharePT_Addr, 4, "MA01_XACX0440",
-          { 131, 132, 133, 134, AREA_ESTRATTORE_CUCINA, 136, 137, 138 }, 3, Low,
-          "Cucina",  "Parete cucina PT"
-        },
+          { 131, 132, 133, 134, AREA_ESTRATTORE_CUCINA,
+            136, 137, AREA_CUCINA_LED_FONDO },
+          3, Low, "Cucina", "Parete cucina PT" },
 
         { "Scheda 4DI+4DO", WaveSharePT_Addr, 5, "MA01_XACX0440",
-          { 139, 140, 141, 142, 143, 144, 145, 146 }, 3, Low,
-          "Ingresso", "Corridoio PT"
-        },
+          { 139, 140, 141, 142, 143, 144, 145, 146 },
+          3, Low, "Ingresso", "Corridoio PT" },
 
         { "Scheda 4AI+4DO", WaveSharePT_Addr, 6, "MA01_XACX0440",
-          {
-              AREA_INGRESSO_EV_OPEN_DI, 148, 149, 150,
-              RELAY_LED_BAGNO,
-              AREA_INGRESSO_EV_CLOSE, AREA_INGRESSO_EV_OPEN,
-              AREA_ESTRATTORE_BAGNO
-          },
-          3, Low, "Ingresso", "Corridoio PT"
-        },
+          { AREA_INGRESSO_EV_OPEN_DI, 148, 149, 150,
+            RELAY_LED_BAGNO, AREA_INGRESSO_EV_CLOSE,
+            AREA_INGRESSO_EV_OPEN, AREA_ESTRATTORE_BAGNO },
+          3, Low, "Ingresso", "Corridoio PT" },
 
         { "Scheda 32DI", WaveSharePT_Addr, 7, "N4DIH32",
-          {
-              AREA_BAGNO_PIR_ALM, AREA_BAGNO_PIR_TAMPER,
-              AREA_INGRESSO_PIR_ALM, AREA_INGRESSO_PIR_TAMPER,
-              159, 160, 161, 162, 163, 164, 165, 166,
-              AREA_BAGNO_FLOOD_ALM,
-              BAGNO_IN_P1, BAGNO_IN_P2, BAGNO_IN_P3,
-              171, 172, 173, 174, 175, 176, 177, 178, 179, 180,
-              181, 182, 183, 184, 185, 186
-          },
-          3, High, "Ingresso", "Corridoio PT"
-        }, 
+          { AREA_BAGNO_PIR_ALM, AREA_BAGNO_PIR_TAMPER,
+            AREA_INGRESSO_PIR_ALM, AREA_INGRESSO_PIR_TAMPER,
+            159, 160, 161, 162, 163, 164, 165, 166,
+            AREA_BAGNO_FLOOD_ALM, BAGNO_IN_P1, BAGNO_IN_P2,
+            BAGNO_IN_P3, 171, 172, 173, 174, 175, 176, 177,
+            178, 179, 180, 181, 182, 183, 184, 185, 186 },
+          3, High, "Ingresso", "Corridoio PT" },
 
         { "Sensore Light/Temp/Hum", WaveSharePT_Addr, 10, "CWT_THCO_2K",
-          { SENSORE_CUCINA_HUM, SENSORE_CUCINA_TEMP, SENSORE_CUCINA_LUX }, 3, Low,
-          "Cucina", ""
-        },
+          { SENSORE_CUCINA_HUM, SENSORE_CUCINA_TEMP, SENSORE_CUCINA_LUX },
+          3, Low, "Cucina", "" },
 
         { "Gestore LED", WaveSharePT_Addr, 8, "RESI_LED",
-          { 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202 }, 3, Low,
-          "Bagno", ""
-        },
+          { 191, 192, 193, 194, 195, 196,
+            197, 198, 199, 200, 201, 202 },
+          3, Low, "Bagno", "" },
 
         { "Sensore Light/Temp/Hum", WaveSharePT_Addr, 11, "CWT_SLTH_6W_S_C",
-          { SENSORE_BAGNO_HUM, SENSORE_BAGNO_TEMP, SENSORE_BAGNO_LUX }, 3, Low,
-          "Bagno", ""
-        } 
-    }
-};
+          { SENSORE_BAGNO_HUM, SENSORE_BAGNO_TEMP, SENSORE_BAGNO_LUX },
+          3, Low, "Bagno", "" }
+    };
+}
 
 
 static const DomoManagerConfig::LocalIO mainLocalIOConfig = {
@@ -354,17 +359,17 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
 
     // **** 4 DI EbYTE ID=2
     { AREA_INGRESSO_DOOR_ALM, 0, "Sensore porta ingresso, NEGATO", {true}, {-1,-1} },
-
-    // Pulsanti scala
-    { 54, 57, "Pulsante scala 3", {false}, {-1,-1} },   // forwardArea = 57
-    { 55, 0,  "Pulsante scala 1", {false}, {-1,-1} },   // -------A
-    { 56, 0, "Pulsante scala 2 (Luce PT)", {false}, {-1,-1} }, // forwardArea = 59
+    { AREA_INGRESSO_SW3, AREA_INGRESSO_LIGHT_SCALE, "Pulsante scala 3", {false}, {-1,-1} },   // forwardArea = 57
+    { AREA_INGRESSO_SW1, 0,  "Pulsante scala 1", {false}, {-1,-1} },   // -------A
+    { AREA_INGRESSO_SW2, 0, "Pulsante scala 2 (Luce PT)", {false}, {-1,-1} }, // forwardArea = 59
 
     // 4 DO EbYTE
-    { 57, 0, "Luce scale", {false}, {-1,-1} },
-    { 58, 0, "Luce ingresso", {false}, {-1,-1} },
+    { AREA_INGRESSO_LIGHT_SCALE, 0, "Luce scale", {false}, {-1,-1} },
+    { AREA_INGRESSO_LIGHT_INGRESSO, 0, "Luce ingresso", {false}, {-1,-1} },
     { AREA_PLAFONIERA_EXT, 0, "Luce Ext.", {false}, {-1,-1} },
-    { 60, 0, "", {false}, {-1,-1} },
+    { BOARD_2_IN,  0, "4DI input word",  {false}, {-1,-1} },
+    { BOARD_2_OUT, 0, "4DO output word", {false}, {-1,-1} },
+
     // ============================================================
     // =======================   QUADRO P1   =======================
     // ============================================================
@@ -453,7 +458,7 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
 
     // **** 4 DI EbYTE
     { 123, AREA_CUCINA_LUCE_1, "Pulsante Cucina 1", {false}, {-1,-1} },   // forwardArea = 127
-    { 124, 129, "Pulsante Cucina 2", {false}, {-1,-1} },   // forwardArea = 129
+    { 124, AREA_CUCINA_LUCE_2, "Pulsante Cucina 2", {false}, {-1,-1} },   // forwardArea = 129
 
     { AREA_CUCINA_FLOOD_ALM, 0, "Allagamento Cucina", {false}, {-1,-1} },
     { 126, 0, "", {false}, {-1,-1} },
@@ -474,7 +479,7 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     { AREA_ESTRATTORE_CUCINA, 0, "Estrattore", {false}, {-1,-1} },
     { 136, 0, "Valvola calorifero bagno ON",  {false}, {-1,-1} },
     { 137, 0, "Valvola calorifero bagno OFF", {false}, {-1,-1} },
-    { 138, 0, "Led Fondo", {false}, {-1,-1} },
+    { AREA_CUCINA_LED_FONDO, 0, "Led Fondo", {false}, {-1,-1} },
 
     // **** 4 AI EbYTE ID=5 Corridoio PT
     { 139, 0, "Pressione rete H2O", {false}, {-1,-1} },
@@ -515,7 +520,7 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
 
     { BAGNO_IN_P1, 0, "Int. Luce bagno",     {false}, {-1,-1} },
     { BAGNO_IN_P2, 0, "Int. Luce scale", {false}, {-1,-1} },
-    { BAGNO_IN_P3, 58, "Int. Luce ingresso",      {false}, {-1,-1} },
+    { BAGNO_IN_P3, AREA_INGRESSO_LIGHT_INGRESSO, "Int. Luce ingresso",      {false}, {-1,-1} },
 
     // Sensori Cucina
     { SENSORE_CUCINA_HUM,  0, "Umidita",     {false}, {-1,-1} },
@@ -618,13 +623,13 @@ static const DomoManagerBufferEngine::AreasConfig mainAreasConfig = {
     { AREA_SECURITY_CMD_AREA,    0, "Comando pannello antifurto",{false}, {-1, -1} },
     { AREA_SECURITY_BIT_AREA,    0, "Comando bit antifurto",   {false}, {-1, -1} },
 
-// ============================================================
-// SECURITY MQTT REMOTE
-// ============================================================
-/*
-{ AREA_MQTT_HANDCONTROL,        0, "Telecomando antifurto",        {false}, {-1, -1} }, 
-{ AREA_MQTT_HANDCONTROL_STATUS, 0, "Stato telecomando antifurto",  {false}, {-1, -1} },
-{ AREA_MQTT_HANDCONTROL_CMD,    0, "Comando telecomando antifurto",{false}, {-1, -1} },*/
+    // ============================================================
+    // SECURITY MQTT REMOTE
+    // ============================================================
+    /*
+    { AREA_MQTT_HANDCONTROL,        0, "Telecomando antifurto",        {false}, {-1, -1} }, 
+    { AREA_MQTT_HANDCONTROL_STATUS, 0, "Stato telecomando antifurto",  {false}, {-1, -1} },
+    { AREA_MQTT_HANDCONTROL_CMD,    0, "Comando telecomando antifurto",{false}, {-1, -1} },*/
 
     // ============================================================
     // INVERTER SOLARE
@@ -680,6 +685,42 @@ static const DomoManagerRouteEngine::RoutesConfig mainRoutesConfig = {
     }
 };
 
+// Fronte 1 -> 0 dell'input: azzera tutti gli output associati.
+static const FallingEdgeResetEngine::ResetConfig mainFallingEdgeResetConfig = {
+    { GenericSensor::Config::Type::BUFFER, AREA_CUCINA_LUCE_1, 1.0f },
+    {
+        { { GenericSensor::Config::Type::BUFFER, AREA_CUCINA_LED_FONDO, 1.0f } }
+    }
+};
+static const FallingEdgeResetEngine::ResetConfig mainFallingEdgeResetConfig2 = {
+    { GenericSensor::Config::Type::BUFFER, AREA_CUCINA_LUCE_2, 1.0f },
+    {
+        { { GenericSensor::Config::Type::BUFFER, AREA_CUCINA_LED_FONDO, 1.0f } }
+    }
+};
+
+static const DomoManagerBitSplitEngine::BitSplitConfig mainInputBitsplitConfig = {
+    { GenericSensor::Config::Type::BUFFER, BOARD_2_IN, 1.0f },
+    false, // WORD -> bit
+    {
+        { { GenericSensor::Config::Type::BUFFER, AREA_INGRESSO_DOOR_ALM, 1.0f }, 0, false },
+        { { GenericSensor::Config::Type::BUFFER, AREA_INGRESSO_SW3,      1.0f }, 1, false },
+        { { GenericSensor::Config::Type::BUFFER, AREA_INGRESSO_SW1,      1.0f }, 2, false },
+        { { GenericSensor::Config::Type::BUFFER, AREA_INGRESSO_SW2,      1.0f }, 3, false }
+    }
+};
+
+static const DomoManagerBitSplitEngine::BitSplitConfig mainOutputBitsplitConfig = {
+    { GenericSensor::Config::Type::BUFFER, BOARD_2_OUT, 1.0f },
+    true, // bit -> WORD
+    {
+        { { GenericSensor::Config::Type::BUFFER, AREA_INGRESSO_LIGHT_SCALE,    1.0f }, 0, false },
+        { { GenericSensor::Config::Type::BUFFER, AREA_INGRESSO_LIGHT_INGRESSO, 1.0f }, 1, false },
+        { { GenericSensor::Config::Type::BUFFER, AREA_PLAFONIERA_EXT,           1.0f }, 2, false }
+    }
+};
+
+
 static const DomoManagerSplitEngine::SplitsConfig mainSplitsConfig = {
     {
         { 78, {114,115}, 30000 },
@@ -696,13 +737,13 @@ static const DomoManagerSplitEngine::SplitsConfig mainSplitsConfig = {
 
 static const DomoManagerToggleEngine::TogglesConfig mainTogglesConfig = {
     {
-        { 54, { BAGNO_IN_P2 } },
-        { 90, { 82, 55 } },
+        { AREA_INGRESSO_SW3, { BAGNO_IN_P2 } },
+        { 90, { 82, AREA_INGRESSO_SW1 } },
 
         { 63, {} },
         { 64, {} },
         { 91, {} },
-        { 56, {} },
+        { AREA_INGRESSO_SW2, {} },
         { 123, {} },
         { 124, {} },
 
@@ -881,13 +922,22 @@ inline void ConfigureDomoManager(
     cfg.watchdog = wdConfig;
 
     // --- Devices ---
-    cfg.devices = mainDevicesConfig;
+    ConfigureDevices(cfg);
 
     // --- Engines ---
     cfg.routes  = mainRoutesConfig;
     cfg.areas   = mainAreasConfig;
     cfg.toggles = mainTogglesConfig;
     cfg.splits  = mainSplitsConfig;
+    cfg.bitSplits.list = {
+        mainInputBitsplitConfig,
+        mainOutputBitsplitConfig
+    };
+    cfg.fallingEdgeResets.list = {
+        mainFallingEdgeResetConfig,
+        mainFallingEdgeResetConfig2
+    };
+
 
     // --- Automation JSON ---
     cfg.automation.json = AUTOMATION_JSON;

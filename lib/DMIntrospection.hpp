@@ -248,6 +248,13 @@ public:
         const FrontendConfig::Solar*
             solar = nullptr;
 
+        // --------------------------------------------------------------------
+        // SECURITY
+        // --------------------------------------------------------------------
+
+        const FrontendConfig::Security*
+            security = nullptr;
+
     };
 
 
@@ -318,6 +325,10 @@ public:
 
         EntityGroup group =
             EntityGroup::ROOT;
+
+        // Zona normalizzata, risolta dopo la classificazione semantica.
+        const char* zone = nullptr;
+        bool zoneResolved = false;
 
         // --------------------------------------------------------------------
         // TIPO FISICO
@@ -998,6 +1009,13 @@ public:
             );
         }
 
+        if (_ctx.security)
+        {
+            inspectSecurity(
+                *_ctx.security
+            );
+        }
+
         if (_ctx.runtimeStore)
         {
             inspectRuntimeStore();
@@ -1234,6 +1252,102 @@ public:
         }
 
         return getRegistryAreaName(area);
+    }
+
+
+    // ========================================================================
+    // RESOLVE ZONES
+    //
+    // Richiamato dal resolver dopo la classificazione semantica dei gruppi.
+    // ========================================================================
+
+    void resolveZones()
+    {
+        static const char* GENERAL_ZONE = "Generali";
+
+        for (Entity& entity : _entities)
+        {
+            entity.zone = nullptr;
+            entity.zoneResolved = false;
+
+            if (entity.group == EntityGroup::SECURITY)
+            {
+                // 1. Le aree stato/comando di zona appartengono alla zona
+                //    dichiarata direttamente in SecurityZoneConfig.
+                if (_ctx.security &&
+                    _ctx.security->zones &&
+                    _ctx.security->zoneCount > 0)
+                {
+                    for (size_t index = 0;
+                         index < _ctx.security->zoneCount;
+                         ++index)
+                    {
+                        const auto& zone =
+                            _ctx.security->zones[index];
+
+                        if (entity.area == zone.statusArea ||
+                            entity.area == zone.cmdArea)
+                        {
+                            entity.zone =
+                                (zone.name && zone.name[0] != '\0')
+                                    ? zone.name
+                                    : GENERAL_ZONE;
+                            break;
+                        }
+                    }
+                }
+
+                // 2. Le aree stato/comando sensore ereditano sensor.zone.
+                if (!entity.zone &&
+                    _ctx.security &&
+                    _ctx.security->sensors &&
+                    _ctx.security->count > 0)
+                {
+                    for (size_t index = 0;
+                         index < _ctx.security->count;
+                         ++index)
+                    {
+                        const auto& sensor =
+                            _ctx.security->sensors[index];
+
+                        if (entity.area == sensor.statusArea ||
+                            entity.area == sensor.cmdArea)
+                        {
+                            entity.zone =
+                                (sensor.zone && sensor.zone[0] != '\0')
+                                    ? sensor.zone
+                                    : GENERAL_ZONE;
+                            break;
+                        }
+                    }
+                }
+
+                // Le aree globali Security restano nel gruppo generale.
+                if (!entity.zone)
+                    entity.zone = GENERAL_ZONE;
+
+                entity.zoneResolved = true;
+                continue;
+            }
+
+            if (entity.group != EntityGroup::PHYSICAL_DEVICE)
+                continue;
+
+            if (entity.device &&
+                entity.device->suggestedArea &&
+                entity.device->suggestedArea[0] != '\0')
+            {
+                entity.zone =
+                    entity.device->suggestedArea;
+            }
+            else
+            {
+                entity.zone =
+                    GENERAL_ZONE;
+            }
+
+            entity.zoneResolved = true;
+        }
     }
 
 
@@ -1588,6 +1702,122 @@ private:
         );
 
         return _entities.back();
+    }
+
+
+    // ========================================================================
+    // SECURITY
+    // ========================================================================
+
+    static void applySecurityMetadata(
+        Entity& entity,
+        EntityKind kind,
+        bool writable)
+    {
+        entity.fromSecurity = true;
+        entity.group = EntityGroup::SECURITY;
+        entity.origin = EntityOrigin::SECURITY;
+        entity.kind = kind;
+        entity.readable = true;
+        entity.writable = writable;
+    }
+
+    void inspectSecurity(
+        const FrontendConfig::Security& cfg)
+    {
+        if (!cfg.enabled)
+            return;
+
+        // Sensori: stato e comando.
+        if (cfg.sensors && cfg.count > 0)
+        {
+            for (size_t index = 0; index < cfg.count; ++index)
+            {
+                const auto& sensor = cfg.sensors[index];
+
+                if (sensor.statusArea >= 0)
+                {
+                    applySecurityMetadata(
+                        ensureEntity(sensor.statusArea),
+                        EntityKind::BINARY_SENSOR,
+                        false
+                    );
+                }
+
+                if (sensor.cmdArea >= 0)
+                {
+                    applySecurityMetadata(
+                        ensureEntity(sensor.cmdArea),
+                        EntityKind::SWITCH,
+                        true
+                    );
+                }
+            }
+        }
+
+        // Zone: stato e comando.
+        if (cfg.zones && cfg.zoneCount > 0)
+        {
+            for (size_t index = 0; index < cfg.zoneCount; ++index)
+            {
+                const auto& zone = cfg.zones[index];
+
+                if (zone.statusArea >= 0)
+                {
+                    applySecurityMetadata(
+                        ensureEntity(zone.statusArea),
+                        EntityKind::BINARY_SENSOR,
+                        false
+                    );
+                }
+
+                if (zone.cmdArea >= 0)
+                {
+                    applySecurityMetadata(
+                        ensureEntity(zone.cmdArea),
+                        EntityKind::SWITCH,
+                        true
+                    );
+                }
+            }
+        }
+
+        // Stato globale, eventi e comandi pannello.
+        if (cfg.statusArea >= 0)
+        {
+            applySecurityMetadata(
+                ensureEntity(cfg.statusArea),
+                EntityKind::STATUS,
+                false
+            );
+        }
+
+        if (cfg.eventArea >= 0)
+        {
+            applySecurityMetadata(
+                ensureEntity(cfg.eventArea),
+                EntityKind::STATUS,
+                false
+            );
+        }
+
+        if (cfg.panelCommandArea >= 0)
+        {
+            applySecurityMetadata(
+                ensureEntity(cfg.panelCommandArea),
+                EntityKind::BUTTON,
+                true
+            );
+        }
+
+        if (cfg.panelBitCommandArea >= 0)
+        {
+            applySecurityMetadata(
+                ensureEntity(cfg.panelBitCommandArea),
+                EntityKind::SWITCH,
+                true
+            );
+        }
     }
 
 

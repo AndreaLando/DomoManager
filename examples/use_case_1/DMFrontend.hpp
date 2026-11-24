@@ -577,7 +577,7 @@ private:
     static bool isHot(void* ctx) {
         auto& buf = DomoManager::instance->getBuffer();
 
-        BufferSourceInfo info;
+        Buffer::SourceInfo info;
         if (buf.GetData(33, info))
             return info.value > 35;
 
@@ -746,6 +746,38 @@ private:
     // ========================================================
     // FRONTEND GENERAL CALLBACKS
     // ========================================================
+
+    static void OnAEEBridgeNamedValue(
+        const BridgeNamedValue& received,
+        unsigned long now)
+    {
+        if (!Manager || received.name.length() == 0U)
+        {
+            return;
+        }
+
+        if (received.name == "ALARM_PANIC" &&
+            received.type == AEEVarType::BOOL &&
+            received.booleanValue)
+        {
+            const bool handled =
+                SecurityEngine::TriggerPanic(now);
+
+            LOG_WF(
+                "SECURITY",
+                "Remote panic from AEE bridge: handled=%u",
+                handled ? 1U : 0U
+            );
+            return;
+        }
+
+        LOG_WF(
+            "AEE-BRIDGE-RX",
+            "Unhandled named value: name=%s type=%u",
+            received.name.c_str(),
+            static_cast<unsigned>(received.type)
+        );
+    }
 
     static void CheckFullCycle()
     {
@@ -3137,6 +3169,9 @@ private:
                 destination.aee =
                     source.aee;
 
+                destination.namedValueCallback =
+                    OnAEEBridgeNamedValue;
+
                 // ========================================================
                 // COMPOSABLE INTROSPECTION FILTER
                 //
@@ -3202,6 +3237,24 @@ private:
                         .introspectionFilter
                         .excludeSplitMains =
                             true;
+
+                    // Security sensor command areas: 222..234.
+                    // Security zone command areas:   252..255.
+                    // The status areas remain exported to the Knob.
+                    destination
+                        .introspectionFilter
+                        .excludedAreaRanges[0] =
+                            { 222, 234 };
+
+                    destination
+                        .introspectionFilter
+                        .excludedAreaRanges[1] =
+                            { 252, 255 };
+
+                    destination
+                        .introspectionFilter
+                        .excludedAreaRangeCount =
+                            2U;
                 }
 
                 // ========================================================

@@ -1,23 +1,32 @@
-#ifndef DMPLC_H
-#define DMPLC_H
+#ifndef DMPLC_HPP
+#define DMPLC_HPP
 
 /* ============================================================================
-   SVILUPPATORE
-   ============================================================================
+ * DMPLC.hpp
+ *
+ * Modulo header-only per la gestione dei dispositivi PLC/Modbus di
+ * DomoManager. Contiene dichiarazioni e implementazioni precedentemente
+ * separate tra DMPLC.h e DMPLC.c.
+ *
+ * Responsabilita:
+ *   - descrizione e accesso ai dispositivi programmabili;
+ *   - indicizzazione per IP e priorita;
+ *   - assegnazione e ricerca delle aree;
+ *   - diagnostica della comunicazione;
+ *   - catalogo dei profili hardware predefiniti.
+ *
+ * Autore:          Andrea Lando
+ * Contatto:        mail@domo-manager.it
+ * Versione modulo: 1.1.0
+ * Ultima modifica: 2026-11-22
+ *
+ * Nota header-only:
+ *   le definizioni fuori classe sono marcate inline per evitare violazioni
+ *   ODR quando il file viene incluso da piu unita di traduzione.
+ * ============================================================================ */
 
-   Nome:            Andrea Lando
-   Contatto:        mail@domo-manager.it
-  
-   Versione modulo: 1.0.0
-   Ultima modifica: 2026‑03‑24
-   Note:
-                    • Nessuna
-
-   ============================================================================ */
-
-#include <vector>
 #include <unordered_map>
-
+#include <vector>
 
 #include "DMBuffers.hpp"
 #include "DMSignal.hpp"
@@ -30,35 +39,10 @@
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
 
-class GenericSensor {
-public:
-    using Config = GenericSensorConfig;
-
-    static int readRaw(const Config& cfg, Buffer& buf) {
-        switch (cfg.type) {
-            case Config::Type::ANALOGIC:
-                return analogRead(cfg.value);
-
-            case Config::Type::DIGITAL:
-                return digitalRead(cfg.value);
-
-            case Config::Type::BUFFER:
-                return buf.getValueFast(cfg.value);
-
-            case Config::Type::CONSTANT:
-                return cfg.value;
-        }
-        return 0;
-    }
-
-    static float read(const Config& cfg, Buffer& buf) {
-        int raw = readRaw(cfg, buf);
-        return raw * cfg.scale;
-    }
-
-};
-
-
+// ============================================================================
+// GENERIC PROGRAMMABLE DEVICE
+// Modello di un dispositivo PLC/Modbus e dei relativi canali I/O.
+// ============================================================================
 class GenericPrgDevice
 {
 public:
@@ -71,7 +55,6 @@ public:
         DO = 3
     };
 
-
     enum GenericPrgDeviceHwEnum
     {
         Coil = 0,
@@ -79,7 +62,6 @@ public:
         Hold = 2,
         Discrete = 3
     };
-
 
     struct GenericPrgDeviceChannel
     {
@@ -94,7 +76,6 @@ public:
         int ItemsPerCall;
     };
 
-
     struct structRead
     {
         short itemsPerCall;
@@ -105,7 +86,6 @@ public:
 
         bool ok;
     };
-
 
     GenericPrgDevice(
         const char* name,
@@ -119,9 +99,7 @@ public:
         const char* installationLocation = nullptr
     );
 
-
     bool Run();
-
 
     structRead Read(
         DMPlatform::Modbus::TCPClient& mb,
@@ -129,7 +107,6 @@ public:
         uint16_t* outBuffer,
         unsigned long now
     );
-
 
     bool Write(
         DMPlatform::Modbus::TCPClient& mb,
@@ -139,12 +116,10 @@ public:
         unsigned long now
     );
 
-
     int GetArea(
         int channel,
         int address
     );
-
 
     bool FindChannelByArea(
         int area,
@@ -152,18 +127,15 @@ public:
         int& item
     );
 
-
     const GenericPrgDeviceChannel&
     GetChannelInfo(
         int channel
     ) const;
 
-
     const DMIPAddress& GetIp() const;
 
     size_t GetChannelsSize() const;
     Priority GetPriority() const;
-
 
     const char* GetName() const;
 
@@ -173,25 +145,21 @@ public:
 
     unsigned int GetDeviceAddress() const;
 
-
     Errors& GetError()
     {
         return Error;
     }
-
 
     const Errors& GetError() const
     {
         return Error;
     }
 
-
     void SetErrorCallback(
         std::function<void(GenericPrgDevice*)> fn)
     {
         _onErrorChanged =
             fn;
-
 
         Error.SetStateChangedCallback(
             [this]()
@@ -206,60 +174,53 @@ public:
         );
     }
 
-
 private:
     short bank;
-
 
     std::vector<int>
         _ioAreas;
 
-
     Priority
         _priority;
-
 
     const char*
         _name;
 
-
     const char*
         _zone;
-
 
     const char*
         _installationLocation;
 
-
     unsigned int
         _deviceAddress;
-
 
     DMIPAddress
         _ip;
 
-
     std::vector<GenericPrgDeviceChannel>
         _channels;
-
 
     Errors
         Error;
 
-
     const short
         MAX_CALLS = 8;
-
 
     std::function<void(GenericPrgDevice*)>
         _onErrorChanged = nullptr;
 };
 
-class GenericPrgDeviceManager {
+// ============================================================================
+// GENERIC PROGRAMMABLE DEVICE MANAGER
+// Cache e selezione dei dispositivi per indirizzo IP e priorita.
+// ============================================================================
+class GenericPrgDeviceManager
+{
 public:
     void BuildPriorityCache(std::vector<GenericPrgDevice>& devices);
     void DebugPriorityCache(std::vector<GenericPrgDevice>& devices);
-    
+
     const std::vector<int>& GetDevicesByPriority(
         Priority priority,
         const DMIPAddress& ip) const;
@@ -273,22 +234,30 @@ private:
     bool _cacheBuilt = false;
 };
 
-class DeviceManager {
+// ============================================================================
+// DEVICE MANAGER
+// Costruzione dei device, assegnazione aree e accesso alla collezione runtime.
+// ============================================================================
+class DeviceManager
+{
 private:
     int nextArea;
     std::vector<GenericPrgDevice> PrgDevices;
 public:
     // ************ IO BUFFER *******************************
     //RESERVED
-    static const int AREA_TRASH=0;
-    static const int AREA_SYSTEM_ERRORS=1;
-    static const int AREA_SYSTEM_RUNNING_T=2;
-    
-    static const int AREA_LAST_RESERVED=9; //Bit flags
+    static constexpr int AREA_TRASH =
+        Buffer::ReservedAreas::TRASH;
+    static constexpr int AREA_SYSTEM_ERRORS =
+        Buffer::ReservedAreas::SYSTEM_ERRORS;
+    static constexpr int AREA_SYSTEM_RUNNING_T =
+        Buffer::ReservedAreas::SYSTEM_RUNNING_T;
+    static constexpr int AREA_LAST_RESERVED =
+        Buffer::ReservedAreas::LAST;
 
-    static inline bool IsReservedArea(int area) {
-        return area >= DeviceManager::AREA_TRASH &&
-            area <= DeviceManager::AREA_LAST_RESERVED;
+    static constexpr bool IsReservedArea(int area)
+    {
+        return Buffer::ReservedAreas::contains(area);
     }
 
     // END RESERVED
@@ -387,7 +356,6 @@ public:
                 *maxAreaIt + 1;
         }
     }
-
 
     // ---------------------------------------------------------
     // ACCESSO
@@ -515,7 +483,10 @@ public:
 
    ============================================================================ */
 
-
+// ============================================================================
+// DEVICE MANAGER DIAGNOSTIC
+// Classificazione, analisi e report dello stato di comunicazione.
+// ============================================================================
 class DeviceManagerDiagnostic
 {
 public:
@@ -535,7 +506,6 @@ public:
         READ_WRITE
     };
 
-
     // ========================================================================
     // DEVICE STATE
     // ========================================================================
@@ -553,7 +523,6 @@ public:
         NO_IO
     };
 
-
     // ========================================================================
     // GLOBAL STATE
     // ========================================================================
@@ -568,7 +537,6 @@ public:
 
         ERROR
     };
-
 
     // ========================================================================
     // HEALTH SUMMARY
@@ -628,7 +596,6 @@ public:
             false;
     };
 
-
     // ========================================================================
     // DEVICE CAPABILITIES
     // ========================================================================
@@ -666,7 +633,6 @@ public:
         return false;
     }
 
-
     static bool HasWritableChannels(
         const GenericPrgDevice& device)
     {
@@ -699,7 +665,6 @@ public:
 
         return false;
     }
-
 
     // ========================================================================
     // COMMUNICATION CLASSIFICATION
@@ -742,7 +707,6 @@ public:
         return
             CommunicationType::NO_IO;
     }
-
 
     // ========================================================================
     // DEVICE STATE CLASSIFICATION
@@ -798,7 +762,6 @@ public:
         return
             DeviceState::NO_IO;
     }
-
 
     // ========================================================================
     // ANALYZE
@@ -1002,7 +965,6 @@ public:
         return summary;
     }
 
-
     // ========================================================================
     // REPORT
     // ========================================================================
@@ -1198,7 +1160,6 @@ public:
         Serial.println();
     }
 
-
     // ========================================================================
     // STRING HELPERS
     // ========================================================================
@@ -1223,7 +1184,6 @@ public:
         }
     }
 
-
     static const char* DeviceStateToString(
         DeviceState state)
     {
@@ -1247,7 +1207,6 @@ public:
         }
     }
 
-
     static const char* GlobalStateToString(
         GlobalState state)
     {
@@ -1267,7 +1226,6 @@ public:
                 return "NOT_VERIFIABLE";
         }
     }
-
 
 private:
 
@@ -1330,7 +1288,6 @@ private:
         );
     }
 
-
     // ========================================================================
     // PRINT COUNT
     // ========================================================================
@@ -1355,7 +1312,6 @@ private:
             )
         );
     }
-
 
     // ========================================================================
     // PRINT MASK
@@ -1410,455 +1366,12 @@ private:
     }
 };
 
-class ToggleManager {
-public:
-
-    struct ToggleSignalItem {
-        ToggleSignal Toggle;
-        int areaRead;
-        std::vector<int> forwardsFromAreas;
-    };
-
-private:
-
-    std::vector<ToggleSignalItem> toggles;
-
-    // Cache: areaRead → indice nel vector
-    std::unordered_map<int, size_t> cacheByArea;
-
-    // Cache: forward area → indice nel vector
-    std::unordered_map<int, size_t> cacheByForwardArea;
-
-    // Cache utilizzata dalla logica esistente
-    std::unordered_set<int> forwardAreasCache;
-
-
-public:
-
-    ToggleManager() {}
-
-
-    // ============================================================
-    // AREA GESTITA DA TOGGLE?
-    // ============================================================
-
-    bool handlesArea(int area) const
-    {
-        return cacheByArea.count(area) > 0 ||
-               cacheByForwardArea.count(area) > 0;
-    }
-
-
-    // ============================================================
-    // FORWARD AREA
-    // ============================================================
-
-    bool isForwardArea(int area) const
-    {
-        return forwardAreasCache.count(area) > 0;
-    }
-
-
-    // ============================================================
-    // ACCESSO
-    // ============================================================
-
-    const std::vector<ToggleSignalItem>& getAll() const
-    {
-        return toggles;
-    }
-
-
-    // ============================================================
-    // ADD TOGGLE
-    // ============================================================
-
-    void add(
-        int areaRead,
-        std::vector<int> forwards = {})
-    {
-        toggles.push_back({
-            ToggleSignal(),
-            areaRead,
-            forwards
-        });
-
-        const size_t index = toggles.size() - 1;
-
-        // Cache areaRead → Toggle
-        cacheByArea[areaRead] = index;
-
-        // Cache forwardArea → Toggle
-        for (int fwd : forwards)
-        {
-            forwardAreasCache.insert(fwd);
-            cacheByForwardArea[fwd] = index;
-        }
-    }
-
-
-    // ============================================================
-    // ACCESSO PER INDICE
-    // ============================================================
-
-    ToggleSignalItem* operator[](size_t index)
-    {
-        return index < toggles.size()
-            ? &toggles[index]
-            : nullptr;
-    }
-
-
-    size_t size() const
-    {
-        return toggles.size();
-    }
-
-
-    // ============================================================
-    // GET PER INDICE
-    // ============================================================
-
-    ToggleSignalItem* get(size_t index)
-    {
-        return index < toggles.size()
-            ? &toggles[index]
-            : nullptr;
-    }
-
-
-    // ============================================================
-    // GET PER AREA READ
-    // ============================================================
-
-    inline ToggleSignalItem* get(int areaRead)
-    {
-        auto it = cacheByArea.find(areaRead);
-
-        if (it == cacheByArea.end())
-            return nullptr;
-
-        const size_t idx = it->second;
-
-        return idx < toggles.size()
-            ? &toggles[idx]
-            : nullptr;
-    }
-
-
-    // ============================================================
-    // GET PER FORWARD AREA
-    // ============================================================
-
-    inline ToggleSignalItem* getByForwardArea(int area)
-    {
-        auto it = cacheByForwardArea.find(area);
-
-        if (it == cacheByForwardArea.end())
-            return nullptr;
-
-        const size_t idx = it->second;
-
-        return idx < toggles.size()
-            ? &toggles[idx]
-            : nullptr;
-    }
-
-
-    // ============================================================
-    // GET FORWARD VALUE
-    // ============================================================
-
-    inline int getForwardValue(
-        int area,
-        Buffer &buffer)
-    {
-        const int max = buffer.size();
-
-        ToggleSignalItem* t = get(area);
-
-        if (!t)
-            return 0;
-
-        for (int fwdArea : t->forwardsFromAreas)
-        {
-            if (fwdArea >= 0 &&
-                fwdArea < max &&
-                buffer.getValueFast(fwdArea) > 0)
-            {
-                return 1;
-            }
-        }
-
-        return 0;
-    }
-
-
-    // ============================================================
-    // RESULT
-    // ============================================================
-
-    struct ToggleResult
-    {
-        // Area fisica del Buffer.
-        //
-        // Per Toggle normale:
-        //     areaToWrite
-        //
-        // Per Toggle Route-only:
-        //     Buffer::NO_AREA
-        int area = Buffer::NO_AREA;
-
-        long value = 0;
-
-        // Area logica del Toggle.
-        //
-        // Esempio:
-        //     Toggle 90 con forward 82
-        //
-        // Evento ricevuto:
-        //     area=82
-        //
-        // toggleArea:
-        //     90
-        int toggleArea = Buffer::NO_AREA;
-    };
-
-
-    // ============================================================
-    // PROCESS EVENT
-    // ============================================================
-
-    bool processEvent(
-        int area,
-        long value,
-        Buffer& buffer,
-        unsigned long now,
-        ToggleResult& result)
-    {
-        (void)now;
-
-        ToggleSignalItem* toggle = get(area);
-
-        if (!toggle)
-            toggle = getByForwardArea(area);
-
-        if (!toggle)
-            return false;
-
-        // Area logica/primaria del Toggle.
-        result.toggleArea = toggle->areaRead;
-
-        long signalIn = value;
-
-        // ========================================================
-        // FORWARD
-        // ========================================================
-
-        if (!toggle->forwardsFromAreas.empty())
-        {
-            signalIn = getForwardValue(
-                toggle->areaRead,
-                buffer
-            );
-
-            if (signalIn == 0)
-                signalIn = value;
-        }
-
-        // ========================================================
-        // CERCA AreaToWrite
-        // ========================================================
-
-        const int areaToWrite =
-            buffer.GetAreaToWrite(toggle->areaRead);
-
-
-        // ========================================================
-        // TOGGLE CON AreaToWrite
-        //
-        // COMPORTAMENTO ORIGINALE
-        // ========================================================
-
-        if (areaToWrite > 0)
-        {
-            BufferSourceInfo outputInfo;
-
-            if (!buffer.GetData(
-                    areaToWrite,
-                    outputInfo))
-            {
-                return false;
-            }
-
-            long toggleOut = outputInfo.value;
-
-            if (!toggle->Toggle.change(
-                    signalIn,
-                    toggleOut))
-            {
-                return false;
-            }
-
-            result.area = areaToWrite;
-            result.value = toggleOut;
-
-            return true;
-        }
-
-
-        // ========================================================
-        // TOGGLE SENZA AreaToWrite
-        //
-        // L'uscita viene gestita da Route.
-        // ========================================================
-
-        long toggleOut = 0;
-
-        if (!toggle->Toggle.changeRoute(
-                signalIn,
-                toggleOut))
-        {
-            return false;
-        }
-
-        result.area = Buffer::NO_AREA;
-        result.value = toggleOut;
-
-        return true;
-    }
-};
-
-class RouteManager
+// ============================================================================
+// DEVICE PROFILES
+// Catalogo dei profili hardware e delle relative mappe canale.
+// ============================================================================
+class DeviceProfiles
 {
-public:
-
-    // ============================================================
-    // STRUTTURE
-    // ============================================================
-
-    struct RouteAction
-    {
-        int targetArea;
-        int value;
-    };
-
-    struct RouteCase
-    {
-        int triggerValue;
-        std::vector<RouteAction> actions;
-    };
-
-    struct RouteConfig
-    {
-        String name;
-        int triggerArea;
-        std::vector<RouteCase> cases;
-    };
-
-    struct SafeRoute
-    {
-        std::vector<RouteCase> cases;
-    };
-
-
-private:
-
-    std::unordered_map<int, SafeRoute> routes;
-
-
-public:
-
-    // ============================================================
-    // LOAD
-    // ============================================================
-
-    void load(const std::vector<RouteConfig>& cfg)
-    {
-        for (const auto& r : cfg)
-        {
-            routes[r.triggerArea] = {
-                r.cases
-            };
-        }
-    }
-
-
-    // ============================================================
-    // LOOKUP
-    // ============================================================
-
-    inline bool hasRoute(int area) const
-    {
-        return routes.find(area) != routes.end();
-    }
-
-
-    // ============================================================
-    // EXECUTE
-    // ============================================================
-
-    std::vector<RouteAction> execute(
-        int srcArea,
-        long value,
-        Buffer& buffer) const
-    {
-        std::vector<RouteAction> actions;
-
-        const auto it = routes.find(srcArea);
-
-        if (it == routes.end())
-            return actions;
-
-        const auto& route = it->second;
-
-        const int bufferSize =
-            static_cast<int>(buffer.size());
-
-        for (const auto& rc : route.cases)
-        {
-            if (rc.triggerValue != value)
-                continue;
-
-            for (const auto& act : rc.actions)
-            {
-                if (act.targetArea < 0 ||
-                    act.targetArea >= bufferSize)
-                {
-                    LOG_WF(
-                        "RouteManager",
-                        "Skip route write: invalid targetArea=%d (srcArea=%d)",
-                        act.targetArea,
-                        srcArea
-                    );
-
-                    continue;
-                }
-
-                if (DeviceManager::IsReservedArea(
-                        act.targetArea))
-                {
-                    LOG_WF(
-                        "RouteManager",
-                        "Skip route write: reserved targetArea=%d (srcArea=%d)",
-                        act.targetArea,
-                        srcArea
-                    );
-
-                    continue;
-                }
-
-                actions.push_back(act);
-            }
-
-            break;
-        }
-
-        return actions;
-    }
-};
-
-class DeviceProfiles {
 public:
     using Channel = GenericPrgDevice::GenericPrgDeviceChannel;
 
@@ -2010,9 +1523,858 @@ private:
             {GenericPrgDevice::DI, GenericPrgDevice::Discrete, 0, 16, 1},
             {GenericPrgDevice::DO, GenericPrgDevice::Coil,     0, 12, 1}
         });
+
+        add("DOMO_4DI4DO01", {
+            {GenericPrgDevice::DI, GenericPrgDevice::Hold,  0, 1, 1},
+            {GenericPrgDevice::DO, GenericPrgDevice::Hold, 2, 1, 1}
+        });
     }
 };
 
+// ============================================================================
+// IMPLEMENTAZIONE HEADER-ONLY
+// ============================================================================
 
+// ----------------------------------------------------------------------------
+// Utility chiave cache: IP + priorita
+// ----------------------------------------------------------------------------
 
-#endif
+inline uint64_t MakeKey(const DMIPAddress& ip, uint8_t prio)
+{
+    uint32_t ipKey =
+        ((uint32_t)ip[0] << 24) |
+        ((uint32_t)ip[1] << 16) |
+        ((uint32_t)ip[2] << 8)  |
+        ((uint32_t)ip[3]);
+
+    return ((uint64_t)ipKey << 8) | prio;
+}
+
+// ----------------------------------------------------------------------------
+// GenericPrgDeviceManager
+// ----------------------------------------------------------------------------
+inline void GenericPrgDeviceManager::BuildPriorityCache(std::vector<GenericPrgDevice>& devices) {
+    if (_cacheBuilt) return;
+
+    _cachePriorityIndex.clear();
+
+    for (size_t i = 0; i < devices.size(); i++) {
+        auto& dev = devices[i];
+
+        uint64_t key = MakeKey(dev.GetIp(), (uint8_t)dev.GetPriority());
+        _cachePriorityIndex[key].push_back(i);
+    }
+
+    _cacheBuilt = true;
+
+    //DebugPriorityCache(devices);
+}
+
+inline void GenericPrgDeviceManager::DebugPriorityCache(
+    std::vector<GenericPrgDevice>& devices)
+{
+    LOG_IF(
+        __FUNCTION__,
+        "===== PRIORITY CACHE DEBUG ====="
+    );
+
+    for (const auto& entry : _cachePriorityIndex)
+    {
+        const uint64_t key = entry.first;
+        const auto& indices = entry.second;
+
+        const uint32_t ipRaw =
+            static_cast<uint32_t>(key >> 8);
+
+        const uint8_t priority =
+            static_cast<uint8_t>(key & 0xFF);
+
+        const DMIPAddress ip(
+            (ipRaw >> 24) & 0xFF,
+            (ipRaw >> 16) & 0xFF,
+            (ipRaw >> 8) & 0xFF,
+            ipRaw & 0xFF
+        );
+
+        LOG_IF(
+            __FUNCTION__,
+            "Key=%llu | IP=%u.%u.%u.%u | Priority=%u | Devices=%u",
+            static_cast<unsigned long long>(key),
+            static_cast<unsigned>(ip[0]),
+            static_cast<unsigned>(ip[1]),
+            static_cast<unsigned>(ip[2]),
+            static_cast<unsigned>(ip[3]),
+            static_cast<unsigned>(priority),
+            static_cast<unsigned>(indices.size())
+        );
+
+        for (const int index : indices)
+        {
+            if (index < 0 ||
+                index >= static_cast<int>(devices.size()))
+            {
+                LOG_WF(
+                    __FUNCTION__,
+                    "Indice device non valido: %d",
+                    index
+                );
+
+                continue;
+            }
+
+            const GenericPrgDevice& device =
+                devices[static_cast<size_t>(index)];
+
+            LOG_IF(
+                __FUNCTION__,
+                "Device[%d] | %s | Zona=%s | Installazione=%s | "
+                "IP=%u.%u.%u.%u | Addr=%u | Priority=%u",
+                index,
+                device.GetName(),
+                device.GetZone(),
+                device.GetInstallationLocation(),
+                static_cast<unsigned>(device.GetIp()[0]),
+                static_cast<unsigned>(device.GetIp()[1]),
+                static_cast<unsigned>(device.GetIp()[2]),
+                static_cast<unsigned>(device.GetIp()[3]),
+                static_cast<unsigned>(device.GetDeviceAddress()),
+                static_cast<unsigned>(device.GetPriority())
+            );
+        }
+    }
+
+    LOG_IF(
+        __FUNCTION__,
+        "===== END PRIORITY CACHE DEBUG ====="
+    );
+}
+
+inline const std::vector<int>& GenericPrgDeviceManager::GetDevicesByPriority(
+    Priority priority,
+    const DMIPAddress& ip) const
+{
+    static const std::vector<int> empty;
+
+    const uint64_t key = MakeKey(
+        ip,
+        static_cast<uint8_t>(priority)
+    );
+
+    LOG_DF("CACHE::LOOKUP",
+        "LOOKUP ip=%d.%d.%d.%d prio=%d key=%llu",
+        ip[0], ip[1], ip[2], ip[3],
+        static_cast<int>(priority),
+        static_cast<unsigned long long>(key));
+
+    const auto it = _cachePriorityIndex.find(key);
+
+    if (it == _cachePriorityIndex.end())
+        return empty;
+
+    LOG_DF("CACHE::FOUND",
+        "FOUND %d devices for key=%llu",
+        static_cast<int>(it->second.size()),
+        static_cast<unsigned long long>(key));
+
+    for (int idx : it->second) {
+        LOG_DF("CACHE::DEV",
+            "  devIdx=%d", idx);
+    }
+
+    return it->second;
+}
+
+////////////////////////////////////////////////////////// GenericDevice
+// ----------------------------------------------------------------------------
+// GenericPrgDevice
+// ----------------------------------------------------------------------------
+inline GenericPrgDevice::GenericPrgDevice(
+    const char* name,
+    DMIPAddress ip,
+    unsigned int deviceAddress,
+    std::vector<GenericPrgDeviceChannel> channels,
+    std::vector<int> ioAreas,
+    short errorCount,
+    Priority priority,
+    const char* zone,
+    const char* installationLocation)
+    : _ioAreas(
+          std::move(
+              ioAreas
+          )
+      ),
+      _priority(
+          priority
+      ),
+      _name(
+          name
+      ),
+      _zone(
+          zone
+      ),
+      _installationLocation(
+          installationLocation
+      ),
+      _deviceAddress(
+          deviceAddress
+      ),
+      _ip(
+          ip
+      ),
+      _channels(
+          std::move(
+              channels
+          )
+      ),
+      Error(
+          errorCount,
+          30000
+      ),
+      bank(
+          0
+      )
+{
+}
+
+inline int GenericPrgDevice::GetArea(
+    int channel,
+    int address)
+{
+    if (_ioAreas.empty())
+    {
+        LOG_EF(
+            __FUNCTION__,
+            "EMPTY IO AREA: ch=%d addr=%d",
+            channel,
+            address
+        );
+
+        return -1;
+    }
+
+    if (channel < 0 ||
+        channel >=
+            static_cast<int>(
+                _channels.size()
+            ))
+    {
+        LOG_EF(
+            __FUNCTION__,
+            "Canale fuori range: "
+            "device=%s channel=%d channels=%u",
+            GetName(),
+            channel,
+            static_cast<unsigned>(
+                _channels.size()
+            )
+        );
+
+        return -1;
+    }
+
+    if (address < 0 ||
+        address >=
+            _channels[channel].items)
+    {
+        LOG_EF(
+            __FUNCTION__,
+            "Address fuori range: "
+            "device=%s channel=%d "
+            "address=%d items=%d",
+            GetName(),
+            channel,
+            address,
+            _channels[channel].items
+        );
+
+        return -1;
+    }
+
+    int index =
+        address;
+
+    for (int currentChannel = 0;
+         currentChannel < channel;
+         ++currentChannel)
+    {
+        index +=
+            _channels[currentChannel].items;
+    }
+
+    if (index < 0 ||
+        index >=
+            static_cast<int>(
+                _ioAreas.size()
+            ))
+    {
+        LOG_EF(
+            __FUNCTION__,
+            "Indice area fuori range: "
+            "device=%s channel=%d "
+            "address=%d index=%d size=%u",
+            GetName(),
+            channel,
+            address,
+            index,
+            static_cast<unsigned>(
+                _ioAreas.size()
+            )
+        );
+
+        return -1;
+    }
+
+    return _ioAreas[index];
+}
+
+inline const GenericPrgDevice::GenericPrgDeviceChannel& GenericPrgDevice::GetChannelInfo(int channel) const
+{
+    static const GenericPrgDeviceChannel invalidChannel = {
+        NOTSET,
+        Coil,
+        0,
+        0,
+        0
+    };
+
+    if (channel >= 0 && channel < static_cast<int>(_channels.size()))
+        return _channels[channel];
+
+    return invalidChannel;
+}
+
+inline size_t GenericPrgDevice::GetChannelsSize() const
+{
+    return _channels.size();
+}
+
+inline Priority GenericPrgDevice::GetPriority() const
+{
+    return _priority;
+}
+
+inline const DMIPAddress& GenericPrgDevice::GetIp() const
+{
+    return _ip;
+}
+
+inline unsigned int GenericPrgDevice::GetDeviceAddress() const
+{
+    return _deviceAddress;
+}
+
+inline const char* GenericPrgDevice::GetName() const
+{
+    if (!_name ||
+        _name[0] == '\0')
+    {
+        return "NO name Device";
+    }
+
+    return _name;
+}
+
+inline const char* GenericPrgDevice::GetZone() const
+{
+    if (!_zone ||
+        _zone[0] == '\0')
+    {
+        return "Not set";
+    }
+
+    return _zone;
+}
+
+inline const char*
+GenericPrgDevice::GetInstallationLocation() const
+{
+    if (!_installationLocation ||
+        _installationLocation[0] == '\0')
+    {
+        return "Not set";
+    }
+
+    return _installationLocation;
+}
+
+inline bool GenericPrgDeviceManager::HasDevicesByPriority(
+    Priority priority,
+    const DMIPAddress& ip) const
+{
+    const uint64_t key =
+        MakeKey(ip, static_cast<uint8_t>(priority));
+
+    auto it = _cachePriorityIndex.find(key);
+
+    return it != _cachePriorityIndex.end()
+        && !it->second.empty();
+}
+
+inline bool GenericPrgDevice::FindChannelByArea(
+    int area,
+    int& channel,
+    int& item)
+{
+    const int channelCount =
+        static_cast<int>(
+            GetChannelsSize()
+        );
+
+    for (int channelIndex = 0;
+         channelIndex < channelCount;
+         ++channelIndex)
+    {
+        const GenericPrgDeviceChannel& channelInfo =
+            GetChannelInfo(
+                channelIndex
+            );
+
+        for (int itemIndex = 0;
+             itemIndex < channelInfo.items;
+             ++itemIndex)
+        {
+            if (GetArea(
+                    channelIndex,
+                    itemIndex) != area)
+            {
+                continue;
+            }
+
+            channel =
+                channelIndex;
+
+            item =
+                itemIndex;
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+inline GenericPrgDevice::structRead GenericPrgDevice::Read(
+    DMPlatform::Modbus::TCPClient& cli,
+    int channel,
+    uint16_t* outBuffer,
+    unsigned long now)
+{
+    structRead result{};
+    result.ok = false;
+
+    if (!outBuffer)
+    {
+        LOG_EF(__FUNCTION__,
+            "outBuffer NULL | Device=%s | Zona=%s | Installazione=%s",
+            GetName(),
+            GetZone(),
+            GetInstallationLocation());
+
+        Error.Loop(true, now);
+        return result;
+    }
+
+    if (channel < 0 ||
+        channel >= static_cast<int>(_channels.size()))
+    {
+        LOG_EF(__FUNCTION__,
+            "Canale fuori range | Device=%s | Zona=%s | Installazione=%s "
+            "| IP=%u.%u.%u.%u | Addr=%u | Channel=%d | Channels=%u",
+            GetName(),
+            GetZone(),
+            GetInstallationLocation(),
+            static_cast<unsigned>(_ip[0]),
+            static_cast<unsigned>(_ip[1]),
+            static_cast<unsigned>(_ip[2]),
+            static_cast<unsigned>(_ip[3]),
+            static_cast<unsigned>(_deviceAddress),
+            channel,
+            static_cast<unsigned>(_channels.size()));
+
+        Error.Loop(true, now);
+        return result;
+    }
+
+    const GenericPrgDeviceChannel& channelInfo =
+        _channels[channel];
+
+    result.itemsPerCall =
+        channelInfo.ItemsPerCall;
+
+    if (channelInfo.items <= 0 ||
+        channelInfo.ItemsPerCall <= 0)
+    {
+        LOG_EF(__FUNCTION__,
+            "Configurazione canale non valida | Device=%s "
+            "| Channel=%d | Items=%d | ItemsPerCall=%d",
+            GetName(),
+            channel,
+            channelInfo.items,
+            channelInfo.ItemsPerCall);
+
+        Error.Loop(true, now);
+        return result;
+    }
+
+    const int bankCount =
+        (channelInfo.items + MAX_CALLS - 1) /
+        MAX_CALLS;
+
+    bank %= bankCount;
+
+    const int jump =
+        bank * MAX_CALLS;
+
+    int startingAddr =
+        channelInfo.startingAddr + jump;
+
+    const int remaining =
+        channelInfo.items - jump;
+
+    result.startIndex =
+        jump;
+
+    result.items =
+        remaining < MAX_CALLS
+            ? remaining
+            : MAX_CALLS;
+
+    ++bank;
+
+    int requestedItems =
+        result.items;
+
+    int readCount =
+        0;
+
+    switch (channelInfo.hwType)
+    {
+        case Hold:
+        {
+            if (Error.IsInError())
+            {
+                Error.Loop(true, now);
+                return result;
+            }
+
+            requestedItems *=
+                channelInfo.ItemsPerCall;
+
+            readCount = cli.requestFrom(
+                _deviceAddress,
+                HOLDING_REGISTERS,
+                startingAddr,
+                requestedItems
+            );
+
+            if (readCount <= 0)
+            {
+                LOG_DF(__FUNCTION__,
+                    "READ HOLD fallita | Device=%s | Zona=%s "
+                    "| Installazione=%s | Errore=%s",
+                    GetName(),
+                    GetZone(),
+                    GetInstallationLocation(),
+                    cli.lastError());
+
+                Error.Loop(true, now);
+                return result;
+            }
+
+            for (int i = 0; i < readCount; ++i)
+            {
+                const long value =
+                    cli.read();
+
+                if (value < 0)
+                {
+                    LOG_DF(__FUNCTION__,
+                        "READ HOLD valore non valido | Device=%s | Index=%d",
+                        GetName(),
+                        i);
+
+                    Error.Loop(true, now);
+                    return result;
+                }
+
+                outBuffer[i] =
+                    static_cast<uint16_t>(value);
+            }
+
+            Error.Loop(false, now);
+            result.ok = true;
+            break;
+        }
+
+        case Input:
+        {
+            if (Error.IsInError())
+            {
+                Error.Loop(true, now);
+                return result;
+            }
+
+            requestedItems *=
+                channelInfo.ItemsPerCall;
+
+            readCount = cli.requestFrom(
+                _deviceAddress,
+                INPUT_REGISTERS,
+                startingAddr,
+                requestedItems
+            );
+
+            if (readCount <= 0)
+            {
+                if (!Error.Loop(true, now))
+                {
+                    LOG_DF(__FUNCTION__,
+                        "READ INPUT fallita | Device=%s | Zona=%s "
+                        "| Installazione=%s | IP=%u.%u.%u.%u "
+                        "| Addr=%u | Errore=%s",
+                        GetName(),
+                        GetZone(),
+                        GetInstallationLocation(),
+                        static_cast<unsigned>(_ip[0]),
+                        static_cast<unsigned>(_ip[1]),
+                        static_cast<unsigned>(_ip[2]),
+                        static_cast<unsigned>(_ip[3]),
+                        static_cast<unsigned>(_deviceAddress),
+                        cli.lastError());
+                }
+
+                return result;
+            }
+
+            for (int i = 0; i < readCount; ++i)
+            {
+                const long value =
+                    cli.read();
+
+                if (value < 0)
+                {
+                    Error.Loop(true, now);
+                    return result;
+                }
+
+                outBuffer[i] =
+                    static_cast<uint16_t>(value);
+            }
+
+            Error.Loop(false, now);
+            result.ok = true;
+            break;
+        }
+
+        case Discrete:
+        {
+            if (Error.IsInError())
+            {
+                Error.Loop(true, now);
+                return result;
+            }
+
+            readCount = cli.requestFrom(
+                _deviceAddress,
+                DISCRETE_INPUTS,
+                startingAddr,
+                requestedItems
+            );
+
+            if (readCount <= 0)
+            {
+                if (!Error.Loop(true, now))
+                {
+                    LOG_DF(__FUNCTION__,
+                        "READ DISCRETE fallita | Device=%s | Zona=%s "
+                        "| Installazione=%s | IP=%u.%u.%u.%u "
+                        "| Addr=%u | Errore=%s",
+                        GetName(),
+                        GetZone(),
+                        GetInstallationLocation(),
+                        static_cast<unsigned>(_ip[0]),
+                        static_cast<unsigned>(_ip[1]),
+                        static_cast<unsigned>(_ip[2]),
+                        static_cast<unsigned>(_ip[3]),
+                        static_cast<unsigned>(_deviceAddress),
+                        cli.lastError());
+                }
+
+                return result;
+            }
+
+            for (int i = 0; i < readCount; ++i)
+            {
+                const long value =
+                    cli.read();
+
+                if (value < 0)
+                {
+                    Error.Loop(true, now);
+                    return result;
+                }
+
+                outBuffer[i] =
+                    static_cast<uint16_t>(value);
+            }
+
+            Error.Loop(false, now);
+            result.ok = true;
+            break;
+        }
+
+        default:
+        {
+            LOG_EF(__FUNCTION__,
+                "Funzione READ sconosciuta | Device=%s "
+                "| Zona=%s | Installazione=%s | HwType=%d",
+                GetName(),
+                GetZone(),
+                GetInstallationLocation(),
+                static_cast<int>(channelInfo.hwType));
+
+            Error.Loop(true, now);
+            break;
+        }
+    }
+
+    return result;
+}
+
+inline bool GenericPrgDevice::Write(
+    DMPlatform::Modbus::TCPClient& mb,
+    int channel,
+    int address,
+    int value,
+    unsigned long now)
+{
+    if (channel < 0 ||
+        channel >= static_cast<int>(_channels.size()))
+    {
+        LOG_EF(
+            "GenericPrgDevice",
+            "Write channel out of range: name=%s channel=%d channels=%u",
+            GetName(),
+            channel,
+            static_cast<unsigned>(_channels.size())
+        );
+
+        return false;
+    }
+
+    const GenericPrgDeviceChannel& channelInfo =
+        _channels[channel];
+
+    if (channelInfo.type != DO &&
+        channelInfo.type != AO)
+    {
+        LOG_EF(
+            "GenericPrgDevice",
+            "Write definition error: DevAddr=%u StartAddr=%d Value=%d Type=%d",
+            _deviceAddress,
+            channelInfo.startingAddr,
+            value,
+            static_cast<int>(channelInfo.type)
+        );
+
+        return false;
+    }
+
+    if (address < 0 ||
+        address >= channelInfo.items)
+    {
+        LOG_EF(
+            "GenericPrgDevice",
+            "Write item out of range: name=%s channel=%d item=%d items=%d",
+            GetName(),
+            channel,
+            address,
+            channelInfo.items
+        );
+
+        return false;
+    }
+
+    /*
+     * address è l'indice logico dell'item nel canale.
+     *
+     * L'indirizzo Modbus reale deve includere:
+     *   - startingAddr del canale;
+     *   - ItemsPerCall per item multiregistro.
+     */
+    const int modbusAddress =
+        channelInfo.startingAddr +
+        address * channelInfo.ItemsPerCall;
+
+    int result = 0;
+
+    switch (channelInfo.hwType)
+    {
+        case Hold:
+        {
+            result = mb.holdingRegisterWrite(
+                _deviceAddress,
+                modbusAddress,
+                value
+            );
+
+            LOG_DF(
+                "GenericPrgDevice",
+                "WRITE HOLD name=%s unit=%u channel=%d item=%d register=%d value=%d result=%d",
+                GetName(),
+                static_cast<unsigned>(_deviceAddress),
+                channel,
+                address,
+                modbusAddress,
+                value,
+                result
+            );
+
+            if (!Error.Loop(result == 0, now))
+                return false;
+
+            return result != 0;
+        }
+
+        case Coil:
+        {
+            result = mb.coilWrite(
+                _deviceAddress,
+                modbusAddress,
+                value
+            );
+
+            LOG_DF(
+                "GenericPrgDevice",
+                "WRITE COIL name=%s unit=%u channel=%d item=%d address=%d value=%d result=%d",
+                GetName(),
+                static_cast<unsigned>(_deviceAddress),
+                channel,
+                address,
+                modbusAddress,
+                value,
+                result
+            );
+
+            if (!Error.Loop(result == 0, now))
+                return false;
+
+            return result != 0;
+        }
+
+        default:
+        {
+            LOG_EF(
+                "GenericPrgDevice",
+                "Unknown write type: name=%s unit=%u hwType=%d",
+                GetName(),
+                static_cast<unsigned>(_deviceAddress),
+                static_cast<int>(channelInfo.hwType)
+            );
+
+            return false;
+        }
+    }
+}
+
+#endif // DMPLC_HPP

@@ -42,6 +42,192 @@ constexpr int PriorityCount =
   }PriorityMgmt;
 
 
+// ============================================================================
+// CHANGE RATE MONITOR
+//
+// Conta le variazioni effettive senza std::sort e senza vector<RateEntry>.
+// Mantiene un report compatto ordinato con inserimento lineare.
+// ============================================================================
+class ChangeRateMonitor
+{
+public:
+    struct RateEntry
+    {
+        int area = -1;
+        uint32_t count = 0;
+        uint32_t ratePerSecond = 0;
+    };
+
+private:
+    static constexpr uint32_t REPORT_INTERVAL_MS = 1000UL;
+    static constexpr uint32_t HIGH_RATE_THRESHOLD = 25UL;
+    static constexpr size_t MAX_REPORT_ENTRIES = 8U;
+
+    std::vector<uint32_t> counters;
+    std::vector<int> activeAreas;
+    RateEntry report[MAX_REPORT_ENTRIES];
+    size_t reportCount = 0;
+    uint32_t lastCheck = 0;
+    bool initialized = false;
+
+public:
+    explicit ChangeRateMonitor(size_t areaCount = 0)
+        : counters(areaCount, 0)
+    {
+        activeAreas.reserve(areaCount);
+    }
+
+    inline void onChanged(int area)
+    {
+        if (area < 0)
+            return;
+
+        const size_t index =
+            static_cast<size_t>(area);
+
+        if (index >= counters.size())
+            return;
+
+        uint32_t& count = counters[index];
+
+        if (count == 0)
+            activeAreas.push_back(area);
+
+        if (count != UINT32_MAX)
+            ++count;
+    }
+
+    void tick(uint32_t now)
+    {
+        if (!initialized)
+        {
+            initialized = true;
+            lastCheck = now;
+            return;
+        }
+
+        const uint32_t elapsed =
+            now - lastCheck;
+
+        if (elapsed < REPORT_INTERVAL_MS)
+            return;
+
+        reportCount = 0;
+
+        for (size_t activeIndex = 0;
+             activeIndex < activeAreas.size();
+             ++activeIndex)
+        {
+            const int area =
+                activeAreas[activeIndex];
+
+            uint32_t& counter =
+                counters[static_cast<size_t>(area)];
+
+            const uint32_t count = counter;
+            counter = 0;
+
+            if (count == 0)
+                continue;
+
+            const uint32_t ratePerSecond =
+                calculateRatePerSecond(count, elapsed);
+
+            if (ratePerSecond <= HIGH_RATE_THRESHOLD)
+                continue;
+
+            RateEntry entry;
+            entry.area = area;
+            entry.count = count;
+            entry.ratePerSecond = ratePerSecond;
+
+            insertReportEntry(entry);
+        }
+
+        activeAreas.clear();
+        lastCheck = now;
+
+        for (size_t index = 0;
+             index < reportCount;
+             ++index)
+        {
+            const RateEntry& entry = report[index];
+
+            LOG_WF(
+                "RATE_MONITOR",
+                "Area=%d rate=%lu/s changes=%lu window=%lu ms",
+                entry.area,
+                static_cast<unsigned long>(entry.ratePerSecond),
+                static_cast<unsigned long>(entry.count),
+                static_cast<unsigned long>(elapsed)
+            );
+        }
+    }
+
+    inline size_t getReportCount() const
+    {
+        return reportCount;
+    }
+
+    inline const RateEntry* getReport() const
+    {
+        return report;
+    }
+
+private:
+    static uint32_t calculateRatePerSecond(
+        uint32_t count,
+        uint32_t elapsed)
+    {
+        if (elapsed == 0)
+            return 0;
+
+        return static_cast<uint32_t>(
+            (static_cast<uint64_t>(count) * 1000ULL) /
+            elapsed
+        );
+    }
+
+    void insertReportEntry(
+        const RateEntry& entry)
+    {
+        size_t insertPosition = 0;
+
+        while (insertPosition < reportCount &&
+               report[insertPosition].ratePerSecond >=
+                   entry.ratePerSecond)
+        {
+            ++insertPosition;
+        }
+
+        if (reportCount >= MAX_REPORT_ENTRIES &&
+            insertPosition >= MAX_REPORT_ENTRIES)
+        {
+            return;
+        }
+
+        size_t destination;
+
+        if (reportCount < MAX_REPORT_ENTRIES)
+        {
+            destination = reportCount;
+            ++reportCount;
+        }
+        else
+        {
+            destination = MAX_REPORT_ENTRIES - 1;
+        }
+
+        while (destination > insertPosition)
+        {
+            report[destination] = report[destination - 1];
+            --destination;
+        }
+
+        report[insertPosition] = entry;
+    }
+};
+
 class OwnerManager {
 public:
     enum Mode {
@@ -256,12 +442,498 @@ struct GenericSensorConfig {
         ANALOGIC,
         DIGITAL,
         BUFFER,
+        RUNTIME,
         CONSTANT
     };
 
     Type  type;
-    int   value;      // pin / bufferArea / constant
+    int   value;      // pin / bufferArea / runtimeHandle / constant
     float scale = 1.0f;
+    bool reverse = false; // false: split, true: compact
+};
+
+// ============================================================================
+// VALUE ACCESS
+//
+// Interfaccia neutra condivisa con Peer. Non dipende da implementazioni concrete
+// concrete. DomoManager fornisce la propria implementazione concreta.
+// ============================================================================
+class DMValueAccess
+{
+public:
+    virtual ~DMValueAccess() = default;
+
+    virtual int areaCount() const = 0;
+    virtual long readAreaFast(int area) const = 0;
+    virtual int areaToWrite(int area) const = 0;
+    virtual bool isReservedArea(int area) const = 0;
+};
+
+// ============================================================================
+// GENERIC SENSOR
+// ============================================================================
+class GenericSensor
+{
+public:
+    using Config = GenericSensorConfig;
+
+    static int readRaw(
+        const Config& cfg,
+        DMValueAccess& values)
+    {
+        switch (cfg.type)
+        {
+            case Config::Type::ANALOGIC:
+                return analogRead(cfg.value);
+
+            case Config::Type::DIGITAL:
+                return digitalRead(cfg.value);
+
+            case Config::Type::BUFFER:
+                return static_cast<int>(
+                    values.readAreaFast(cfg.value)
+                );
+
+            case Config::Type::CONSTANT:
+                return cfg.value;
+
+            case Config::Type::RUNTIME:
+                return 0;
+        }
+
+        return 0;
+    }
+
+    static float read(
+        const Config& cfg,
+        DMValueAccess& values)
+    {
+        return static_cast<float>(
+            readRaw(cfg, values)
+        ) * cfg.scale;
+    }
+};
+
+// ============================================================================
+// FALLING EDGE RESET MANAGER
+//
+// Contenitore dinamico della configurazione Falling Edge Reset.
+// Storage runtime piatto e gestione omogenea a BitSplitManager.
+// Input e output utilizzano GenericSensor::Config.
+// ============================================================================
+class FallingEdgeResetManager
+{
+public:
+    using Config = GenericSensor::Config;
+    using EntryIndex = size_t;
+
+    static constexpr EntryIndex INVALID_ENTRY =
+        static_cast<EntryIndex>(-1);
+
+    struct Output
+    {
+        Config target;
+    };
+
+    struct Entry
+    {
+        Config input;
+        size_t firstOutput = 0;
+        size_t outputCount = 0;
+        bool initialized = false;
+        bool previousState = false;
+    };
+
+private:
+    std::vector<Entry> entries;
+    std::vector<Output> outputs;
+    bool configurationClosed = false;
+
+public:
+    FallingEdgeResetManager() = default;
+
+    FallingEdgeResetManager(
+        const FallingEdgeResetManager&) = delete;
+
+    FallingEdgeResetManager& operator=(
+        const FallingEdgeResetManager&) = delete;
+
+    FallingEdgeResetManager(
+        FallingEdgeResetManager&&) = default;
+
+    FallingEdgeResetManager& operator=(
+        FallingEdgeResetManager&&) = default;
+
+    void beginConfiguration(
+        size_t expectedEntries,
+        size_t expectedOutputs)
+    {
+        if (configurationClosed)
+            return;
+
+        entries.reserve(expectedEntries);
+        outputs.reserve(expectedOutputs);
+    }
+
+    EntryIndex add(
+        const Config& input)
+    {
+        if (configurationClosed ||
+            !isValidInput(input))
+        {
+            return INVALID_ENTRY;
+        }
+
+        Entry entry;
+        entry.input = input;
+        entry.firstOutput = outputs.size();
+        entry.outputCount = 0;
+        entry.initialized = false;
+        entry.previousState = false;
+
+        entries.push_back(entry);
+
+        return entries.size() - 1;
+    }
+
+    bool add(
+        EntryIndex entryIndex,
+        const Config& target)
+    {
+        if (configurationClosed ||
+            entryIndex >= entries.size() ||
+            entryIndex != entries.size() - 1 ||
+            !isValidTarget(target))
+        {
+            return false;
+        }
+
+        outputs.push_back({ target });
+        ++entries[entryIndex].outputCount;
+
+        return true;
+    }
+
+    void endConfiguration()
+    {
+        configurationClosed = true;
+    }
+
+    bool isConfigurationClosed() const
+    {
+        return configurationClosed;
+    }
+
+    size_t entryCount() const
+    {
+        return entries.size();
+    }
+
+    size_t outputCount() const
+    {
+        return outputs.size();
+    }
+
+    const Entry* getEntry(
+        EntryIndex index) const
+    {
+        return index < entries.size()
+            ? &entries[index]
+            : nullptr;
+    }
+
+    const Output* getOutput(
+        EntryIndex entryIndex,
+        size_t outputIndex) const
+    {
+        const Entry* entry =
+            getEntry(entryIndex);
+
+        if (!entry ||
+            outputIndex >= entry->outputCount)
+        {
+            return nullptr;
+        }
+
+        const size_t absoluteIndex =
+            entry->firstOutput + outputIndex;
+
+        return absoluteIndex < outputs.size()
+            ? &outputs[absoluteIndex]
+            : nullptr;
+    }
+
+    bool handlesArea(
+        int area) const
+    {
+        for (const Entry& entry : entries)
+        {
+            if (entry.input.value == area)
+                return true;
+        }
+
+        return false;
+    }
+
+    template<typename Writer>
+    void processEvent(
+        int area,
+        long value,
+        Writer&& writer)
+    {
+        const bool currentState =
+            value != 0;
+
+        for (EntryIndex entryIndex = 0;
+             entryIndex < entries.size();
+             ++entryIndex)
+        {
+            Entry& entry =
+                entries[entryIndex];
+
+            if (entry.input.value != area)
+                continue;
+
+            if (!entry.initialized)
+            {
+                entry.initialized = true;
+                entry.previousState = currentState;
+                continue;
+            }
+
+            const bool fallingEdge =
+                entry.previousState &&
+                !currentState;
+
+            entry.previousState = currentState;
+
+            if (!fallingEdge)
+                continue;
+
+            for (size_t outputIndex = 0;
+                 outputIndex < entry.outputCount;
+                 ++outputIndex)
+            {
+                const Output* output =
+                    getOutput(entryIndex, outputIndex);
+
+                if (!output)
+                    continue;
+
+                writer(output->target, 0L);
+            }
+        }
+    }
+
+private:
+    static bool isValidInput(
+        const Config& input)
+    {
+        return
+            input.type == Config::Type::BUFFER ||
+            input.type == Config::Type::RUNTIME;
+    }
+
+    static bool isValidTarget(
+        const Config& target)
+    {
+        return
+            target.type == Config::Type::BUFFER ||
+            target.type == Config::Type::RUNTIME ||
+            target.type == Config::Type::DIGITAL;
+    }
+};
+
+// ============================================================================
+// BIT SPLIT MANAGER - PATCH 2
+//
+// Contenitore dinamico della configurazione di sbittamento.
+// Questa patch NON collega ancora il manager a DMRuntime, Buffer,
+// DMRuntimeStore o EventManager e non crea istanze globali.
+//
+// Le allocazioni avvengono esclusivamente quando beginConfiguration()/add()
+// vengono invocati esplicitamente dal futuro codice di setup.
+// ============================================================================
+class BitSplitManager
+{
+public:
+    using Config = GenericSensor::Config;
+    using SplitIndex = size_t;
+
+    static constexpr SplitIndex INVALID_SPLIT =
+        static_cast<SplitIndex>(-1);
+
+    struct Output
+    {
+        Config target;
+        uint8_t bitIndex = 0;
+        bool inverted = false;
+    };
+
+    struct Split
+    {
+        Config source;
+        bool reverse = false;
+        size_t firstOutput = 0;
+        size_t outputCount = 0;
+    };
+
+private:
+    std::vector<Split> splits;
+    std::vector<Output> outputs;
+    bool configurationClosed = false;
+
+public:
+    BitSplitManager() = default;
+
+    BitSplitManager(const BitSplitManager&) = delete;
+    BitSplitManager& operator=(const BitSplitManager&) = delete;
+
+    BitSplitManager(BitSplitManager&&) = default;
+    BitSplitManager& operator=(BitSplitManager&&) = default;
+
+    void beginConfiguration(
+        size_t expectedSplits,
+        size_t expectedOutputs)
+    {
+        if (configurationClosed)
+            return;
+
+        splits.reserve(expectedSplits);
+        outputs.reserve(expectedOutputs);
+    }
+
+    SplitIndex add(
+        const Config& source,
+        bool reverse)
+    {
+        if (configurationClosed ||
+            !isValidSource(source))
+        {
+            return INVALID_SPLIT;
+        }
+
+        Split split;
+
+        split.source = source;
+        split.reverse = reverse;
+        split.firstOutput = outputs.size();
+        split.outputCount = 0;
+
+        splits.push_back(split);
+
+        return splits.size() - 1;
+    }
+
+
+    bool add(
+        SplitIndex splitIndex,
+        const Config& target,
+        uint8_t bitIndex,
+        bool inverted = false)
+    {
+        if (configurationClosed ||
+            splitIndex >= splits.size() ||
+            bitIndex >= 32 ||
+            !isValidTarget(target))
+        {
+            return false;
+        }
+
+        // Le uscite di ogni split devono essere aggiunte consecutivamente.
+        // Questo mantiene tutte le destinazioni in un unico vettore compatto.
+        if (splitIndex != splits.size() - 1)
+            return false;
+
+        outputs.push_back({
+            target,
+            bitIndex,
+            inverted
+        });
+
+        ++splits[splitIndex].outputCount;
+        return true;
+    }
+
+    void endConfiguration()
+    {
+        configurationClosed = true;
+    }
+
+    bool isConfigurationClosed() const
+    {
+        return configurationClosed;
+    }
+
+    size_t splitCount() const
+    {
+        return splits.size();
+    }
+
+    size_t outputCount() const
+    {
+        return outputs.size();
+    }
+
+    const Split* getSplit(SplitIndex index) const
+    {
+        return index < splits.size()
+            ? &splits[index]
+            : nullptr;
+    }
+
+    const Output* getOutput(
+        SplitIndex splitIndex,
+        size_t outputIndex) const
+    {
+        const Split* split = getSplit(splitIndex);
+
+        if (!split || outputIndex >= split->outputCount)
+            return nullptr;
+
+        const size_t absoluteIndex =
+            split->firstOutput + outputIndex;
+
+        return absoluteIndex < outputs.size()
+            ? &outputs[absoluteIndex]
+            : nullptr;
+    }
+
+    bool handles(const Config& source) const
+    {
+        for (const Split& split : splits)
+        {
+            if (sameElement(split.source, source))
+                return true;
+        }
+
+        return false;
+    }
+
+private:
+    static bool isValidSource(const Config& source)
+    {
+        return
+            source.type == Config::Type::BUFFER ||
+            source.type == Config::Type::RUNTIME;
+    }
+
+    static bool isValidTarget(const Config& target)
+    {
+        return
+            target.type == Config::Type::BUFFER ||
+            target.type == Config::Type::RUNTIME ||
+            target.type == Config::Type::DIGITAL;
+    }
+
+    static bool sameElement(
+        const Config& left,
+        const Config& right)
+    {
+        return
+            left.type == right.type &&
+            left.value == right.value;
+    }
 };
 
 template<typename T>
@@ -2108,5 +2780,312 @@ inline uint16_t AreaRegistry::maxValue() {
     } autoRegInstance_##name;
 
 
+
+
+// ============================================================================
+// TOGGLE MANAGER
+//
+// Implementazione completa nel core. I metodi dipendenti dall accesso valori sono
+// tramite DMValueAccess, senza dipendenze da implementazioni concrete.
+// ============================================================================
+class ToggleManager
+{
+public:
+    struct ToggleSignalItem
+    {
+        ToggleSignal Toggle;
+        int areaRead;
+        std::vector<int> forwardsFromAreas;
+    };
+
+    struct ToggleResult
+    {
+        int area = -1;
+        long value = 0;
+        int toggleArea = -1;
+    };
+
+private:
+    std::vector<ToggleSignalItem> toggles;
+    std::unordered_map<int, size_t> cacheByArea;
+    std::unordered_map<int, size_t> cacheByForwardArea;
+    std::unordered_set<int> forwardAreasCache;
+
+public:
+    ToggleManager() = default;
+
+    bool handlesArea(int area) const
+    {
+        return cacheByArea.count(area) > 0 ||
+               cacheByForwardArea.count(area) > 0;
+    }
+
+    bool isForwardArea(int area) const
+    {
+        return forwardAreasCache.count(area) > 0;
+    }
+
+    const std::vector<ToggleSignalItem>& getAll() const
+    {
+        return toggles;
+    }
+
+    void add(int areaRead, std::vector<int> forwards = {})
+    {
+        toggles.push_back({ ToggleSignal(), areaRead, forwards });
+        const size_t index = toggles.size() - 1;
+        cacheByArea[areaRead] = index;
+
+        for (int forwardArea : forwards)
+        {
+            forwardAreasCache.insert(forwardArea);
+            cacheByForwardArea[forwardArea] = index;
+        }
+    }
+
+    ToggleSignalItem* operator[](size_t index)
+    {
+        return index < toggles.size()
+            ? &toggles[index]
+            : nullptr;
+    }
+
+    size_t size() const
+    {
+        return toggles.size();
+    }
+
+    ToggleSignalItem* get(size_t index)
+    {
+        return index < toggles.size()
+            ? &toggles[index]
+            : nullptr;
+    }
+
+    ToggleSignalItem* get(int areaRead)
+    {
+        const auto it = cacheByArea.find(areaRead);
+        if (it == cacheByArea.end())
+            return nullptr;
+
+        const size_t index = it->second;
+        return index < toggles.size()
+            ? &toggles[index]
+            : nullptr;
+    }
+
+    ToggleSignalItem* getByForwardArea(int area)
+    {
+        const auto it = cacheByForwardArea.find(area);
+        if (it == cacheByForwardArea.end())
+            return nullptr;
+
+        const size_t index = it->second;
+        return index < toggles.size()
+            ? &toggles[index]
+            : nullptr;
+    }
+
+    int getForwardValue(
+        int area,
+        DMValueAccess& values)
+    {
+        const int maxArea =
+            values.areaCount();
+
+        ToggleSignalItem* toggle = get(area);
+        if (!toggle)
+            return 0;
+
+        for (int forwardArea : toggle->forwardsFromAreas)
+        {
+            if (forwardArea >= 0 &&
+                forwardArea < maxArea &&
+                values.readAreaFast(forwardArea) > 0)
+            {
+                return 1;
+            }
+        }
+
+        return 0;
+    }
+
+    bool processEvent(
+        int area,
+        long value,
+        DMValueAccess& values,
+        unsigned long now,
+        ToggleResult& result)
+    {
+        (void)now;
+
+        ToggleSignalItem* toggle = get(area);
+        if (!toggle)
+            toggle = getByForwardArea(area);
+        if (!toggle)
+            return false;
+
+        result.toggleArea = toggle->areaRead;
+        long signalIn = value;
+
+        if (!toggle->forwardsFromAreas.empty())
+        {
+            signalIn =
+                getForwardValue(
+                    toggle->areaRead,
+                    values
+                );
+
+            if (signalIn == 0)
+                signalIn = value;
+        }
+
+        const int areaToWrite =
+            values.areaToWrite(toggle->areaRead);
+
+        if (areaToWrite > 0)
+        {
+            if (areaToWrite >=
+                values.areaCount())
+            {
+                return false;
+            }
+
+            long toggleOut =
+                values.readAreaFast(areaToWrite);
+
+            if (!toggle->Toggle.change(
+                    signalIn,
+                    toggleOut))
+            {
+                return false;
+            }
+
+            result.area = areaToWrite;
+            result.value = toggleOut;
+            return true;
+        }
+
+        long toggleOut = 0;
+        if (!toggle->Toggle.changeRoute(
+                signalIn,
+                toggleOut))
+        {
+            return false;
+        }
+
+        result.area = -1;
+        result.value = toggleOut;
+        return true;
+    }
+};
+
+// ============================================================================
+// ROUTE MANAGER
+//
+// Implementazione completa nel core tramite DMValueAccess.
+// ============================================================================
+class RouteManager
+{
+public:
+    struct RouteAction
+    {
+        int targetArea;
+        int value;
+    };
+
+    struct RouteCase
+    {
+        int triggerValue;
+        std::vector<RouteAction> actions;
+    };
+
+    struct RouteConfig
+    {
+        String name;
+        int triggerArea;
+        std::vector<RouteCase> cases;
+    };
+
+    struct SafeRoute
+    {
+        std::vector<RouteCase> cases;
+    };
+
+private:
+    std::unordered_map<int, SafeRoute> routes;
+
+public:
+    void load(const std::vector<RouteConfig>& config)
+    {
+        for (const auto& route : config)
+        {
+            routes[route.triggerArea] =
+            {
+                route.cases
+            };
+        }
+    }
+
+    bool hasRoute(int area) const
+    {
+        return routes.find(area) != routes.end();
+    }
+
+    std::vector<RouteAction> execute(
+        int srcArea,
+        long value,
+        DMValueAccess& values) const
+    {
+        std::vector<RouteAction> actions;
+
+        const auto routeIt = routes.find(srcArea);
+        if (routeIt == routes.end())
+            return actions;
+
+        const SafeRoute& route = routeIt->second;
+        const int bufferSize =
+            values.areaCount();
+
+        for (const RouteCase& routeCase : route.cases)
+        {
+            if (routeCase.triggerValue != value)
+                continue;
+
+            for (const RouteAction& action : routeCase.actions)
+            {
+                if (action.targetArea < 0 ||
+                    action.targetArea >= bufferSize)
+                {
+                    LOG_WF(
+                        "RouteManager",
+                        "Skip route write: invalid targetArea=%d (srcArea=%d)",
+                        action.targetArea,
+                        srcArea
+                    );
+                    continue;
+                }
+
+                if (values.isReservedArea(
+                        action.targetArea))
+                {
+                    LOG_WF(
+                        "RouteManager",
+                        "Skip route write: reserved targetArea=%d (srcArea=%d)",
+                        action.targetArea,
+                        srcArea
+                    );
+                    continue;
+                }
+
+                actions.push_back(action);
+            }
+
+            break;
+        }
+
+        return actions;
+    }
+};
 
 #endif

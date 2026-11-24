@@ -2740,6 +2740,116 @@ private:
         }
 
         // --------------------------------------------------------
+        // SENSOR -> EXPLICIT ZONE CONFIGURATION
+        //
+        // nullptr = sensore globale/non zonato.
+        // Ogni nome zona non nullo deve essere dichiarato anche
+        // in FrontendConfig::Security::zones[].
+        // --------------------------------------------------------
+        for(size_t i = 0; i < cfg->count; ++i)
+        {
+            const auto& sensor = cfg->sensors[i];
+            if(!sensor.zone)
+                continue;
+
+            bool found = false;
+            for(size_t z = 0; z < cfg->zoneCount; ++z)
+            {
+                const auto& zone = cfg->zones[z];
+                if(zone.name &&
+                std::strcmp(sensor.zone, zone.name) == 0)
+                {
+                    found = true;
+                    break;
+                }
+            }
+
+            if(!found)
+            {
+                LOG_EF(
+                    "SecurityOrchestrator",
+                    "Validate: sensor[%u] '%s' references unconfigured zone '%s'",
+                    (unsigned)i,
+                    sensor.name,
+                    sensor.zone
+                );
+                return false;
+            }
+        }
+
+        // --------------------------------------------------------
+        // ZONE COMMAND AREAS
+        // --------------------------------------------------------
+        for(size_t i = 0; i < cfg->zoneCount; ++i)
+        {
+            const auto& zone = cfg->zones[i];
+            if(zone.cmdArea < 0)
+            {
+                LOG_EF(
+                    "SecurityOrchestrator",
+                    "Validate: zone[%u] '%s' has invalid cmdArea=%d",
+                    (unsigned)i,
+                    zone.name ? zone.name : "?",
+                    zone.cmdArea
+                );
+                return false;
+            }
+            if(zone.cmdArea == zone.statusArea)
+            {
+                LOG_EF(
+                    "SecurityOrchestrator",
+                    "Validate: zone '%s' cmdArea=%d collides with its statusArea",
+                    zone.name,
+                    zone.cmdArea
+                );
+                return false;
+            }
+            if((cfg->statusArea >= 0 && zone.cmdArea == cfg->statusArea) ||
+               (cfg->eventArea >= 0 && zone.cmdArea == cfg->eventArea) ||
+               (cfg->panelCommandArea >= 0 && zone.cmdArea == cfg->panelCommandArea) ||
+               (cfg->panelBitCommandArea >= 0 && zone.cmdArea == cfg->panelBitCommandArea))
+            {
+                LOG_EF(
+                    "SecurityOrchestrator",
+                    "Validate: zone '%s' cmdArea=%d collides with a global security area",
+                    zone.name,
+                    zone.cmdArea
+                );
+                return false;
+            }
+            for(size_t j = i + 1; j < cfg->zoneCount; ++j)
+            {
+                if(cfg->zones[j].cmdArea == zone.cmdArea)
+                {
+                    LOG_EF(
+                        "SecurityOrchestrator",
+                        "Validate: duplicated zone cmdArea=%d ('%s' and '%s')",
+                        zone.cmdArea,
+                        zone.name,
+                        cfg->zones[j].name ? cfg->zones[j].name : "?"
+                    );
+                    return false;
+                }
+            }
+            for(size_t j = 0; j < cfg->count; ++j)
+            {
+                const auto& sensor = cfg->sensors[j];
+                if(zone.cmdArea == sensor.cmdArea ||
+                   zone.cmdArea == sensor.statusArea ||
+                   zone.statusArea == sensor.cmdArea)
+                {
+                    LOG_EF(
+                        "SecurityOrchestrator",
+                        "Validate: zone '%s' areas collide with sensor '%s'",
+                        zone.name,
+                        sensor.name
+                    );
+                    return false;
+                }
+            }
+        }
+
+        // --------------------------------------------------------
         // GLOBAL SECURITY AREAS
         // --------------------------------------------------------
 
@@ -3172,7 +3282,7 @@ public:
                 return false;
 
             const bool enable =
-                !bitRead(value, 0);
+                bitRead(value, 0);
 
             const bool engageRT =
                 bitRead(value, 1);
@@ -3239,7 +3349,7 @@ public:
             if(!zoneCfg.name)
                 return false;
 
-            const bool enable = !bitRead(value, 0);
+            const bool enable = bitRead(value, 0);
 
             const bool wasEnabled =
                 ws.Zones().IsZoneEnabled(
@@ -4553,13 +4663,13 @@ inline void AlarmPanelInterface::ReportInconsistencies()
                 inconsistent = true;
             }
 
-            if (!cfg.zone || !cfg.zone[0])
+            if (cfg.zone && !cfg.zone[0])
             {
-                LOG_IF(TAG, "WARNING: sensor[%u] '%s' has no zone",
+                LOG_IF(TAG, "WARNING: sensor[%u] '%s' has empty zone",
                        (unsigned)i, name);
                 inconsistent = true;
             }
-            else if (ws.GetZoneIndex(cfg.zone) < 0)
+            else if (cfg.zone && ws.GetZoneIndex(cfg.zone) < 0)
             {
                 LOG_IF(TAG, "WARNING: sensor[%u] '%s' references unknown zone '%s'",
                        (unsigned)i, name, cfg.zone);
@@ -5572,7 +5682,16 @@ public:
 
     bool getGlobalTrouble() const override
     {
-        return !activeTroubleZones.empty();
+        auto& ws =
+            SecurityOrchestrator::getWiredSensors();
+
+        const auto& faults =
+            SecurityOrchestrator::getBoardFaults();
+
+        return
+            !activeTroubleZones.empty() ||
+            faults.GetEnabledSensorAnomalyCount(ws) > 0 ||
+            faults.GetEnabledZoneAnomalyCount(ws) > 0;
     }
 
     // ============================================================

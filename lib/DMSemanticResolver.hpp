@@ -875,6 +875,8 @@ public:
         resolveDerivedAreas(
             introspection
         );
+        // La zona dipende dal gruppo semantico definitivo.
+        introspection.resolveZones();
 
 
         // --------------------------------------------------------------------

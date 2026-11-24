@@ -25,98 +25,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "DMBaseClassCore.hpp"
+
 #define LOG_LEVEL LogLevel::INFO
 #include "DMLogger.hpp"
-
-// ============================================================================
-// CHANGE RATE MONITOR
-// ============================================================================
-
-class ChangeRateMonitor
-{
-public:
-    ChangeRateMonitor()
-    {
-        counters.reserve(INITIAL_RESERVE);
-        snapshot.reserve(INITIAL_RESERVE);
-    }
-
-    inline void onChanged(int area)
-    {
-        counters[area]++;
-    }
-
-    inline void tick(uint32_t now)
-    {
-        if (lastCheck == 0)
-        {
-            lastCheck = now;
-            return;
-        }
-
-        if (now - lastCheck < REPORT_INTERVAL_MS)
-            return;
-
-        snapshot.clear();
-        snapshot.reserve(counters.size());
-
-        for (const auto& entry : counters)
-        {
-            const int area = entry.first;
-            const uint16_t count = entry.second;
-
-            snapshot.push_back({
-                area,
-                count
-            });
-
-            if (count > ANALOG_THRESHOLD)
-            {
-                LOG_WF(
-                    "RATE_ANALOG",
-                    "Area=%d changed=%u/s (HIGH RATE)",
-                    area,
-                    count
-                );
-            }
-        }
-
-        counters.clear();
-        lastCheck = now;
-    }
-
-    struct RateEntry
-    {
-        int area;
-        uint16_t count;
-    };
-
-    std::vector<RateEntry> getSortedReport() const
-    {
-        std::vector<RateEntry> sorted = snapshot;
-
-        std::sort(
-            sorted.begin(),
-            sorted.end(),
-            [](const RateEntry& a, const RateEntry& b)
-            {
-                return a.count > b.count;
-            }
-        );
-
-        return sorted;
-    }
-
-private:
-    static constexpr uint32_t REPORT_INTERVAL_MS = 1000;
-    static constexpr uint16_t ANALOG_THRESHOLD = 25;
-    static constexpr size_t INITIAL_RESERVE = 256;
-
-    std::unordered_map<int, uint16_t> counters;
-    std::vector<RateEntry> snapshot;
-
-    uint32_t lastCheck = 0;
-};
 
 
 // ============================================================================
@@ -184,62 +96,57 @@ public:
 
 
 // ============================================================================
-// BUFFER TYPES
-// ============================================================================
-
-struct BufferSourceInfo
-{
-    unsigned long time;
-    long value;
-    long prevValue;
-};
-
-
-struct BufferInfo
-{
-    BufferSourceInfo field;
-
-    bool Reverse =
-        false;
-
-    int areaToWrite =
-        -1;
-
-    String name;
-
-    bool isVirtual =
-        false;
-
-    /*
-     * Stato storico runtime.
-     *
-     * Viene impostato alla prima variazione effettiva del valore:
-     *
-     *     nuovoValore != valoreCorrente
-     *
-     * Non coincide con:
-     *
-     * - la configurazione dell'area;
-     * - la registrazione in AreaTracker;
-     * - la presenza nella mappa transitoria _changed.
-     *
-     * Non viene cancellato da ResetElement() o ResetAll().
-     *
-     * Utilizzo principale:
-     *
-     *     snapshot iniziale del Knob.
-     */
-    bool hasEverChanged =
-        false;
-};
-
-
-// ============================================================================
 // BUFFER
 // ============================================================================
 
-class Buffer
+class Buffer : public DMValueAccess
 {
+public:
+    struct SourceInfo
+    {
+        unsigned long time;
+        long value;
+        long prevValue;
+    };
+
+    struct Info
+    {
+        SourceInfo field;
+
+        bool Reverse =
+            false;
+
+        int areaToWrite =
+            -1;
+
+        String name;
+
+        bool isVirtual =
+            false;
+
+        /*
+        * Stato storico runtime.
+        *
+        * Viene impostato alla prima variazione effettiva del valore:
+        *
+        *     nuovoValore != valoreCorrente
+        *
+        * Non coincide con:
+        *
+        * - la configurazione dell'area;
+        * - la registrazione in AreaTracker;
+        * - la presenza nella mappa transitoria _changed.
+        *
+        * Non viene cancellato da ResetElement() o ResetAll().
+        *
+        * Utilizzo principale:
+        *
+        *     snapshot iniziale del Knob.
+        */
+        bool hasEverChanged =
+            false;
+    };
+
 private:
 
     ChangeRateMonitor monitor;
@@ -258,6 +165,39 @@ public:
     // ========================================================================
 
     static constexpr int NO_AREA = -1;
+
+      struct ReservedAreas
+      {
+          static constexpr int TRASH = 0;
+          static constexpr int SYSTEM_ERRORS = 1;
+          static constexpr int SYSTEM_RUNNING_T = 2;
+          static constexpr int LAST = 9;
+
+          static constexpr bool contains(int area)
+          {
+              return area >= TRASH && area <= LAST;
+          }
+      };
+
+      int areaCount() const override
+      {
+          return static_cast<int>(size());
+      }
+
+      long readAreaFast(int area) const override
+      {
+          return getValueFast(area);
+      }
+
+      int areaToWrite(int area) const override
+      {
+          return GetAreaToWrite(area);
+      }
+
+      bool isReservedArea(int area) const override
+      {
+          return ReservedAreas::contains(area);
+      }
 
 
     // ========================================================================
@@ -287,7 +227,7 @@ public:
         if (items > 0)
         {
             _buffer =
-                new BufferInfo[
+                new Info[
                     items
                 ];
         }
@@ -302,7 +242,7 @@ public:
             ++area
         )
         {
-            BufferInfo& info =
+            Info& info =
                 _buffer[area];
 
             info.field =
@@ -510,10 +450,10 @@ public:
                 WriteResult::ERROR;
         }
 
-        BufferInfo& info =
+        Info& info =
             _buffer[area];
 
-        BufferSourceInfo& entry =
+        SourceInfo& entry =
             info.field;
 
         // ========================================================
@@ -582,7 +522,7 @@ public:
 
     inline bool GetData(
         int area,
-        BufferSourceInfo& out) const
+       SourceInfo& out) const
     {
         if (!isValidArea(area))
         {
@@ -608,14 +548,14 @@ public:
 
     // Accesso rapido interno:
     // usare quando l'area è già sicuramente valida.
-    inline const BufferSourceInfo& getFieldEntry(
+    inline const SourceInfo& getFieldEntry(
         int area) const
     {
         return _buffer[area].field;
     }
 
 
-    inline BufferSourceInfo& getFieldEntry(
+    inline SourceInfo& getFieldEntry(
         int area)
     {
         return _buffer[area].field;
@@ -1136,7 +1076,7 @@ private:
 
     int _items = 0;
 
-    BufferInfo* _buffer = nullptr;
+    Info* _buffer = nullptr;
 
     /*
      * SET DI AREE MODIFICATE.
@@ -1148,5 +1088,7 @@ private:
      */
     std::unordered_set<int> _changed;
 };
+
+
 
 #endif
